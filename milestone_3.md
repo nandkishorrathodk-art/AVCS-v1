@@ -31,3 +31,4 @@ Connect AVCS's closed-loop visual servoing engine directly to the operating syst
 1. The cursor moves smoothly across the screen toward designated gaze targets with zero instantaneous coordinate jumping.
 2. Servoing achieves target contact ($r \le 0.025$) within $\le 350\text{ ms}$ on standard desktop resolutions.
 3. User can abort agent cursor control at any time by moving the mouse to a designated corner of the screen.
+

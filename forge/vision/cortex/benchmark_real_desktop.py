@@ -17,6 +17,7 @@ Measures:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -261,7 +262,7 @@ class RealisticDesktopRenderer:
         )
 
 
-def run_desktop_diversity_benchmark() -> Dict[str, Any]:
+def run_desktop_diversity_benchmark(weights_path: Optional[str] = None) -> Dict[str, Any]:
     """Runs AVCS across all 5 desktop application environments."""
     print("=" * 70)
     print("   AVCS REAL DESKTOP SCREEN DIVERSITY BENCHMARK (POC-7)           ")
@@ -271,6 +272,12 @@ def run_desktop_diversity_benchmark() -> Dict[str, Any]:
     print(f"Inference Device: {device} | Model: ArtificialVisualCortex (1.12M params)")
 
     cortex = ArtificialVisualCortex().to(device).eval()
+    if weights_path and os.path.exists(weights_path):
+        print(f"Loaded trained weights from: {weights_path}")
+        cortex.load_weights(weights_path, strict=False)
+    else:
+        print("Running with initialized baseline weights.")
+
     renderer = RealisticDesktopRenderer(width=1280, height=720)
 
     test_apps = [
@@ -345,6 +352,19 @@ def run_desktop_diversity_benchmark() -> Dict[str, Any]:
     }
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Real Desktop Screen Diversity Benchmark (POC-7)")
+    default_w = "runs/weights/avcs_cortex_weights.pt"
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default=default_w if os.path.exists(default_w) else None,
+        help="Path to trained AVCS weights checkpoint (.pt)",
+    )
+    args = parser.parse_args()
+    run_desktop_diversity_benchmark(weights_path=args.weights)
+
+
 if __name__ == "__main__":
-    run_desktop_diversity_benchmark()
+    main()
 

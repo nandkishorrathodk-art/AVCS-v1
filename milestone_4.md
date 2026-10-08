@@ -28,3 +28,4 @@ Provide plug-and-play visual adapters that sit directly in front of existing com
 ## 3. Acceptance Criteria
 1. Running an automated task through the AVCS Claude adapter reduces VLM token consumption by $\ge 75\%$ compared to standard 3-second screenshot loops.
 2. The Playwright adapter executes visual button clicks without needing any CSS selector, XPath, or DOM ID.
+

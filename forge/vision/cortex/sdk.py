@@ -6,7 +6,7 @@ RPA engineers, and computer-use automation systems.
 from __future__ import annotations
 
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -38,14 +38,27 @@ class ScreenEye:
         fps: int = 25,
         device: Optional[str] = None,
         source: Optional[object] = None,
+        weights_path: Optional[str] = None,
+        load_pretrained: bool = True,
     ) -> None:
         self.fps = fps
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.source = source or open_capture()
         self.cortex = ArtificialVisualCortex().to(self.device).eval()
 
+        self.weights_loaded: bool = False
+        if load_pretrained:
+            from avcs.weights import load_avcs_weights
+            self.weights_loaded = load_avcs_weights(
+                self.cortex,
+                path=weights_path,
+                device=self.device,
+                strict=False,
+            )
+
         self._change_callbacks: List[Callable[[CortexState], None]] = []
-        self._surprise_callbacks: List[Callable[[CortexState], None]] = []
+        self._surprise_callbacks: List[Tuple[float, Callable[[CortexState], None]]] = []
+        self._affordance_callbacks: List[Tuple[str, float, Callable[[CortexState], None]]] = []
 
         self.engine = AVCSInferenceEngine(
             cortex=self.cortex,
@@ -99,6 +112,10 @@ class ScreenEye:
         self.cortex.retina.update_fixation(target_fixation=target)
         return target
 
+    def locate(self, query: str) -> Tuple[float, float]:
+        """Alias for look_at: returns normalized (x, y) target coordinates."""
+        return self.look_at(query)
+
     def steer_hand(
         self,
         current_cursor: Tuple[float, float],
@@ -144,10 +161,47 @@ class ScreenEye:
         self._change_callbacks.append(callback)
         return callback
 
-    def on_surprise(self, callback: Callable[[CortexState], None]) -> Callable[[CortexState], None]:
-        """Decorator or method to register a surprise/anomaly event listener."""
-        self._surprise_callbacks.append(callback)
-        return callback
+    def on_surprise(
+        self,
+        callback_or_threshold: Any = None,
+        threshold: float = 0.3,
+    ) -> Any:
+        """Decorator or method to register a surprise/anomaly event listener.
+
+        Supports both styles:
+        >>> @eye.on_surprise
+        ... def alert(state): ...
+        >>> @eye.on_surprise(threshold=0.45)
+        ... def alert(state): ...
+        """
+        if callable(callback_or_threshold):
+            # Bare decorator: @eye.on_surprise
+            self._surprise_callbacks.append((threshold, callback_or_threshold))
+            return callback_or_threshold
+
+        # Parameterized decorator: @eye.on_surprise(threshold=0.45)
+        effective_thresh = (
+            float(callback_or_threshold)
+            if isinstance(callback_or_threshold, (int, float))
+            else threshold
+        )
+
+        def decorator(cb: Callable[[CortexState], None]) -> Callable[[CortexState], None]:
+            self._surprise_callbacks.append((effective_thresh, cb))
+            return cb
+
+        return decorator
+
+    def on_affordance(
+        self,
+        action_type: str = "clickable",
+        min_confidence: float = 0.5,
+    ) -> Callable[[Callable[[CortexState], None]], Callable[[CortexState], None]]:
+        """Decorator to trigger callbacks when specific interactive affordances appear."""
+        def decorator(cb: Callable[[CortexState], None]) -> Callable[[CortexState], None]:
+            self._affordance_callbacks.append((action_type, min_confidence, cb))
+            return cb
+        return decorator
 
     def _dispatch_state(self, state: CortexState) -> None:
         for cb in self._change_callbacks:
@@ -156,16 +210,29 @@ class ScreenEye:
             except Exception as e:
                 print(f"[ScreenEye] Callback error: {e}")
 
-    def _dispatch_surprise(self, state: CortexState) -> None:
-        for cb in self._surprise_callbacks:
+        for act_type, min_conf, cb in self._affordance_callbacks:
             try:
-                cb(state)
+                has_affordance = any(
+                    act == act_type and conf >= min_conf
+                    for _, _, act, conf in (state.action_hotspots or [])
+                )
+                if has_affordance:
+                    cb(state)
             except Exception as e:
-                print(f"[ScreenEye] Surprise callback error: {e}")
+                print(f"[ScreenEye] Affordance callback error: {e}")
+
+    def _dispatch_surprise(self, state: CortexState) -> None:
+        for thresh, cb in self._surprise_callbacks:
+            if state.surprise_score >= thresh:
+                try:
+                    cb(state)
+                except Exception as e:
+                    print(f"[ScreenEye] Surprise callback error: {e}")
 
     def __enter__(self) -> ScreenEye:
         return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
+
 

@@ -360,7 +360,7 @@ def run_hud(
     print(f"\n\nPerception loop finished. {frame_count} frames processed.")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Live AVCS Visual HUD Dashboard")
     parser.add_argument("--port", type=int, default=8899, help="HTTP stream port")
     parser.add_argument("--seconds", type=float, default=6.0, help="Duration to run")
@@ -376,3 +376,7 @@ if __name__ == "__main__":
         stream=args.stream,
         fps_target=args.fps,
     )
+
+
+if __name__ == "__main__":
+    main()

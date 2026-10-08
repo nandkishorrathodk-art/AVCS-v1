@@ -250,3 +250,9 @@ class ArtificialVisualCortex(nn.Module):
             query_relevance_map=rel_map_np,
             inference_ms=dt,
         )
+
+    def load_weights(self, weights_path: str, strict: bool = False) -> None:
+        """Loads trained weights checkpoint into the cortex modules."""
+        state = torch.load(weights_path, map_location="cpu")
+        self.load_state_dict(state, strict=strict)
+

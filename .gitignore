@@ -4,3 +4,6 @@ runs/
 .pytest_cache/
 *.pt
 kaggle_logs*/
+build/
+dist/
+*.egg-info/

@@ -28,3 +28,4 @@ Provide an enterprise-ready, zero-latency visual stream server (`dashboard.py` /
 ## 3. Acceptance Criteria
 1. The dashboard serves fluid $\ge 30\text{ FPS}$ visual stream to standard web browsers (Chrome, Edge, Firefox, Safari) with $< 50\text{ ms}$ stream latency.
 2. Multiple concurrent virtual agent screens can be monitored simultaneously from a single central console.
+
