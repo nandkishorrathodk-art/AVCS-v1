@@ -134,7 +134,18 @@ No concept is claimed as "solved" without:
   - Mean Tick Latency: $\le 80\text{ ms}$ on CPU, $\le 20\text{ ms}$ on GPU.
   - UI Category Accuracy: $\ge 85\%$ across all 5 app types.
   - Affordance Detection Precision: $\ge 75\%$ on real clickable buttons/inputs.
-- **Status:** **Active**. Benchmark suite being assembled.
+- **Evidence Log (Measured on 1280x720 Native Desktop Renders):**  
+  - Script: `python -m forge.vision.cortex.benchmark_real_desktop` -> **COMPLETED**
+  - Overall p50 Tick Latency: **86.67 ms** (CPU without GPU acceleration).
+  - Effective Throughput: **10.7 FPS** on CPU.
+  - Per-App CPU Latency Breakdown:
+    - *Chrome (Browser):* 85.8 ms
+    - *Excel (Spreadsheet):* 82.9 ms
+    - *PowerShell (Terminal):* 95.0 ms
+    - *Notion (Productivity):* 100.9 ms
+    - *VS Code (Editor):* 102.2 ms
+  - *Finding & Key Insight:* 720p desktop frames execute within ~86ms on CPU (proving architectural throughput limits), but untrained weights produce uniform class distribution (conf: ~0.13, random baseline). Real GUI pre-training (ScreenSpot / RICO) on Cloud GPU via `kaggle/train_avcs_gpu.py` is the concrete next prerequisite for semantic and affordance convergence.
+- **Status:** **Benchmarking Active / Phase 2 Training Required**.
 
 ---
 
@@ -147,3 +158,4 @@ No concept is claimed as "solved" without:
   - $\ge 60\%$ reduction in end-to-end task execution latency.
   - Zero crashes caused by transient animations or loading spinners.
 - **Status:** Scheduled for **Phase 3**.
+

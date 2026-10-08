@@ -256,3 +256,17 @@ def test_visual_hud_renderer():
     img = hud.render(frame, state, motor, dt_ms=25.0, fps=40.0)
     assert img.size == (480, 270)
 
+
+def test_realistic_desktop_renderer():
+    from forge.vision.cortex.benchmark_real_desktop import RealisticDesktopRenderer
+
+    renderer = RealisticDesktopRenderer(width=320, height=180)
+    vscode = renderer.render_vscode()
+    assert vscode.frame.shape == (180, 320, 3)
+    assert vscode.category_target == "editor_code"
+
+    chrome = renderer.render_chrome()
+    assert chrome.frame.shape == (180, 320, 3)
+    assert chrome.category_target == "browser_webpage"
+
+
