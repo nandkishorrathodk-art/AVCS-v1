@@ -347,3 +347,4 @@ def run_desktop_diversity_benchmark() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     run_desktop_diversity_benchmark()
+

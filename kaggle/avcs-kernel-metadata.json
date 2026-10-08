@@ -1,6 +1,6 @@
 {
   "id": "nandkishorrathod/avcs-visual-cortex-training",
-  "title": "AVCS - Artificial Visual Cortex for Screens (GPU Training)",
+  "title": "AVCS Visual Cortex Training",
   "code_file": "train_avcs_gpu.py",
   "language": "python",
   "kernel_type": "script",
