@@ -233,3 +233,4 @@ class ScreenEye:
 
 Distributed under the **Apache-2.0 License**. See [LICENSE](LICENSE) for details.  
 Built with pride by the **Praxis Neural** research team.
+

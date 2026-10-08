@@ -139,6 +139,32 @@ class ScreenEye:
         _, aligned = self.steer_hand(current_cursor, target_gaze=target_gaze)
         return aligned
 
+    def steer_hand_physical(
+        self,
+        target_gaze: Optional[Tuple[float, float]] = None,
+        click_on_arrival: bool = False,
+        speed_factor: float = 1.0,
+        timeout_seconds: float = 1.5,
+        force_virtual: bool = False,
+        realtime: bool = True,
+    ) -> Any:
+        """Physically steers the operating system mouse cursor to the gaze target.
+
+        Uses closed-loop Fitts' Law velocity curves with zero coordinate jumping.
+        Features emergency corner breakout safety abort.
+        """
+        from forge.vision.cortex.motor import HandEyeServoingController, get_default_driver
+        driver = get_default_driver(force_virtual=force_virtual)
+        controller = HandEyeServoingController(driver=driver)
+        gaze = target_gaze or self.cortex.retina.current_fixation
+        return controller.servo_to(
+            target_gaze=gaze,
+            timeout_seconds=timeout_seconds,
+            click_on_arrival=click_on_arrival,
+            speed_factor=speed_factor,
+            realtime=realtime,
+        )
+
     def get_affordances(self, action_type: str = "clickable") -> List[Tuple[float, float, float]]:
         """Returns list of normalized (x, y, confidence) points for interactive controls."""
         state = self.current_state or self.perceive_now()
