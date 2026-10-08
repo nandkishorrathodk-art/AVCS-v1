@@ -15,6 +15,8 @@ from forge.vision.cortex.core import (
     RetinalFoveation,
     RetinalView,
     VentralSemanticStream,
+    VisualMotorState,
+    VisualServoingEngine,
 )
 from forge.vision.cortex.data import (
     ProceduralScreenGenerator,
@@ -28,20 +30,22 @@ from forge.vision.cortex.inference import (
     export_torchscript,
 )
 from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
+from forge.vision.cortex.sdk import ScreenEye
 from forge.vision.cortex.training import (
     AVCSCloudTrainer,
     AVCSMultiTaskLoss,
 )
 
 __all__ = [
-    # Top-Level Model & State
+    # Top-Level SDK, Model & State
+    "ScreenEye",
     "ArtificialVisualCortex",
     "CortexState",
     "CortexConfig",
     "ModelConfig",
     "RetinaConfig",
     "TrainingConfig",
-    # Core Streams
+    # Core Streams & Servoing
     "RetinalFoveation",
     "RetinalView",
     "CorticalBackbone",
@@ -49,6 +53,8 @@ __all__ = [
     "VentralSemanticStream",
     "LanguageModulation",
     "PredictiveCodingEngine",
+    "VisualServoingEngine",
+    "VisualMotorState",
     # Ontologies
     "AFFORDANCE_CLASSES",
     "UI_CATEGORIES",

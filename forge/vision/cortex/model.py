@@ -23,6 +23,7 @@ from forge.vision.cortex.core.predictive import (
     PredictiveCodingEngine,
     decode_stability,
 )
+from forge.vision.cortex.core.servoing import VisualMotorState, VisualServoingEngine
 from forge.vision.cortex.core.ventral import UI_CATEGORIES, VentralSemanticStream
 
 
@@ -36,8 +37,10 @@ class CortexState:
     stability_state: str                  # "stable", "animating", "transitioning", "surprise_event"
     surprise_score: float                 # Temporal prediction error
     fixation: Tuple[float, float]         # Current gaze point (x, y) in [0, 1]
-    action_hotspots: List[Tuple[float, float, str, float]] # (x, y, action_type, conf)
-    query_target: Optional[Tuple[float, float]] = None    # Language grounded (x, y) if query given
+    motor_flow: Tuple[float, float] = (0.0, 0.0) # Closed-loop hand-eye steering vector (dx, dy)
+    contact_acquired: bool = False        # True when hand/cursor aligns with gaze
+    action_hotspots: List[Tuple[float, float, str, float]] = None # Interactive affordances
+    query_target: Optional[Tuple[float, float]] = None    # Language grounded gaze target
     query_relevance_map: Optional[np.ndarray] = None
     inference_ms: float = 0.0
 
@@ -49,9 +52,11 @@ class CortexState:
             "stability_state": self.stability_state,
             "surprise_score": round(self.surprise_score, 4),
             "fixation": (round(self.fixation[0], 3), round(self.fixation[1], 3)),
+            "motor_flow": (round(self.motor_flow[0], 3), round(self.motor_flow[1], 3)),
+            "contact_acquired": self.contact_acquired,
             "action_hotspots": [
                 (round(x, 3), round(y, 3), act, round(c, 3))
-                for x, y, act, c in self.action_hotspots
+                for x, y, act, c in (self.action_hotspots or [])
             ],
             "query_target": (
                 (round(self.query_target[0], 3), round(self.query_target[1], 3))
@@ -110,6 +115,9 @@ class ArtificialVisualCortex(nn.Module):
             latent_dim=self.cfg.latent_dim,
         )
 
+        # 7. Biological Hand-Eye Servoing Engine
+        self.servoing = VisualServoingEngine()
+
     def reset_temporal_memory(self) -> None:
         """Reset internal temporal world model."""
         self.predictive.reset()
@@ -159,6 +167,7 @@ class ArtificialVisualCortex(nn.Module):
         self,
         frame: np.ndarray | torch.Tensor,
         target_fixation: Optional[Tuple[float, float]] = None,
+        cursor_position: Optional[Tuple[float, float]] = None,
         text_embedding: Optional[torch.Tensor] = None,
         device: Optional[torch.device | str] = None,
     ) -> CortexState:
@@ -206,6 +215,19 @@ class ArtificialVisualCortex(nn.Module):
             query_target = (float(coords[0]), float(coords[1]))
             rel_map_np = out["relevance_map"][0, 0].cpu().numpy()
 
+        # 6. Biological Hand-Eye Coordination & Visual Servoing
+        motor_flow = (0.0, 0.0)
+        contact_acquired = False
+        target_gaze = query_target or retinal_view.fixation
+        if cursor_position is not None:
+            servo_state = self.servoing.compute_motor_flow(
+                gaze_target=target_gaze,
+                current_cursor=cursor_position,
+                confidence=cat_conf,
+            )
+            motor_flow = servo_state.motor_velocity
+            contact_acquired = servo_state.contact_acquired
+
         dt = (time.perf_counter() - t0) * 1000.0
 
         return CortexState(
@@ -216,6 +238,8 @@ class ArtificialVisualCortex(nn.Module):
             stability_state=stability,
             surprise_score=surprise,
             fixation=retinal_view.fixation,
+            motor_flow=motor_flow,
+            contact_acquired=contact_acquired,
             action_hotspots=hotspots,
             query_target=query_target,
             query_relevance_map=rel_map_np,

@@ -217,3 +217,4 @@ def run_cloud_gpu_training(
 
 if __name__ == "__main__":
     run_cloud_gpu_training(epochs=5, batch_size=16, train_samples=300, val_samples=50)
+

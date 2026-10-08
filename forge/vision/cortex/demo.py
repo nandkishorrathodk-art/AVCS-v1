@@ -79,3 +79,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_live_demo(duration_seconds=args.seconds, fps_target=args.fps)
+

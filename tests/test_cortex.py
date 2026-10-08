@@ -182,3 +182,40 @@ def test_export_torchscript():
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_visual_servoing():
+    from forge.vision.cortex import VisualServoingEngine
+
+    servo = VisualServoingEngine(foveal_contact_radius=0.03)
+
+    # Gaze is at (0.8, 0.8), cursor is at (0.2, 0.2)
+    state_far = servo.compute_motor_flow(gaze_target=(0.8, 0.8), current_cursor=(0.2, 0.2))
+    assert not state_far.contact_acquired
+    assert state_far.motor_velocity[0] > 0.0 # Velocity points right
+    assert state_far.motor_velocity[1] > 0.0 # Velocity points down
+    assert state_far.distance_to_target > 0.5
+
+    # Gaze and cursor aligned within foveal contact radius
+    state_near = servo.compute_motor_flow(gaze_target=(0.50, 0.50), current_cursor=(0.51, 0.51))
+    assert state_near.contact_acquired
+    assert state_near.motor_velocity == (0.0, 0.0)
+
+
+def test_screen_eye_sdk():
+    from forge.vision.cortex import ScreenEye
+    from forge.vision.capture import SyntheticScreen
+
+    screen = SyntheticScreen(width=320, height=180)
+    eye = ScreenEye(fps=25, source=screen)
+
+    state = eye.perceive_now()
+    assert state is not None
+    assert state.primary_category in UI_CATEGORIES
+    assert isinstance(state.motor_flow, tuple)
+    assert isinstance(state.contact_acquired, bool)
+
+    # Test hand-eye steering
+    vel, aligned = eye.steer_hand(current_cursor=(0.1, 0.1))
+    assert isinstance(vel, tuple)
+    assert isinstance(aligned, bool)
