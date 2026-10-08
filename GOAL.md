@@ -43,7 +43,27 @@ This is not built for any single tool or agent framework. This solves the fundam
 
 ---
 
-## 2. Core Biological Principles
+## 2. Flagship Reference Product: SONIC (The Living Desktop Agent)
+
+Just as Anthropic built **Claude Desktop** to showcase computer use, **SONIC** is our flagship autonomous computer-use product powered directly by AVCS:
+
+| Dimension | Claude Desktop (Current Industry Standard) | SONIC (Powered by AVCS) |
+| :--- | :--- | :--- |
+| **Visual Paradigm** | Static Polaroid screenshots (Blind 95% of time) | **Continuous Living Eye (30–60 FPS Always-On)** |
+| **Action Latency** | 2.5 to 5.0 seconds per step | **Sub-50ms Reflexes / Immediate Reactions** |
+| **Mouse Interaction**| Blind coordinate jumps (`x=542, y=318`) | **Continuous Hand-Eye Servoing (Fitts' Law)** |
+| **Dynamic UIs** | Breaks on animations, popups, spinners | **Predictive Coding detects state changes & spinners** |
+| **Operating Cost** | $30–$50/hour in redundant 4K VLM uploads | **80% Cost Reduction via local sensory filtering** |
+
+**The Dual Architecture:**
+- **SONIC (The Brain & Executive)**: Strategic multi-agent decomposition, tool execution, safety envelopes, and high-level goal reasoning.
+- **AVCS (The Sensory Eyes & Motor Reflex)**: The foundation perception layer that gives SONIC the vision and reflex speed of a real human sitting at the desk.
+
+Beyond SONIC, AVCS remains an **open perception SDK & API** empowering the wider robotics, automotive, and developer ecosystem.
+
+---
+
+## 3. Core Biological Principles
 
 1. **Non-Generative by Construction**:
    Vision is a continuous spatial-temporal sensory field, not text generation. We eliminate all autoregressive decoding on the perception hot path.
@@ -61,7 +81,7 @@ This is not built for any single tool or agent framework. This solves the fundam
 
 ---
 
-## 3. Phased Roadmap
+## 4. Phased Roadmap
 
 ```
 +-----------------------------------------------------------------------------+
@@ -98,7 +118,7 @@ This is not built for any single tool or agent framework. This solves the fundam
 
 ---
 
-## 4. Measurable Success Metrics
+## 5. Measurable Success Metrics
 
 | Metric | Target | Current Status |
 | :--- | :--- | :--- |
@@ -111,7 +131,7 @@ This is not built for any single tool or agent framework. This solves the fundam
 
 ---
 
-## 5. Engineering Principles
+## 6. Engineering Principles
 
 - **Universal Accessibility**: Built to empower any developer, company, or researcher building visual intelligence.
 - **Honest Metrics Only**: Always quote the *full System-1 tick* (foveation + neural forward + servoing), never isolated sub-steps.
