@@ -49,4 +49,10 @@ To declare Milestone 1 officially **COMPLETED**, the following conditions must b
 * **2026-10-08 23:05:** Configured user Kaggle API token and packaged standalone `train_avcs_gpu.py`.
 * **2026-10-08 23:12:** Pushed Version 3 kernel to Kaggle. Training started with PyTorch AMP FP16.
 * **2026-10-08 23:36:** Added remote `https://github.com/Praxis-Neural/AVCS.git` and successfully pushed `main` and `forge-screen-vision` branches.
-* **Current Status:** Kernel actively training in the cloud.
+* **2026-10-08 23:49 (Live Telemetry - Epoch 5/12):**
+  - **Total Loss:** Dropped steadily from `1.5918` down to `1.0326`.
+  - **Affordance Loss (Aff):** Dropped from `0.265` to `0.001` (virtually 0 error on interactive action fields).
+  - **Predictive Coding Error (Pred):** Dropped from `0.0467` to `0.0057` (88% reduction in temporal anticipation error).
+  - **Validation Category Accuracy:** Jumped from the untrained $12.5\%$ random baseline up to **$50.7\%$**.
+  - **Execution Note:** Kernel currently executing in Kaggle's free CPU container ($\sim 380\text{s}$ per epoch), on track to complete all 12 epochs and save `avcs_cortex_weights.pt`.
+
