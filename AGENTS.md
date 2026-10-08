@@ -11,10 +11,12 @@ no GPU). The constraint is deliberate: it keeps every component measurable.
 
 ```bash
 python3 -m pip install numpy torch pytest
-python3 -m pytest tests/ -q                    # 187 tests, ~22s
+python3 -m pip install pillow mss             # optional: real-time screen vision
+python3 -m pytest tests/ -q                    # 231 tests, ~24s
 python3 -m forge.demo --steps 250              # trains, generates, debates
 python3 -m forge.pipeline_demo --steps 200     # full chain, BPE tokenizer
 python3 -m forge.control_demo                  # control kernel sections
+python3 -m forge.vision_demo --seconds 10      # real-time screen vision (synthetic if no display)
 ```
 
 `runs/` is gitignored and holds checkpoints. `PYTHONPATH` must point at the
@@ -191,6 +193,36 @@ fixing the echo problem (see below).
   asserts `set(Op) == MUTATING_OPS | OBSERVING_OPS` so a new op cannot be
   added in one place and forgotten in another.
 
+## Real-time screen vision (`forge/vision/`)
+
+Pure-pixel visual awareness of the desktop. Read `docs/SCREEN_VISION.md`. The
+facts to keep straight:
+
+- The **reflex layer** is non-generative (typed `SceneState`, no text model) and
+  runs every captured frame. Measured full-tick p50 ~3.7 ms (reflex + model
+  forward) at a 16x24 tile grid, so the 40-80 ms real-time budget is met with
+  ~11x headroom. Quote the *full tick*, not reflex alone -- `PipelineStats`
+  reports both, and reflex-only flatters the system by about a third.
+- The **understanding head** predicts a scene type, activity/change/overlay, a
+  calibrated confidence, and a multi-label distribution over a closed
+  description vocabulary (`vocab.py`). The sentence is rendered from *predicted*
+  words -- it is not a hardcoded template, and it is not generated
+  autoregressively.
+- Description is **change-triggered and slow** (~1 s for a local VLM). It never
+  sits on the reflex clock; the dashboard reports reflex fps, not caption fps.
+
+It does no OCR and cannot read text -- that is the "pixels only" mandate, not an
+oversight. Traps, both learned the hard way:
+
+- `ScreenVision` must not perceive the same captured frame twice (it gates on
+  the capture sequence number); without that the reflex loop spins on a stale
+  buffer and reports a frame rate the capture never produced.
+- Do **not** judge the model by training loss or raw per-word accuracy. Training
+  loss on a single set is memorisation; raw accuracy is dominated by always-on
+  words (`screen`, `mid-tone`, `detailed`) and reads ~0.9 even for a model that
+  discriminates nothing. Use `word_report` (macro-F1 + informative accuracy) on
+  held-out draws and on a withheld scene category.
+
 ## Honest limits
 
 - 2.7M–50M params cannot follow a system prompt reliably. This is a scale
@@ -200,3 +232,9 @@ fixing the echo problem (see below).
 - The model does not condition on its capabilities at all (see above). Safety
   lives entirely in the kernel. Closing that gap is the most interesting open
   problem in the repo.
+- Screen vision is a *perception* layer, not a trained large vision model. Its
+  understanding heads are ~26k parameters trained on labelled reflex states in
+  seconds; they give calibrated confidence but there is no image-dataset
+  pretraining. Held-out macro-F1 is ~0.5: tone and coarse structure are
+  reliable, directional and motion words are not. Reading text or naming objects
+  needs the optional VLM backend.
