@@ -18,6 +18,16 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
+# If running directly inside Kaggle without local forge directory
+if not os.path.exists("forge") and os.path.exists("/kaggle"):
+    print("Cloning latest forge-screen-vision branch inside Kaggle...")
+    os.system("git clone -b forge-screen-vision https://github.com/nandkishorrathodk-art/primeASI.git /kaggle/working/repo")
+    if os.path.exists("/kaggle/working/repo/forge"):
+        import shutil
+        shutil.copytree("/kaggle/working/repo/forge", "/kaggle/working/forge", dirs_exist_ok=True)
+    if "/kaggle/working" not in sys.path:
+        sys.path.insert(0, "/kaggle/working")
+
 from forge.vision.cortex import (
     ArtificialVisualCortex,
     CortexConfig,

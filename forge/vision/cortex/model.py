@@ -40,6 +40,7 @@ class CortexState:
     motor_flow: Tuple[float, float] = (0.0, 0.0) # Closed-loop hand-eye steering vector (dx, dy)
     contact_acquired: bool = False        # True when hand/cursor aligns with gaze
     action_hotspots: List[Tuple[float, float, str, float]] = None # Interactive affordances
+    affordance_map: Optional[np.ndarray] = None           # (H_grid, W_grid) dense discrete affordance mask
     query_target: Optional[Tuple[float, float]] = None    # Language grounded gaze target
     query_relevance_map: Optional[np.ndarray] = None
     inference_ms: float = 0.0
@@ -196,7 +197,7 @@ class ArtificialVisualCortex(nn.Module):
 
         text_dense = float(out["text_density"][0].item())
         stability = decode_stability(out["stability_logits"])
-        surprise = float(out["surprise_score"].mean().item())
+        surprise = max(0.0, min(1.0, float(out["surprise_score"].mean().item())))
 
         # 4. Extract Top Action Hotspots (Clickable / Typeable)
         hotspots: List[Tuple[float, float, str, float]] = []
@@ -228,6 +229,9 @@ class ArtificialVisualCortex(nn.Module):
             motor_flow = servo_state.motor_velocity
             contact_acquired = servo_state.contact_acquired
 
+        # Dense affordance argmax map (H_grid, W_grid)
+        aff_map_np = torch.argmax(out["affordance_logits"][0], dim=0).cpu().numpy()
+
         dt = (time.perf_counter() - t0) * 1000.0
 
         return CortexState(
@@ -241,7 +245,14 @@ class ArtificialVisualCortex(nn.Module):
             motor_flow=motor_flow,
             contact_acquired=contact_acquired,
             action_hotspots=hotspots,
+            affordance_map=aff_map_np,
             query_target=query_target,
             query_relevance_map=rel_map_np,
             inference_ms=dt,
         )
+
+    def load_weights(self, weights_path: str, strict: bool = False) -> None:
+        """Loads trained weights checkpoint into the cortex modules."""
+        state = torch.load(weights_path, map_location="cpu")
+        self.load_state_dict(state, strict=strict)
+

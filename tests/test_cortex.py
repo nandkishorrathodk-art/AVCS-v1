@@ -219,3 +219,54 @@ def test_screen_eye_sdk():
     vel, aligned = eye.steer_hand(current_cursor=(0.1, 0.1))
     assert isinstance(vel, tuple)
     assert isinstance(aligned, bool)
+
+
+def test_real_ui_and_unified_dataset():
+    from forge.vision.cortex.data import RealUIDataset, ScreenDataset, UnifiedScreenDataset
+
+    real_ds = RealUIDataset(synthetic_fallback_count=10)
+    assert len(real_ds) == 10
+    sample = real_ds[0]
+    assert "frame_t" in sample
+    assert "affordance_mask" in sample
+    assert "category_idx" in sample
+
+    synth_ds = ScreenDataset(num_samples=10)
+    unified = UnifiedScreenDataset(synthetic_dataset=synth_ds, real_dataset=real_ds, synthetic_ratio=0.5)
+    assert len(unified) == 20
+    u_sample = unified[3]
+    assert u_sample["frame_t"].shape[0] == 3
+
+
+def test_visual_hud_renderer():
+    from forge.vision.cortex.dashboard import AVCSVisualHUD
+    from forge.vision.cortex import ArtificialVisualCortex, VisualServoingEngine
+    from forge.vision.capture import SyntheticScreen
+
+    screen = SyntheticScreen(width=320, height=180)
+    frame = screen.grab()
+
+    cortex = ArtificialVisualCortex()
+    state = cortex.perceive(frame)
+
+    servoing = VisualServoingEngine()
+    motor = servoing.compute_motor_flow(gaze_target=state.fixation, current_cursor=(0.1, 0.1))
+
+    hud = AVCSVisualHUD(canvas_size=(480, 270))
+    img = hud.render(frame, state, motor, dt_ms=25.0, fps=40.0)
+    assert img.size == (480, 270)
+
+
+def test_realistic_desktop_renderer():
+    from forge.vision.cortex.benchmark_real_desktop import RealisticDesktopRenderer
+
+    renderer = RealisticDesktopRenderer(width=320, height=180)
+    vscode = renderer.render_vscode()
+    assert vscode.frame.shape == (180, 320, 3)
+    assert vscode.category_target == "editor_code"
+
+    chrome = renderer.render_chrome()
+    assert chrome.frame.shape == (180, 320, 3)
+    assert chrome.category_target == "browser_webpage"
+
+

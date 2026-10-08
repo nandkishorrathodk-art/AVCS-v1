@@ -81,6 +81,8 @@ class VisualServoingEngine(nn.Module):
             # Smooth deceleration when entering vicinity
             if dist < 0.15:
                 speed *= (dist / 0.15) ** self.damping
+            # Maintain minimum terminal speed so cursor reliably enters contact basin
+            speed = max(0.12, speed)
 
             vx = unit_x * speed
             vy = unit_y * speed
@@ -93,3 +95,4 @@ class VisualServoingEngine(nn.Module):
             contact_acquired=contact,
             confidence=confidence,
         )
+
