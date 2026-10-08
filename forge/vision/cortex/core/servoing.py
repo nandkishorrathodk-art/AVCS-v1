@@ -93,3 +93,4 @@ class VisualServoingEngine(nn.Module):
             contact_acquired=contact,
             confidence=confidence,
         )
+

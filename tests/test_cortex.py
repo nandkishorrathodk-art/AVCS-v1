@@ -219,3 +219,40 @@ def test_screen_eye_sdk():
     vel, aligned = eye.steer_hand(current_cursor=(0.1, 0.1))
     assert isinstance(vel, tuple)
     assert isinstance(aligned, bool)
+
+
+def test_real_ui_and_unified_dataset():
+    from forge.vision.cortex.data import RealUIDataset, ScreenDataset, UnifiedScreenDataset
+
+    real_ds = RealUIDataset(synthetic_fallback_count=10)
+    assert len(real_ds) == 10
+    sample = real_ds[0]
+    assert "frame_t" in sample
+    assert "affordance_mask" in sample
+    assert "category_idx" in sample
+
+    synth_ds = ScreenDataset(num_samples=10)
+    unified = UnifiedScreenDataset(synthetic_dataset=synth_ds, real_dataset=real_ds, synthetic_ratio=0.5)
+    assert len(unified) == 20
+    u_sample = unified[3]
+    assert u_sample["frame_t"].shape[0] == 3
+
+
+def test_visual_hud_renderer():
+    from forge.vision.cortex.dashboard import AVCSVisualHUD
+    from forge.vision.cortex import ArtificialVisualCortex, VisualServoingEngine
+    from forge.vision.capture import SyntheticScreen
+
+    screen = SyntheticScreen(width=320, height=180)
+    frame = screen.grab()
+
+    cortex = ArtificialVisualCortex()
+    state = cortex.perceive(frame)
+
+    servoing = VisualServoingEngine()
+    motor = servoing.compute_motor_flow(gaze_target=state.fixation, current_cursor=(0.1, 0.1))
+
+    hud = AVCSVisualHUD(canvas_size=(480, 270))
+    img = hud.render(frame, state, motor, dt_ms=25.0, fps=40.0)
+    assert img.size == (480, 270)
+

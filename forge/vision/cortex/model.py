@@ -40,6 +40,7 @@ class CortexState:
     motor_flow: Tuple[float, float] = (0.0, 0.0) # Closed-loop hand-eye steering vector (dx, dy)
     contact_acquired: bool = False        # True when hand/cursor aligns with gaze
     action_hotspots: List[Tuple[float, float, str, float]] = None # Interactive affordances
+    affordance_map: Optional[np.ndarray] = None           # (H_grid, W_grid) dense discrete affordance mask
     query_target: Optional[Tuple[float, float]] = None    # Language grounded gaze target
     query_relevance_map: Optional[np.ndarray] = None
     inference_ms: float = 0.0
@@ -228,6 +229,9 @@ class ArtificialVisualCortex(nn.Module):
             motor_flow = servo_state.motor_velocity
             contact_acquired = servo_state.contact_acquired
 
+        # Dense affordance argmax map (H_grid, W_grid)
+        aff_map_np = torch.argmax(out["affordance_logits"][0], dim=0).cpu().numpy()
+
         dt = (time.perf_counter() - t0) * 1000.0
 
         return CortexState(
@@ -241,6 +245,7 @@ class ArtificialVisualCortex(nn.Module):
             motor_flow=motor_flow,
             contact_acquired=contact_acquired,
             action_hotspots=hotspots,
+            affordance_map=aff_map_np,
             query_target=query_target,
             query_relevance_map=rel_map_np,
             inference_ms=dt,
