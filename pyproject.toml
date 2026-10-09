@@ -65,6 +65,7 @@ avcs-hud = "avcs.dashboard:main"
 avcs-gui = "avcs.gui:launch_gui"
 avcs-pilot = "avcs_pilot.runner:main"
 avcs-m7-validate = "avcs_m7_validation.runner:main"
+avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

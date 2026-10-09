@@ -53,6 +53,12 @@ class ExecutionResult:
     # Human-readable content, screenshots, and raw UI text should not be placed here.
     metadata: dict[str, Any] = field(default_factory=dict)
 
+class EvidenceProvenance(str, Enum):
+    SIMULATION_FIXTURE = "simulation_fixture"
+    LIVE_APPLICATION = "live_application"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class OracleResult:
     success: bool
@@ -80,12 +86,17 @@ class TrialResult:
     oracle_id: str
     assertion_id: str
     detail_code: str = ""
+    provenance: EvidenceProvenance = EvidenceProvenance.SIMULATION_FIXTURE
+    app_identity: Optional[dict[str, Any]] = None
+    action_latency_ms: Optional[float] = None
+    postcondition_evidence_ref: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["mode"] = self.mode.value
         d["status"] = self.status.value
         d["category"] = self.category.value
+        d["provenance"] = self.provenance.value if isinstance(self.provenance, EvidenceProvenance) else str(self.provenance)
         return d
 
 @dataclass(frozen=True)
