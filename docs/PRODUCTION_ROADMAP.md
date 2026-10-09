@@ -69,3 +69,4 @@ To maintain absolute scientific and engineering integrity, we separate what has 
 - Execute 300 held-out tasks on named Windows applications.
 - Require $\ge 95\%$ task completion threshold for general release.
 - Audit local logging, secret redaction, and outbound network traffic.
+

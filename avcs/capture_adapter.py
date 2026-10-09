@@ -245,6 +245,25 @@ class Win32GDICaptureAdapter(BaseCaptureAdapter):
             )
 
         if not ret:
+            if self._user32 and self._h_screen_dc:
+                try:
+                    self._user32.ReleaseDC(0, self._h_screen_dc)
+                except Exception:
+                    pass
+                self._h_screen_dc = self._user32.GetDC(0)
+                if self._dst_w == geo.virtual_width and self._dst_h == geo.virtual_height:
+                    ret = self._gdi32.BitBlt(
+                        self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                        self._h_screen_dc, geo.virtual_left, geo.virtual_top, SRCCOPY,
+                    )
+                else:
+                    ret = self._gdi32.StretchBlt(
+                        self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                        self._h_screen_dc, geo.virtual_left, geo.virtual_top,
+                        geo.virtual_width, geo.virtual_height, SRCCOPY,
+                    )
+
+        if not ret:
             raise CaptureError("Win32 BitBlt/StretchBlt failed.")
         self._gdi32.GdiFlush()
         return self._raw_np[:, :, 2::-1].copy()
@@ -309,3 +328,4 @@ class SyntheticCaptureAdapter(BaseCaptureAdapter):
 
     def supported_modes(self) -> List[str]:
         return ["synthetic_replay", "deterministic_motion"]
+

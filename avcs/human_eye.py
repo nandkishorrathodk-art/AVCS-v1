@@ -15,6 +15,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import math
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -617,7 +618,18 @@ class HumanEye(nn.Module):
         else:
             stability = "stable"
 
-        # 7. Step Episodic Memory Manager (Phase 3)
+        win_title = getattr(self, "active_window_title", None)
+        if win_title is None and sys.platform == "win32":
+            try:
+                import win32gui
+                fg = win32gui.GetForegroundWindow()
+                if fg:
+                    t = win32gui.GetWindowText(fg)
+                    if t:
+                        win_title = t
+            except Exception:
+                pass
+
         if self.memory.latest_tree is not None and surprise < 0.05 and not moving_objs:
             current_tree = self.memory.latest_tree
             diff = VisualDiff(
@@ -635,6 +647,7 @@ class HumanEye(nn.Module):
                 moving_objects=moving_objs,
                 surprise_score=surprise,
                 prior_action="observe",
+                window_title=win_title,
             )
             current_tree = self.memory.latest_tree
 

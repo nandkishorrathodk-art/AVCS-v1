@@ -163,3 +163,4 @@ def test_action_broker_semantic_postcondition_evaluation():
     res_fail = broker.execute(req_fail)
     assert res_fail.status in (ActionStatus.AMBIGUOUS, ActionStatus.FAILED)
     assert not res_fail.is_confirmed
+

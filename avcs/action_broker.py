@@ -210,6 +210,8 @@ class ActionBroker:
                 pre_retry = self.eye.observe()
                 self._dispatch_input(request, rx, ry)
                 time.sleep(0.04)
+                post_retry = self.eye.observe()
+                retry_ripple = self.verifier.calculate_local_ripple((rx, ry), post_retry.motion_field)
                 if request.expected_postcondition is not None:
                     try:
                         passed = request.expected_postcondition(pre_retry, post_retry)
