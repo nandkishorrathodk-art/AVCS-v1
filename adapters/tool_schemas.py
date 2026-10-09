@@ -228,6 +228,8 @@ def get_openai_tools(strict: bool = False) -> List[Dict[str, Any]]:
                     curr_type = spec.get("type")
                     if isinstance(curr_type, str):
                         spec["type"] = [curr_type, "null"]
+                    if "enum" in spec and None not in spec["enum"]:
+                        spec["enum"] = list(spec["enum"]) + [None]
         tools.append({
             "type": "function",
             "function": fn_def,

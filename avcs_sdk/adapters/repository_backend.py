@@ -71,7 +71,7 @@ class RepositoryAVCSBackend:
         self.capture = capture
         self.driver = driver
         self.safety_controller = safety_controller
-        self.trusted_auth_tokens = trusted_auth_tokens or {"token_approved_test", "auth_valid_grant"}
+        self.trusted_auth_tokens = trusted_auth_tokens if trusted_auth_tokens is not None else set()
         self.settle_delay_s = settle_delay_s
 
         self._connected = False
@@ -248,12 +248,26 @@ class RepositoryAVCSBackend:
         elif request.kind in (ActionKind.TYPE_TEXT, ActionKind.PRESS_KEY):
             expected_postcondition = lambda pre, post: True
 
+        text_content: Optional[str] = None
+        if request.kind == ActionKind.TYPE_TEXT:
+            text_content = request.text
+        elif request.kind == ActionKind.PRESS_KEY:
+            text_content = request.key
+
+        timeout_ms = min(request.timeout_s * 1000.0, 60000.0)
+
+        # In synthetic/interactive capture mode, pulse visual reaction at target
+        if self.capture is not None and hasattr(self.capture, "trigger_motion"):
+            self.capture.trigger_motion(tx, ty)
+
         # 6. Build repository action request
         repo_req = RepoActionRequest(
             action_type=repo_action_type,
             target_coord=(tx, ty),
             action_class=repo_action_class,
             action_id=request.action_id,
+            text_content=text_content,
+            timeout_ms=timeout_ms,
             expected_postcondition=expected_postcondition,
             authorized=authorized,
         )

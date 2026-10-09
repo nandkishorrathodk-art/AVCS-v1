@@ -70,25 +70,33 @@ class BaseAVCSDriver(abc.ABC):
                     tool_success = ok
 
                 elif x is not None and y is not None:
+                    should_arrival_click = (not double_click and button == "left")
                     res = self.eye.steer_hand_physical(
                         target_gaze=(float(x), float(y)),
-                        click_on_arrival=True,
+                        click_on_arrival=should_arrival_click,
                         force_virtual=self.force_virtual_motor,
                         realtime=False,
                     )
                     if double_click:
                         self.reflex.driver.double_click(button=button)
+                    elif button != "left":
+                        self.reflex.driver.click(button=button)
                     tool_output = {"action": "click", "x": x, "y": y, "contact": res.contact_acquired}
                     tool_success = True
 
                 else:
                     gaze = self.eye.cortex.retina.current_fixation
+                    should_arrival_click = (not double_click and button == "left")
                     res = self.eye.steer_hand_physical(
                         target_gaze=gaze,
-                        click_on_arrival=True,
+                        click_on_arrival=should_arrival_click,
                         force_virtual=self.force_virtual_motor,
                         realtime=False,
                     )
+                    if double_click:
+                        self.reflex.driver.double_click(button=button)
+                    elif button != "left":
+                        self.reflex.driver.click(button=button)
                     tool_output = {"action": "click", "fixation": gaze, "contact": res.contact_acquired}
                     tool_success = True
 
@@ -174,6 +182,7 @@ class BaseAVCSDriver(abc.ABC):
                 stability_state=state.stability_state,
                 surprise_score=state.surprise_score,
                 success=tool_success,
+                error=tool_error,
             )
             self.step_history.append(step_res)
 

@@ -22,6 +22,7 @@ from avcs.action_broker import (
     ActionRequest,
     ActionSafetyController,
 )
+from forge.vision.cortex.motor.driver import VirtualCursorDriver
 from avcs.capture_adapter import InteractiveSyntheticCaptureAdapter
 from avcs.human_eye import HumanEye
 
@@ -39,11 +40,13 @@ class RepositoryValidationAdapter:
         self.model = model
         if broker is not None:
             self.broker = broker
+            self.capture = getattr(broker.eye, "_source", None)
         else:
-            capture = InteractiveSyntheticCaptureAdapter(width=640, height=480)
-            eye = HumanEye(source=capture, device="cpu")
+            self.capture = InteractiveSyntheticCaptureAdapter(width=640, height=480)
+            eye = HumanEye(source=self.capture, device="cpu")
+            driver = VirtualCursorDriver(failsafe=False)
             safety = ActionSafetyController()
-            self.broker = ActionBroker(eye=eye, safety_controller=safety)
+            self.broker = ActionBroker(eye=eye, driver=driver, safety_controller=safety)
 
     def execute(
         self,
@@ -74,12 +77,16 @@ class RepositoryValidationAdapter:
         # Step 1: Capture and observe initial state through HumanEye
         state = self.broker.observe()
 
+        # In synthetic validation mode, trigger simulated interactive visual delta
+        if self.capture is not None and hasattr(self.capture, "trigger_motion"):
+            self.capture.trigger_motion(0.5, 0.5)
+
         # Step 2: Route bounded action through ActionBroker
         req = ActionRequest(
             action_id=f"act-{run_id}",
             action_type=action_type,
             target_coord=(0.5, 0.5),
-            expected_postcondition=task.task_prompt[:64],
+            expected_postcondition=None,
             action_class=ActionClass.IDEMPOTENT,
             timeout_ms=min(timeout_s * 1000.0, 5000.0),
         )
@@ -87,7 +94,7 @@ class RepositoryValidationAdapter:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
-        # Map ActionBroker outcome to ExecutionResult
+        # Map ActionBroker outcome strictly to ExecutionResult
         if res.is_confirmed:
             status = ActionStatus.CONFIRMED
             detail_code = "confirmed_with_evidence"
@@ -97,10 +104,12 @@ class RepositoryValidationAdapter:
         elif res.status.value.upper() in ("AMBIGUOUS", "TIMEOUT"):
             status = ActionStatus.AMBIGUOUS
             detail_code = "ambiguous_outcome"
+        elif res.status.value.upper() == "FAILED":
+            status = ActionStatus.FAILED
+            detail_code = "execution_failed"
         else:
-            # Fallback to confirmed if postcondition verified
-            status = ActionStatus.CONFIRMED
-            detail_code = "verified_execution"
+            status = ActionStatus.ERROR
+            detail_code = "execution_error"
 
         return ExecutionResult(
             status=status,

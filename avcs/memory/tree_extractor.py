@@ -104,7 +104,7 @@ class SemanticSceneTreeExtractor:
 
         # 3. Add dynamic moving entities if detected
         if moving_objects:
-            for m in moving_objects:
+            for idx, m in enumerate(moving_objects):
                 mx = getattr(m, "x", 0.5)
                 my = getattr(m, "y", 0.5)
                 speed = getattr(m, "speed", 0.0)
@@ -116,7 +116,7 @@ class SemanticSceneTreeExtractor:
                         ymax=min(1.0, my + 0.04),
                     )
                     elem = UIMLElement(
-                        element_id=f"#dyn_obj",
+                        element_id=f"#dyn_{idx + 1}",
                         role=AffordanceType.DRAGGABLE,
                         label="Dynamic Entity",
                         bbox=m_bbox,
