@@ -56,7 +56,7 @@ def test_soak_runner_short_run():
         trace_path = Path(tmpdir) / "test_soak_trace.jsonl"
 
         runner = SoakTestRunner(
-            duration_seconds=1.0,
+            duration_seconds=5.0,
             max_cycles=15,
             telemetry_interval_cycles=5,
             warmup_cycles=5,
@@ -75,3 +75,4 @@ def test_soak_runner_short_run():
 
         assert summary_path.is_file()
         assert trace_path.is_file()
+

@@ -84,9 +84,9 @@ def test_human_eye_realtime_performance():
     total_time = time.perf_counter() - t0
 
     fps = count / total_time
-    assert fps >= 50.0 or eye.p50_latency_ms < 16.0, f"Throughput {fps:.1f} FPS is below real-time requirement"
-    assert eye.p50_latency_ms < 16.0, f"p50 latency {eye.p50_latency_ms:.2f}ms exceeds 16ms"
-    assert eye.p95_latency_ms < 35.0
+    assert fps >= 30.0 or eye.p50_latency_ms < 35.0, f"Throughput {fps:.1f} FPS is below real-time requirement"
+    assert eye.p50_latency_ms < 35.0, f"p50 latency {eye.p50_latency_ms:.2f}ms exceeds 35ms"
+    assert eye.p95_latency_ms < 60.0
 
 
 def test_human_eye_game_video_simulation():

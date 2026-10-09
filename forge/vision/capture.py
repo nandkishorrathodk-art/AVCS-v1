@@ -440,6 +440,11 @@ class ThreadedScreenCapture:
         if hasattr(self.source, "close") and callable(self.source.close):
             self.source.close()
 
+    def trigger_motion(self, x: float, y: float) -> None:
+        """Forwards motion triggers to underlying source if supported."""
+        if hasattr(self.source, "trigger_motion") and callable(self.source.trigger_motion):
+            self.source.trigger_motion(x, y)
+
     def __enter__(self) -> "ThreadedScreenCapture":
         return self.open()
 

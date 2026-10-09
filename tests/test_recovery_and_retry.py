@@ -162,3 +162,4 @@ def test_ambiguous_outcome_never_reported_confirmed():
     assert res.status != ActionStatus.CONFIRMED
     assert not res.is_confirmed
     assert res.status in (ActionStatus.AMBIGUOUS, ActionStatus.FAILED)
+

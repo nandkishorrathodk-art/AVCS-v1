@@ -53,3 +53,4 @@ def test_positive_control_suite_execution():
 
         assert summary_path.is_file()
         assert trace_path.is_file()
+

@@ -130,6 +130,10 @@ class ActionBroker:
         self.safety = safety_controller or ActionSafetyController()
         self.settle_delay_s = max(0.0, float(settle_delay_s))
 
+    def observe(self) -> HumanEyeState:
+        """Captures and returns current visual state through the eye."""
+        return self.eye.observe()
+
     def execute(self, request: ActionRequest) -> ActionResult:
         """Executes a bounded action request through the state machine."""
         t0 = time.perf_counter()
@@ -349,3 +353,11 @@ class ActionBroker:
         elif request.action_type == "press_key":
             if request.text_content and hasattr(self.driver, "press_key"):
                 self.driver.press_key(request.text_content)
+
+        # Notify interactive capture source of simulated input event
+        cap = getattr(self.eye, "source", None)
+        while cap is not None:
+            if hasattr(cap, "trigger_motion"):
+                cap.trigger_motion(x, y)
+                break
+            cap = getattr(cap, "source", None)

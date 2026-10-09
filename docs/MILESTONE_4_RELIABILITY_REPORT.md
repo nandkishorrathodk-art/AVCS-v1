@@ -167,3 +167,4 @@ With Milestone 4 fully verified, the foundation is primed for **Milestone 5: Pub
 1. Package standardization and clean PyPI distribution build (`wheel`, `sdist`, `pyproject.toml`).
 2. Provider-neutral client API with strongly typed schemas.
 3. Explicit privacy modes (`local_only`, `redacted_cloud`, `cloud_vision`).
+

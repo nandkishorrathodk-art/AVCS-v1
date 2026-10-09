@@ -54,10 +54,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Praxis-Neural/AVCS"
-Documentation = "https://github.com/Praxis-Neural/AVCS/tree/main/docs"
-Repository = "https://github.com/Praxis-Neural/AVCS.git"
-Issues = "https://github.com/Praxis-Neural/AVCS/issues"
+Homepage = "https://github.com/Parth-labs-in/AVCS"
+Documentation = "https://github.com/Parth-labs-in/AVCS/tree/main/docs"
+Repository = "https://github.com/Parth-labs-in/AVCS.git"
+Issues = "https://github.com/Parth-labs-in/AVCS/issues"
 
 [project.scripts]
 avcs-benchmark = "avcs.benchmark:main"
@@ -66,10 +66,11 @@ avcs-gui = "avcs.gui:launch_gui"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["avcs*", "forge*"]
+include = ["avcs*", "avcs_sdk*", "forge*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]
+avcs_sdk = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
