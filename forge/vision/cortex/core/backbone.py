@@ -61,7 +61,7 @@ class InvertedResidual(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, stride: int = 1, expand_ratio: int = 2) -> None:
         super().__init__()
         self.use_res = (stride == 1 and in_ch == out_ch)
-        hidden = in_ch * expand_ratio
+        hidden = int(round(in_ch * expand_ratio))
 
         layers = []
         if expand_ratio != 1:

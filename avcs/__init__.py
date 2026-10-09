@@ -40,6 +40,15 @@ from avcs.drivers import (
     OpenAIAVCSDriver,
     OllamaAVCSDriver,
 )
+from avcs.human_eye import (
+    FastAffordanceHead,
+    HumanEye,
+    HumanEyeState,
+    MagnocellularMotionEngine,
+    MovingObject,
+    RealTimeCorticalBackbone,
+    SmoothPursuitTracker,
+)
 from avcs.mcp import AVCSMCPServer, run_mcp_server
 
 __version__ = "0.2.0"
@@ -47,6 +56,14 @@ __author__ = "Praxis Neural"
 __license__ = "Apache-2.0"
 
 __all__ = [
+    # Biological Real-Time Human Eye Intelligence Model
+    "HumanEye",
+    "HumanEyeState",
+    "MovingObject",
+    "MagnocellularMotionEngine",
+    "RealTimeCorticalBackbone",
+    "FastAffordanceHead",
+    "SmoothPursuitTracker",
     # Developer SDK Class
     "ScreenEye",
     # Core Neural Model & State
