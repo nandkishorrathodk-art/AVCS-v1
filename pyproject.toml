@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Artificial Visual Cortex for Screens (AVCS): Non-generative, real-time biological visual perception foundation engine and SDK for screen AI agents."
 readme = "README.md"
 authors = [
-    { name = "Praxis Neural", email = "research@praxisneural.ai" },
+    { name = "PARTH LAB", email = "research@praxisneural.ai" },
 ]
 license = "Apache-2.0"
 classifiers = [
@@ -70,3 +70,6 @@ include = ["avcs*", "forge*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

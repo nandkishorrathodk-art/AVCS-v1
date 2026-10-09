@@ -50,6 +50,7 @@ class ActionRequest:
     action_id: str = field(default_factory=lambda: f"act_{uuid.uuid4().hex[:10]}")
     text_content: Optional[str] = None
     expected_postcondition: Optional[Callable[[HumanEyeState, HumanEyeState], bool]] = None
+    precondition_validator: Optional[Callable[[HumanEyeState], bool]] = None
     authorized: bool = False                               # Required true for HIGH_RISK actions
     target_window_title: Optional[str] = None
     timeout_ms: float = 1500.0
@@ -101,6 +102,15 @@ class ActionSafetyController:
             if request.target_window_title.lower() not in current_win.lower():
                 return False, f"Focus mismatch: expected window '{request.target_window_title}', but active is '{current_win}'."
 
+        # Validate Precondition Validator if specified on request
+        if request.precondition_validator is not None:
+            try:
+                pre_ok = request.precondition_validator(current_state)
+                if not pre_ok:
+                    return False, "Precondition validator evaluated to False."
+            except Exception as exc:
+                return False, f"Precondition validator raised exception: {exc}"
+
         return True, None
 
 
@@ -112,18 +122,35 @@ class ActionBroker:
         eye: HumanEye,
         driver: Optional[OSCursorDriver] = None,
         safety_controller: Optional[ActionSafetyController] = None,
+        settle_delay_s: float = 0.04,
     ) -> None:
         self.eye = eye
         self.driver = driver or get_default_driver()
         self.verifier = VisualRippleVerifier(eye=self.eye, driver=self.driver)
         self.safety = safety_controller or ActionSafetyController()
+        self.settle_delay_s = max(0.0, float(settle_delay_s))
 
     def execute(self, request: ActionRequest) -> ActionResult:
         """Executes a bounded action request through the state machine."""
         t0 = time.perf_counter()
 
         # 1. Capture Pre-State
-        pre_state = self.eye.observe()
+        try:
+            pre_state = self.eye.observe()
+        except Exception as exc:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.FAILED,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence=f"Observation capture failed: {exc}",
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="CAPTURE_ERROR",
+            )
 
         # 2. Safety Controller Precondition Validation
         valid, reason = self.safety.validate_preconditions(request, pre_state)
@@ -144,13 +171,49 @@ class ActionBroker:
 
         # 3. Dispatch Physical Input to OS
         tx, ty = request.target_coord
-        self._dispatch_input(request, tx, ty)
+        dispatch_error: Optional[Exception] = None
+        try:
+            self._dispatch_input(request, tx, ty)
+        except Exception as exc:
+            dispatch_error = exc
+
+        if dispatch_error is not None:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.FAILED,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence=f"Input dispatch failed: {dispatch_error}",
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="DISPATCH_FAILED",
+            )
 
         # Allow settlement for UI animation
-        time.sleep(0.04)
+        if self.settle_delay_s > 0:
+            time.sleep(self.settle_delay_s)
 
         # 4. Capture Post-State & Verify Outcome
-        post_state = self.eye.observe()
+        try:
+            post_state = self.eye.observe()
+        except Exception as exc:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.FAILED,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence=f"Post-action capture failed: {exc}",
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="CAPTURE_ERROR",
+            )
+
         ripple_energy = self.verifier.calculate_local_ripple(request.target_coord, post_state.motion_field)
 
         # Evaluate Photometric Local Delta
@@ -187,10 +250,13 @@ class ActionBroker:
                 status = ActionStatus.FAILED
                 evidence_msg = "Neither semantic postcondition nor local optical motion occurred."
         else:
-            # General UI action verification
-            if structural_change or ripple_energy >= 0.015 or photo_delta >= 0.015:
+            # General UI action verification (requires localized ripple or state diff)
+            if (ripple_energy >= 0.015 or photo_delta >= 0.015) and post_state.surprise_score <= 0.4:
                 status = ActionStatus.CONFIRMED
-                evidence_msg = "Physical visual ripple and structural state change confirmed."
+                evidence_msg = "Physical visual ripple confirmed at target coordinate."
+            elif structural_change and post_state.surprise_score <= 0.4:
+                status = ActionStatus.CONFIRMED
+                evidence_msg = "Structural UI state change confirmed."
             elif post_state.surprise_score > 0.3:
                 status = ActionStatus.AMBIGUOUS
                 evidence_msg = "Screen underwent global shift; target state confirmation is ambiguous."
@@ -198,20 +264,41 @@ class ActionBroker:
                 status = ActionStatus.FAILED
                 evidence_msg = "Target showed zero optical reaction."
 
-        # 6. Recovery Policy for Idempotent Actions
+        # 6. Recovery Policy for Actions
         recovery_attempts = 1
-        if status in (ActionStatus.FAILED, ActionStatus.AMBIGUOUS) and request.action_class == ActionClass.IDEMPOTENT:
+        can_retry = False
+        if status in (ActionStatus.FAILED, ActionStatus.AMBIGUOUS):
+            if request.action_class == ActionClass.IDEMPOTENT:
+                can_retry = True
+            elif request.action_class == ActionClass.CONDITIONALLY_REPEATABLE:
+                can_retry = (
+                    request.precondition_validator is not None
+                    and request.precondition_validator(post_state)
+                )
+                if not can_retry:
+                    evidence_msg += " (Conditionally repeatable action: precondition validator did not pass on post-state)."
+            elif request.action_class == ActionClass.NON_IDEMPOTENT:
+                evidence_msg += " (Non-idempotent action: blind replay blocked by safety controller)."
+            elif request.action_class == ActionClass.HIGH_RISK:
+                evidence_msg += " (High-risk action: blind replay blocked by safety controller)."
+
+        if can_retry:
             # Interior Micro-Jitter Retry (Offset by 3px within interior hitbox)
             offsets = [(0.003, 0.003), (-0.003, -0.003)]
             for ox, oy in offsets:
                 recovery_attempts += 1
                 rx = float(np.clip(tx + ox, 0.0, 1.0))
                 ry = float(np.clip(ty + oy, 0.0, 1.0))
-                pre_retry = self.eye.observe()
-                self._dispatch_input(request, rx, ry)
-                time.sleep(0.04)
-                post_retry = self.eye.observe()
-                retry_ripple = self.verifier.calculate_local_ripple((rx, ry), post_retry.motion_field)
+                try:
+                    pre_retry = self.eye.observe()
+                    self._dispatch_input(request, rx, ry)
+                    if self.settle_delay_s > 0:
+                        time.sleep(self.settle_delay_s)
+                    post_retry = self.eye.observe()
+                    retry_ripple = self.verifier.calculate_local_ripple((rx, ry), post_retry.motion_field)
+                except Exception:
+                    break
+
                 if request.expected_postcondition is not None:
                     try:
                         passed = request.expected_postcondition(pre_retry, post_retry)
@@ -228,10 +315,6 @@ class ActionBroker:
                         evidence_msg = f"Recovered via interior micro-jitter ({ox:+.3f}, {oy:+.3f})."
                         ripple_energy = retry_ripple
                         break
-
-        # For NON_IDEMPOTENT actions, blind retry is STRICTLY PROHIBITED
-        if status != ActionStatus.CONFIRMED and request.action_class == ActionClass.NON_IDEMPOTENT:
-            evidence_msg += " (Non-idempotent action: blind replay blocked by safety controller)."
 
         elapsed = (time.perf_counter() - t0) * 1000.0
         return ActionResult(

@@ -393,6 +393,7 @@ class ThreadedScreenCapture:
         self._latest_frame: Optional[np.ndarray] = None
         self._seq: int = 0
         self._last_grab_time: float = 0.0
+        self._last_error: Optional[Exception] = None
 
     def open(self) -> "ThreadedScreenCapture":
         if hasattr(self.source, "open") and callable(self.source.open):
@@ -417,14 +418,18 @@ class ThreadedScreenCapture:
                     self._latest_frame = frame
                     self._seq += 1
                     self._last_grab_time = now
-            except Exception:
-                pass
+                    self._last_error = None
+            except Exception as exc:
+                with self._lock:
+                    self._last_error = exc
             time.sleep(sleep_interval)
 
     def grab(self) -> np.ndarray:
         if not self._running or self._latest_frame is None:
             self.open()
         with self._lock:
+            if self._last_error is not None:
+                raise self._last_error
             return self._latest_frame
 
     def close(self) -> None:
