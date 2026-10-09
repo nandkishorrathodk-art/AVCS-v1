@@ -7,3 +7,4 @@ kaggle_logs*/
 build/
 dist/
 *.egg-info/
+pilot-results/
