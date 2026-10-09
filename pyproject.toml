@@ -64,13 +64,15 @@ avcs-benchmark = "avcs.benchmark:main"
 avcs-hud = "avcs.dashboard:main"
 avcs-gui = "avcs.gui:launch_gui"
 avcs-pilot = "avcs_pilot.runner:main"
+avcs-m7-validate = "avcs_m7_validation.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["avcs*", "avcs_pilot*", "avcs_sdk*", "forge*"]
+include = ["avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]
+avcs_m7_validation = ["py.typed"]
 avcs_pilot = ["py.typed"]
 avcs_sdk = ["py.typed"]
 
