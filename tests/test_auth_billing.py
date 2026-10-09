@@ -127,3 +127,4 @@ def test_signed_billing_receipt():
     tampered_dict = receipt.to_dict()
     tampered_dict["motor_actions"] = 999
     assert UsageMeter.verify_receipt(tampered_dict) is False
+

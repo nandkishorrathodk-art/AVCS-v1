@@ -146,3 +146,4 @@ if __name__ == "__main__":
     parser.add_argument("--seconds", type=float, default=2.0, help="Benchmark run duration in seconds")
     args = parser.parse_args()
     run_benchmark(duration_seconds=args.seconds)
+

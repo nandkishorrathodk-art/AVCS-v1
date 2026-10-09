@@ -49,6 +49,15 @@ from avcs.human_eye import (
     RealTimeCorticalBackbone,
     SmoothPursuitTracker,
 )
+from avcs.events import (
+    VisualEvent,
+    VisualEventStreamer,
+    VisualEventType,
+)
+from avcs.sdk import (
+    HumanEyeClient,
+    eye,
+)
 from avcs.mcp import AVCSMCPServer, run_mcp_server
 
 __version__ = "0.2.0"
@@ -56,14 +65,19 @@ __author__ = "Praxis Neural"
 __license__ = "Apache-2.0"
 
 __all__ = [
-    # Biological Real-Time Human Eye Intelligence Model
+    # Biological Real-Time Human Eye Intelligence Model & SDK
     "HumanEye",
     "HumanEyeState",
+    "HumanEyeClient",
+    "eye",
     "MovingObject",
     "MagnocellularMotionEngine",
     "RealTimeCorticalBackbone",
     "FastAffordanceHead",
     "SmoothPursuitTracker",
+    "VisualEvent",
+    "VisualEventStreamer",
+    "VisualEventType",
     # Developer SDK Class
     "ScreenEye",
     # Core Neural Model & State
