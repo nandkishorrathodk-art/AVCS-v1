@@ -79,6 +79,36 @@ def test_ollama_driver_step(eye):
     assert result["role"] == "tool"
     parsed = json.loads(result["content"])
     assert parsed["action_type"] == "clickable"
+    assert driver.step_history[0].success is True
+    assert driver.step_history[0].output is not None
+
+    driver.close()
+
+
+def test_driver_wait_stable_and_all_tools(eye):
+    driver = AnthropicAVCSDriver(eye=eye, force_virtual_motor=True)
+
+    # 1. wait_stable should immediately detect stability on synthetic screen
+    res = driver.step({"id": "w1", "name": "wait_stable", "input": {"timeout_seconds": 1.0}})
+    parsed = json.loads(res["content"])
+    assert parsed["stable"] is True
+    assert driver.step_history[-1].success is True
+    assert driver.step_history[-1].output["stable"] is True
+
+    # 2. click with coordinates
+    driver.step({"id": "c1", "name": "click", "input": {"x": 0.5, "y": 0.5}})
+    assert driver.step_history[-1].success is True
+    assert driver.step_history[-1].output["action"] == "click"
+
+    # 3. type_text
+    driver.step({"id": "t1", "name": "type_text", "input": {"text": "hello"}})
+    assert driver.step_history[-1].success is True
+    assert driver.step_history[-1].output["characters"] == 5
+
+    # 4. press_hotkey
+    driver.step({"id": "h1", "name": "press_hotkey", "input": {"keys": ["ctrl", "c"]}})
+    assert driver.step_history[-1].success is True
+    assert driver.step_history[-1].output["keys"] == ["ctrl", "c"]
 
     driver.close()
 

@@ -62,8 +62,41 @@ def test_win32_keyboard_driver_structures_and_key_resolution():
     assert driver._resolve_vk("tab") == VK_TAB
     assert driver._resolve_vk("backspace") == VK_BACK
     assert driver._resolve_vk("a") == ord("A")
+    assert driver._resolve_vk("f5") == 0x70 + 4  # VK_F5
     assert driver._resolve_vk(123) == 123
+
+    # Test punctuation symbol fallback resolution (e.g. '-' or '.')
+    dot_vk = driver._resolve_vk(".")
+    assert dot_vk > 0
 
     with pytest.raises(ValueError):
         driver._resolve_vk("unknown_invalid_key_xyz")
+
+    driver.close()
+
+
+def test_failsafe_latching_and_reset():
+    """Verify CornerBreakoutFailSafe latches on breakout and unlatches on reset()."""
+    failsafe = CornerBreakoutFailSafe(corner_margin_px=15, enabled=True)
+    assert failsafe.is_tripped is False
+
+    # Breakout into top-left corner
+    with pytest.raises(SafetyBreakoutException):
+        failsafe.check(5, 5, 1920, 1080)
+
+    assert failsafe.is_tripped is True
+
+    # Subsequent check even in safe area must remain latched
+    with pytest.raises(SafetyBreakoutException):
+        failsafe.check(500, 500, 1920, 1080)
+
+    # Reset allows safe operation again
+    failsafe.reset()
+    assert failsafe.is_tripped is False
+    failsafe.check(500, 500, 1920, 1080)  # Should not raise
+
+    # Test check_override
+    with pytest.raises(SafetyBreakoutException):
+        failsafe.check_override((0.5, 0.5), (0.7, 0.7), threshold_norm=0.08)
+    assert failsafe.is_tripped is True
 

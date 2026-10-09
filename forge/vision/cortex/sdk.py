@@ -59,6 +59,7 @@ class ScreenEye:
         self._change_callbacks: List[Callable[[CortexState], None]] = []
         self._surprise_callbacks: List[Tuple[float, Callable[[CortexState], None]]] = []
         self._affordance_callbacks: List[Tuple[str, float, Callable[[CortexState], None]]] = []
+        self._drivers: dict[bool, Any] = {}
 
         self.engine = AVCSInferenceEngine(
             cortex=self.cortex,
@@ -68,6 +69,12 @@ class ScreenEye:
             on_state=self._dispatch_state,
             on_surprise=self._dispatch_surprise,
         )
+
+    def _get_driver(self, force_virtual: bool = False) -> Any:
+        if force_virtual not in self._drivers:
+            from forge.vision.cortex.motor import get_default_driver
+            self._drivers[force_virtual] = get_default_driver(force_virtual=force_virtual)
+        return self._drivers[force_virtual]
 
     def start(self) -> ScreenEye:
         """Starts real-time background perception stream."""
@@ -112,13 +119,14 @@ class ScreenEye:
         text_emb = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device, generator=rng)
         text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
 
-        if frame is None:
-            frame = self.source.grab()
-        state = self.cortex.perceive(frame, text_embedding=text_emb, device=self.device)
-        target = state.query_target or state.fixation
-        # Update retinal gaze fixation
-        self.cortex.retina.update_fixation(target_fixation=target)
-        return target
+        with self.engine._lock:
+            if frame is None:
+                frame = self.source.grab()
+            state = self.cortex.perceive(frame, text_embedding=text_emb, device=self.device)
+            target = state.query_target or state.fixation
+            # Update retinal gaze fixation
+            self.cortex.retina.update_fixation(target_fixation=target)
+            return target
 
     def locate(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """Alias for look_at: returns normalized (x, y) target coordinates."""
@@ -201,8 +209,7 @@ class ScreenEye:
         force_virtual: bool = False,
     ) -> None:
         """Types text via the OS hardware or virtual keyboard driver."""
-        from forge.vision.cortex.motor import get_default_driver
-        driver = get_default_driver(force_virtual=force_virtual)
+        driver = self._get_driver(force_virtual=force_virtual)
         driver.type_text(
             text=text,
             key_delay_ms=key_delay_ms,
@@ -212,14 +219,12 @@ class ScreenEye:
 
     def press_key(self, key: str, force_virtual: bool = False) -> None:
         """Presses and releases a single key via keyboard driver."""
-        from forge.vision.cortex.motor import get_default_driver
-        driver = get_default_driver(force_virtual=force_virtual)
+        driver = self._get_driver(force_virtual=force_virtual)
         driver.press_key(key)
 
     def press_hotkey(self, *keys: str, force_virtual: bool = False) -> None:
         """Presses and releases a hotkey combination via keyboard driver."""
-        from forge.vision.cortex.motor import get_default_driver
-        driver = get_default_driver(force_virtual=force_virtual)
+        driver = self._get_driver(force_virtual=force_virtual)
         driver.press_hotkey(*keys)
 
     def type_into(
@@ -347,13 +352,20 @@ class ScreenEye:
                     print(f"[ScreenEye] Surprise callback error: {e}")
 
     def close(self) -> None:
-        """Closes ScreenEye and releases capture resources."""
+        """Closes ScreenEye and releases capture and motor resources."""
         self.stop()
         if hasattr(self.source, "close"):
             try:
                 self.source.close()
             except Exception:
                 pass
+        for driver in list(self._drivers.values()):
+            if hasattr(driver, "close"):
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+        self._drivers.clear()
 
     def __enter__(self) -> ScreenEye:
         return self.start()

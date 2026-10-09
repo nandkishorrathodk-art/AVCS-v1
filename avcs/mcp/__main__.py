@@ -21,9 +21,19 @@ def main() -> None:
     parser.add_argument("--device", default="cpu", help="PyTorch compute device (default: cpu)")
     args = parser.parse_args()
 
+    # Configure UTF-8 encoding on standard streams
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    # Preserve pure stdout for JSON-RPC 2.0 frames; redirect general prints to stderr
+    mcp_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
     source = SyntheticScreen() if args.synthetic else None
     eye = ScreenEye(source=source, device=args.device)
-    server = AVCSMCPServer(eye=eye, force_virtual_motor=args.virtual_motor)
+    server = AVCSMCPServer(eye=eye, stdout=mcp_stdout, force_virtual_motor=args.virtual_motor)
 
     try:
         server.run()
@@ -31,6 +41,7 @@ def main() -> None:
         pass
     finally:
         server.close()
+        sys.stdout = mcp_stdout
 
 
 if __name__ == "__main__":

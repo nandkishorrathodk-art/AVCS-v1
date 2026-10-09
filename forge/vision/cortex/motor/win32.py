@@ -5,16 +5,18 @@ Features Per-Monitor V2 DPI awareness, high-precision timers, and multi-monitor 
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 from ctypes import wintypes
 import time
-from typing import Tuple
+from typing import List, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe
 
 # Input Types
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
+INPUT_HARDWARE = 2
 
 # Win32 Mouse Event Flags
 MOUSEEVENTF_MOVE = 0x0001
@@ -42,11 +44,22 @@ VK_CONTROL = 0x11
 VK_MENU = 0x12  # Alt
 VK_ESCAPE = 0x1B
 VK_SPACE = 0x20
+VK_PRIOR = 0x21  # Page Up
+VK_NEXT = 0x22   # Page Down
+VK_END = 0x23
+VK_HOME = 0x24
 VK_LEFT = 0x25
 VK_UP = 0x26
 VK_RIGHT = 0x27
 VK_DOWN = 0x28
+VK_INSERT = 0x2D
 VK_DELETE = 0x2E
+
+EXTENDED_VKS = {
+    VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN,
+    VK_DELETE, VK_INSERT, VK_HOME, VK_END,
+    VK_PRIOR, VK_NEXT,
+}
 
 KEY_NAME_TO_VK = {
     "enter": VK_RETURN,
@@ -57,6 +70,14 @@ KEY_NAME_TO_VK = {
     "back": VK_BACK,
     "delete": VK_DELETE,
     "del": VK_DELETE,
+    "insert": VK_INSERT,
+    "ins": VK_INSERT,
+    "home": VK_HOME,
+    "end": VK_END,
+    "pageup": VK_PRIOR,
+    "pgup": VK_PRIOR,
+    "pagedown": VK_NEXT,
+    "pgdn": VK_NEXT,
     "escape": VK_ESCAPE,
     "esc": VK_ESCAPE,
     "up": VK_UP,
@@ -71,6 +92,10 @@ KEY_NAME_TO_VK = {
     "windows": 0x5B,
     "cmd": 0x5B,
 }
+
+# Register function keys F1 through F24
+for _i in range(1, 25):
+    KEY_NAME_TO_VK[f"f{_i}"] = 0x70 + _i - 1
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
@@ -104,10 +129,19 @@ class KEYBDINPUT(ctypes.Structure):
     ]
 
 
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
+
+
 class _INPUT_UNION(ctypes.Union):
     _fields_ = [
         ("mi", MOUSEINPUT),
         ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
     ]
 
 
@@ -128,6 +162,8 @@ class Win32CursorDriver:
         self._setup_ctypes_signatures()
         self._init_high_res_timer()
         self.failsafe = CornerBreakoutFailSafe(enabled=failsafe)
+        self._active_keys: Set[int] = set()
+        atexit.register(self.panic_release)
 
     def _init_dpi_awareness(self) -> None:
         """Enables Per-Monitor V2 DPI awareness to prevent coordinate scaling drift."""
@@ -283,6 +319,8 @@ class Win32CursorDriver:
 
     def _send_key_input(self, vk: int = 0, scan: int = 0, flags: int = 0) -> None:
         """Dispatches serialized keyboard event via SendInput."""
+        if vk in EXTENDED_VKS:
+            flags |= KEYEVENTF_EXTENDEDKEY
         inp = INPUT()
         inp.type = INPUT_KEYBOARD
         inp.ki = KEYBDINPUT(
@@ -300,18 +338,25 @@ class Win32CursorDriver:
         name = str(vk_or_name).lower().strip()
         if name in KEY_NAME_TO_VK:
             return KEY_NAME_TO_VK[name]
-        if len(name) == 1 and name.isalnum():
-            return ord(name.upper())
+        if len(name) == 1:
+            if name.isalnum():
+                return ord(name.upper())
+            # Fallback to VkKeyScanW for symbols and punctuation
+            res = self.user32.VkKeyScanW(ord(name))
+            if res != -1:
+                return res & 0xFF
         raise ValueError(f"Unknown key name: '{vk_or_name}'")
 
     def key_down(self, vk_or_name: int | str) -> None:
         self.check_hardware_failsafe()
         vk = self._resolve_vk(vk_or_name)
         self._send_key_input(vk=vk, flags=0)
+        self._active_keys.add(vk)
 
     def key_up(self, vk_or_name: int | str) -> None:
         vk = self._resolve_vk(vk_or_name)
         self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
+        self._active_keys.discard(vk)
 
     def press_key(self, vk_or_name: int | str, hold_duration: float = 0.02) -> None:
         self.key_down(vk_or_name)
@@ -320,26 +365,36 @@ class Win32CursorDriver:
         self.key_up(vk_or_name)
 
     def press_hotkey(self, *keys: int | str, delay_between: float = 0.02) -> None:
-        """Presses multiple keys simultaneously in sequence, then releases in reverse."""
+        """Presses multiple keys simultaneously in sequence, then releases in reverse order."""
         self.check_hardware_failsafe()
         vks = [self._resolve_vk(k) for k in keys]
-        for vk in vks:
-            self._send_key_input(vk=vk, flags=0)
-            if delay_between > 0:
-                time.sleep(delay_between)
-        for vk in reversed(vks):
-            self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
-            if delay_between > 0:
-                time.sleep(delay_between)
+        pressed: List[int] = []
+        try:
+            for vk in vks:
+                self.key_down(vk)
+                pressed.append(vk)
+                if delay_between > 0:
+                    time.sleep(delay_between)
+        finally:
+            for vk in reversed(pressed):
+                try:
+                    self.key_up(vk)
+                except Exception:
+                    pass
+                if delay_between > 0:
+                    time.sleep(delay_between)
 
     def type_char(self, char: str) -> None:
-        """Sends a single Unicode character to the active window."""
+        """Sends a single Unicode character (including 32-bit emojis/surrogate pairs) to active window."""
         self.check_hardware_failsafe()
-        code_point = ord(char)
-        # Unicode KeyDown
-        self._send_key_input(vk=0, scan=code_point, flags=KEYEVENTF_UNICODE)
-        # Unicode KeyUp
-        self._send_key_input(vk=0, scan=code_point, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+        # Encode to UTF-16-LE to handle BMP characters and surrogate pairs for SMP characters (emojis)
+        utf16_bytes = char.encode("utf-16-le")
+        code_units = [int.from_bytes(utf16_bytes[i:i+2], "little") for i in range(0, len(utf16_bytes), 2)]
+        for cu in code_units:
+            # Unicode KeyDown
+            self._send_key_input(vk=0, scan=cu, flags=KEYEVENTF_UNICODE)
+            # Unicode KeyUp
+            self._send_key_input(vk=0, scan=cu, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
 
     def type_text(
         self,
@@ -348,14 +403,7 @@ class Win32CursorDriver:
         clear_first: bool = False,
         press_enter: bool = False,
     ) -> None:
-        """Types string directly into active focus using SendInput Unicode events.
-
-        Args:
-            text: Text string to type.
-            key_delay_ms: Inter-character delay in milliseconds for natural input timing.
-            clear_first: If True, executes Ctrl+A followed by Backspace to clear existing input.
-            press_enter: If True, presses Enter key after typing text.
-        """
+        """Types string directly into active focus using SendInput Unicode events."""
         self.check_hardware_failsafe()
         if clear_first:
             self.press_hotkey("ctrl", "a")
@@ -363,13 +411,16 @@ class Win32CursorDriver:
             self.press_key("backspace")
             time.sleep(0.03)
 
+        normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
         delay_sec = max(0.0, key_delay_ms / 1000.0)
-        for ch in text:
+        for ch in normalized_text:
             self.check_hardware_failsafe()
             if ch == "\n":
                 self.press_key(VK_RETURN)
             elif ch == "\t":
                 self.press_key(VK_TAB)
+            elif ch == "\b":
+                self.press_key(VK_BACK)
             else:
                 self.type_char(ch)
             if delay_sec > 0:
@@ -378,4 +429,22 @@ class Win32CursorDriver:
         if press_enter:
             time.sleep(0.02)
             self.press_key(VK_RETURN)
+
+    def panic_release(self) -> None:
+        """Emergency release for all currently held keys and mouse buttons."""
+        for flag in (MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP):
+            try:
+                self._send_mouse_input(flag)
+            except Exception:
+                pass
+        for vk in list(self._active_keys):
+            try:
+                self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
+            except Exception:
+                pass
+        self._active_keys.clear()
+
+    def close(self) -> None:
+        """Closes driver and safely releases any held hardware inputs."""
+        self.panic_release()
 

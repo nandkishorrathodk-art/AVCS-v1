@@ -207,3 +207,40 @@ def test_mcp_stdio_stream_loop():
     assert r1["id"] == 1
     assert r2["id"] == 2
 
+
+def test_mcp_error_handling_and_notifications(test_server):
+    # 1. Notification suppression (no "id" member)
+    notif = {"jsonrpc": "2.0", "method": "notifications/custom_event", "params": {}}
+    resp = test_server.handle_request(notif)
+    assert resp is None  # MUST NOT reply to notifications per JSON-RPC 2.0
+
+    # 2. Invalid coordinates in click tool returns isError: true inside CallToolResult
+    bad_req = {
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "click",
+            "arguments": {"x": 2.5, "y": -0.5},
+        },
+    }
+    resp = test_server.handle_request(bad_req)
+    assert resp["id"] == 99
+    assert resp["result"]["isError"] is True
+    assert "must be finite numbers within [0.0, 1.0]" in resp["result"]["content"][0]["text"]
+
+    # 3. wait_stable returns True on synthetic screen
+    wait_req = {
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "tools/call",
+        "params": {
+            "name": "wait_stable",
+            "arguments": {"timeout_seconds": 1.0},
+        },
+    }
+    resp_wait = test_server.handle_request(wait_req)
+    assert resp_wait["id"] == 100
+    assert resp_wait["result"]["isError"] is False
+    assert "Stability reached: True" in resp_wait["result"]["content"][0]["text"]
+

@@ -47,12 +47,15 @@ class BaseAVCSDriver(abc.ABC):
     def execute_tool(self, name: str, args: Dict[str, Any]) -> Tuple[Any, bool, Optional[str]]:
         """Executes a canonical AVCS action and verifies post-condition visual state."""
         start_t = time.time()
+        tool_output: Any = None
+        tool_success: bool = False
+        tool_error: Optional[str] = None
         try:
             if name == "locate":
                 query = args.get("query", "")
                 x, y = self.eye.locate(query)
-                res = {"target": query, "x": round(float(x), 4), "y": round(float(y), 4)}
-                return res, True, None
+                tool_output = {"target": query, "x": round(float(x), 4), "y": round(float(y), 4)}
+                tool_success = True
 
             elif name == "click":
                 query = args.get("query")
@@ -63,9 +66,10 @@ class BaseAVCSDriver(abc.ABC):
 
                 if query:
                     ok = self.eye.click_target(query=query, button=button, force_virtual=self.force_virtual_motor)
-                    return {"action": "click", "target": query, "success": ok}, ok, None
+                    tool_output = {"action": "click", "target": query, "success": ok}
+                    tool_success = ok
 
-                if x is not None and y is not None:
+                elif x is not None and y is not None:
                     res = self.eye.steer_hand_physical(
                         target_gaze=(float(x), float(y)),
                         click_on_arrival=True,
@@ -74,17 +78,19 @@ class BaseAVCSDriver(abc.ABC):
                     )
                     if double_click:
                         self.reflex.driver.double_click(button=button)
-                    return {"action": "click", "x": x, "y": y, "contact": res.contact_acquired}, True, None
+                    tool_output = {"action": "click", "x": x, "y": y, "contact": res.contact_acquired}
+                    tool_success = True
 
-                # Default: click gaze fixation
-                gaze = self.eye.cortex.retina.current_fixation
-                res = self.eye.steer_hand_physical(
-                    target_gaze=gaze,
-                    click_on_arrival=True,
-                    force_virtual=self.force_virtual_motor,
-                    realtime=False,
-                )
-                return {"action": "click", "fixation": gaze, "contact": res.contact_acquired}, True, None
+                else:
+                    gaze = self.eye.cortex.retina.current_fixation
+                    res = self.eye.steer_hand_physical(
+                        target_gaze=gaze,
+                        click_on_arrival=True,
+                        force_virtual=self.force_virtual_motor,
+                        realtime=False,
+                    )
+                    tool_output = {"action": "click", "fixation": gaze, "contact": res.contact_acquired}
+                    tool_success = True
 
             elif name == "type_text":
                 text = args.get("text", "")
@@ -96,7 +102,8 @@ class BaseAVCSDriver(abc.ABC):
                     press_enter=press_enter,
                     force_virtual=self.force_virtual_motor,
                 )
-                return {"action": "type_text", "characters": len(text)}, True, None
+                tool_output = {"action": "type_text", "characters": len(text)}
+                tool_success = True
 
             elif name == "type_into":
                 query = args.get("query", "")
@@ -110,7 +117,8 @@ class BaseAVCSDriver(abc.ABC):
                     press_enter=press_enter,
                     force_virtual=self.force_virtual_motor,
                 )
-                return {"action": "type_into", "target": query, "success": ok}, ok, None
+                tool_output = {"action": "type_into", "target": query, "success": ok}
+                tool_success = ok
 
             elif name == "wait_stable":
                 timeout = float(args.get("timeout_seconds", 3.0))
@@ -119,11 +127,12 @@ class BaseAVCSDriver(abc.ABC):
                 stable = False
                 while time.time() - start_w < timeout:
                     state = self.eye.perceive_now()
-                    if state.stability_state in ("stable_scene", "nominal"):
+                    if state.stability_state in ("stable", "stable_scene", "nominal") or state.surprise_score < (1.0 - thresh):
                         stable = True
                         break
                     time.sleep(0.05)
-                return {"action": "wait_stable", "stable": stable}, True, None
+                tool_output = {"action": "wait_stable", "stable": stable}
+                tool_success = True
 
             elif name == "get_affordances":
                 action_type = args.get("action_type", "clickable")
@@ -134,18 +143,24 @@ class BaseAVCSDriver(abc.ABC):
                     for x, y, conf in spots
                     if conf >= min_conf
                 ]
-                return {"action_type": action_type, "hotspots": filtered}, True, None
+                tool_output = {"action_type": action_type, "hotspots": filtered}
+                tool_success = True
 
             elif name == "press_hotkey":
                 keys = args.get("keys", [])
                 self.eye.press_hotkey(*keys, force_virtual=self.force_virtual_motor)
-                return {"action": "press_hotkey", "keys": keys}, True, None
+                tool_output = {"action": "press_hotkey", "keys": keys}
+                tool_success = True
 
             else:
-                return None, False, f"Unknown tool: '{name}'"
+                tool_output = None
+                tool_success = False
+                tool_error = f"Unknown tool: '{name}'"
 
         except Exception as e:
-            return None, False, str(e)
+            tool_output = None
+            tool_success = False
+            tool_error = str(e)
         finally:
             elapsed = time.time() - start_t
             state = self.eye.current_state or self.eye.perceive_now()
@@ -153,14 +168,16 @@ class BaseAVCSDriver(abc.ABC):
                 step_index=len(self.step_history) + 1,
                 tool_name=name,
                 tool_args=args,
-                output=res if "res" in locals() else None,
+                output=tool_output,
                 elapsed_seconds=elapsed,
                 screen_category=state.primary_category,
                 stability_state=state.stability_state,
                 surprise_score=state.surprise_score,
-                success="res" in locals(),
+                success=tool_success,
             )
             self.step_history.append(step_res)
+
+        return tool_output, tool_success, tool_error
 
     def close(self) -> None:
         self.reflex.close()

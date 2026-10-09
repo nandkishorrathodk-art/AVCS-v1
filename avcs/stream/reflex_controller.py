@@ -6,6 +6,7 @@ persistent key holds, and biological surprise-triggered reflexes for dynamic vid
 from __future__ import annotations
 
 import collections
+import math
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -52,9 +53,15 @@ class GameReflexController:
     ) -> Callable[[Callable[[NeuroPacket], None]], Callable[[NeuroPacket], None]]:
         """Decorator to register a hardware reflex callback on sudden visual changes."""
         def decorator(cb: Callable[[NeuroPacket], None]) -> Callable[[NeuroPacket], None]:
-            self._surprise_hooks.append((threshold, cb))
+            with self._lock:
+                self._surprise_hooks.append((threshold, cb))
             return cb
         return decorator
+
+    def remove_surprise_hook(self, cb: Callable[[NeuroPacket], None]) -> None:
+        """Removes a registered surprise callback."""
+        with self._lock:
+            self._surprise_hooks = [h for h in self._surprise_hooks if h[1] != cb]
 
     # --- Continuous Keyboard Actuation ---
 
@@ -63,11 +70,11 @@ class GameReflexController:
         with self._lock:
             key_clean = key.lower().strip()
             if key_clean not in self._held_keys:
-                self._held_keys.add(key_clean)
                 if hasattr(self.driver, "key_down"):
                     self.driver.key_down(key_clean)
                 elif hasattr(self.driver, "press_key"):
                     self.driver.press_key(key_clean)
+                self._held_keys.add(key_clean)
 
     def release_key(self, key: str) -> None:
         """Releases a currently held key."""
@@ -108,12 +115,20 @@ class GameReflexController:
         """Performs a single proportional visual servoing aim adjustment towards target."""
         curr_x, curr_y = self.driver.get_position_normalized()
         tx, ty = target_norm
+
+        # IEEE 754 NaN / Inf safety guard
+        if not (math.isfinite(tx) and math.isfinite(ty)):
+            return (curr_x, curr_y)
+
         dx = (tx - curr_x) * gain
         dy = (ty - curr_y) * gain
 
-        # Clamp max delta per reflex step
-        dx = max(-max_step, min(max_step, dx))
-        dy = max(-max_step, min(max_step, dy))
+        # Direction-preserving Euclidean vector clamping
+        dist = math.hypot(dx, dy)
+        if dist > max_step and dist > 1e-9:
+            scale = max_step / dist
+            dx *= scale
+            dy *= scale
 
         new_x = max(0.0, min(1.0, curr_x + dx))
         new_y = max(0.0, min(1.0, curr_y + dy))
@@ -132,4 +147,10 @@ class GameReflexController:
         self.release_all_keys()
         if self._unsubscribe_bus:
             self._unsubscribe_bus()
+
+    def __enter__(self) -> GameReflexController:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 

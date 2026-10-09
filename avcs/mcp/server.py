@@ -46,9 +46,14 @@ class AVCSMCPServer:
 
     def handle_request(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Processes a single JSON-RPC request and returns the response dictionary."""
+        is_notification = ("id" not in req)
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params", {})
+
+        # Notifications (no response permitted per JSON-RPC 2.0 sec 4.1)
+        if is_notification:
+            return None
 
         if not method:
             return {
@@ -56,10 +61,6 @@ class AVCSMCPServer:
                 "id": req_id,
                 "error": {"code": -32600, "message": "Invalid Request: missing method"},
             }
-
-        # Notifications (no response required)
-        if method == "notifications/initialized":
-            return None
 
         # Standard MCP Methods
         if method == "initialize":
@@ -105,15 +106,16 @@ class AVCSMCPServer:
                     "id": req_id,
                     "result": {
                         "content": result_content,
+                        "isError": False,
                     },
                 }
             except Exception as e:
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {
-                        "code": -32603,
-                        "message": f"Tool execution failed: {str(e)}",
+                    "result": {
+                        "content": [{"type": "text", "text": f"Tool execution failed: {str(e)}"}],
+                        "isError": True,
                     },
                 }
 
@@ -142,7 +144,7 @@ class AVCSMCPServer:
         if method == "resources/read":
             uri = params.get("uri")
             eye = self._ensure_eye()
-            state = eye.current_state or eye.perceive_now()
+            state = eye.perceive_now()
             if uri == "avcs://screen/state":
                 data = {
                     "stability_state": state.stability_state,
@@ -217,8 +219,13 @@ class AVCSMCPServer:
                 return [{"type": "text", "text": msg}]
 
             if x is not None and y is not None:
+                x_f = float(x)
+                y_f = float(y)
+                import math
+                if not (0.0 <= x_f <= 1.0 and 0.0 <= y_f <= 1.0 and math.isfinite(x_f) and math.isfinite(y_f)):
+                    raise ValueError(f"Normalized coordinates ({x}, {y}) must be finite numbers within [0.0, 1.0]")
                 res = eye.steer_hand_physical(
-                    target_gaze=(float(x), float(y)),
+                    target_gaze=(x_f, y_f),
                     click_on_arrival=True,
                     force_virtual=self.force_virtual_motor,
                     realtime=False,
@@ -227,7 +234,7 @@ class AVCSMCPServer:
                     from forge.vision.cortex.motor import get_default_driver
                     driver = get_default_driver(force_virtual=self.force_virtual_motor)
                     driver.double_click(button=button)
-                msg = f"Steered to ({x:.4f}, {y:.4f}) and clicked {button}. Contact: {res.contact_acquired}"
+                msg = f"Steered to ({x_f:.4f}, {y_f:.4f}) and clicked {button}. Contact: {res.contact_acquired}"
                 return [{"type": "text", "text": msg}]
 
             # Fallback: click current gaze fixation
@@ -274,7 +281,7 @@ class AVCSMCPServer:
             stable = False
             while time.time() - start_t < timeout:
                 state = eye.perceive_now()
-                if state.stability_state in ("stable_scene", "nominal"):
+                if state.stability_state in ("stable", "stable_scene", "nominal") or state.surprise_score < (1.0 - thresh):
                     stable = True
                     break
                 time.sleep(0.05)

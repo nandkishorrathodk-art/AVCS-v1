@@ -50,12 +50,15 @@ class NeuroPacket:
             ],
         }
 
+    COMPACT_FMT_40 = "<dI5fB7x"
+    COMPACT_FMT_33 = "<dI5fB"
+
     def pack_compact(self) -> bytes:
-        """Serializes core coordinates and flow into compact binary for sub-millisecond IPC."""
+        """Serializes core coordinates and flow into 40-byte C-ABI aligned binary for IPC."""
         return struct.pack(
-            "<dI5fB",
-            self.timestamp,
-            self.seq,
+            self.COMPACT_FMT_40,
+            float(self.timestamp),
+            int(self.seq),
             float(self.fixation[0]),
             float(self.fixation[1]),
             float(self.motor_flow[0]),
@@ -66,8 +69,12 @@ class NeuroPacket:
 
     @classmethod
     def unpack_compact(cls, data: bytes) -> Dict[str, Any]:
-        """Unpacks compact binary stream telemetry."""
-        ts, seq, fx, fy, flowx, flowy, surprise, contact = struct.unpack("<dI5fB", data[:struct.calcsize("<dI5fB")])
+        """Unpacks compact binary stream telemetry (supports 40-byte aligned and legacy 33-byte)."""
+        fmt = cls.COMPACT_FMT_40 if len(data) >= 40 else cls.COMPACT_FMT_33
+        size = struct.calcsize(fmt)
+        if len(data) < size:
+            raise ValueError(f"Data length {len(data)} is too short for format {fmt} (needs {size} bytes)")
+        ts, seq, fx, fy, flowx, flowy, surprise, contact = struct.unpack(fmt, data[:size])
         return {
             "timestamp": ts,
             "seq": seq,
@@ -100,9 +107,10 @@ class NeuroStreamBus:
                 inst_fps = 1.0 / dt
                 self._fps = 0.9 * self._fps + 0.1 * inst_fps if self._fps > 0 else inst_fps
             self._last_tick_time = now
+            subs = list(self._subscribers)
 
         # Non-blocking notification to subscribers
-        for sub in list(self._subscribers):
+        for sub in subs:
             try:
                 sub(packet)
             except Exception:
@@ -149,22 +157,25 @@ class RealTimeNeuroStreamer:
         self._active = False
         self._setup_listener()
 
+    def _create_packet(self, state: CortexState) -> NeuroPacket:
+        return NeuroPacket(
+            timestamp=time.time(),
+            seq=self._seq,
+            fixation=state.fixation,
+            motor_flow=state.motor_flow,
+            contact_acquired=state.contact_acquired,
+            primary_category=state.primary_category,
+            stability_state=state.stability_state,
+            surprise_score=state.surprise_score,
+            inference_ms=state.inference_ms,
+            action_hotspots=list(state.action_hotspots or []),
+            visual_latent=state.visual_latent,
+        )
+
     def _setup_listener(self) -> None:
         def on_screen_state(state: CortexState) -> None:
             self._seq += 1
-            packet = NeuroPacket(
-                timestamp=time.time(),
-                seq=self._seq,
-                fixation=state.fixation,
-                motor_flow=state.motor_flow,
-                contact_acquired=state.contact_acquired,
-                primary_category=state.primary_category,
-                stability_state=state.stability_state,
-                surprise_score=state.surprise_score,
-                inference_ms=state.inference_ms,
-                action_hotspots=list(state.action_hotspots or []),
-                visual_latent=state.visual_latent,
-            )
+            packet = self._create_packet(state)
             self.bus.publish(packet)
 
         self.eye.on_change(on_screen_state)
@@ -180,20 +191,13 @@ class RealTimeNeuroStreamer:
 
     def step_once(self) -> NeuroPacket:
         """Forces a single synchronous perception tick and broadcasts the resulting packet."""
+        prev_seq = self._seq
         state = self.eye.perceive_now()
+        latest = self.bus.get_latest()
+        if latest is not None and self._seq > prev_seq:
+            return latest
+
         self._seq += 1
-        packet = NeuroPacket(
-            timestamp=time.time(),
-            seq=self._seq,
-            fixation=state.fixation,
-            motor_flow=state.motor_flow,
-            contact_acquired=state.contact_acquired,
-            primary_category=state.primary_category,
-            stability_state=state.stability_state,
-            surprise_score=state.surprise_score,
-            inference_ms=state.inference_ms,
-            action_hotspots=list(state.action_hotspots or []),
-            visual_latent=state.visual_latent,
-        )
+        packet = self._create_packet(state)
         self.bus.publish(packet)
         return packet

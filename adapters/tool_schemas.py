@@ -209,14 +209,25 @@ def get_openai_tools(strict: bool = False) -> List[Dict[str, Any]]:
     """Returns tool definitions formatted for OpenAI Function Calling (ChatCompletions API)."""
     tools = []
     for tool in CANONICAL_TOOLS_REGISTRY:
+        params = copy.deepcopy(tool["parameters"])
         fn_def: Dict[str, Any] = {
             "name": tool["name"],
             "description": tool["description"],
-            "parameters": copy.deepcopy(tool["parameters"]),
+            "parameters": params,
         }
         if strict:
             fn_def["strict"] = True
-            fn_def["parameters"]["additionalProperties"] = False
+            params["additionalProperties"] = False
+            props = params.get("properties", {})
+            orig_req = set(params.get("required", []))
+            params["required"] = list(props.keys())
+            for key, spec in props.items():
+                if "default" in spec:
+                    del spec["default"]
+                if key not in orig_req:
+                    curr_type = spec.get("type")
+                    if isinstance(curr_type, str):
+                        spec["type"] = [curr_type, "null"]
         tools.append({
             "type": "function",
             "function": fn_def,

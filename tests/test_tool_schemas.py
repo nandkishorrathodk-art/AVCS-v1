@@ -57,6 +57,12 @@ def test_openai_and_ollama_tools_format():
         assert "parameters" in fn
         assert fn.get("strict") is True
         assert fn["parameters"].get("additionalProperties") is False
+        # In strict mode, all properties must be in required
+        props = fn["parameters"]["properties"]
+        assert set(fn["parameters"]["required"]) == set(props.keys())
+        # In strict mode, no property may specify a default value
+        for prop_name, spec in props.items():
+            assert "default" not in spec
         json.dumps(t)
 
 

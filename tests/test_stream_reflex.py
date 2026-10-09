@@ -31,7 +31,7 @@ def test_neuro_packet_compact_packing():
     )
 
     data = pkt.pack_compact()
-    assert len(data) == 33
+    assert len(data) == 40  # 40-byte C-ABI natural alignment
 
     unpacked = NeuroPacket.unpack_compact(data)
     assert unpacked["seq"] == 42
@@ -40,6 +40,12 @@ def test_neuro_packet_compact_packing():
     assert abs(unpacked["motor_flow"][0] - 0.01) < 1e-4
     assert unpacked["contact_acquired"] is True
     assert abs(unpacked["surprise_score"] - 0.12) < 1e-4
+
+    # Backwards compatibility test with legacy 33-byte payload
+    legacy_33 = data[:33]
+    unpacked_legacy = NeuroPacket.unpack_compact(legacy_33)
+    assert unpacked_legacy["seq"] == 42
+    assert abs(unpacked_legacy["surprise_score"] - 0.12) < 1e-4
 
 
 def test_neuro_stream_bus_pub_sub_and_ring_buffer():
@@ -103,10 +109,22 @@ def test_realtime_streamer_and_reflex_controller():
     def on_surprise(pkt):
         reflex_triggered.append(pkt.seq)
 
-    # Step perception
+    # Step perception and verify exactly ONE packet published per tick
+    count_before = bus.packet_count
     p1 = streamer.step_once()
     assert p1.seq >= 1
-    assert bus.get_latest() is not None
+    assert bus.packet_count == count_before + 1  # Deduplication verification
+
+    # Test NaN aim safety guard (must not drift or raise)
+    pos_before = driver.get_position_normalized()
+    pos_after = controller.aim_towards((float("nan"), float("nan")), gain=0.5, max_step=0.2)
+    assert pos_after == pos_before
+
+    # Test driver held keys synchronization
+    controller.hold_key("shift")
+    assert "shift" in driver.held_keys
+    controller.release_key("shift")
+    assert "shift" not in driver.held_keys
 
     # Manually fire a surprise packet to verify reflex trigger
     surprise_pkt = NeuroPacket(

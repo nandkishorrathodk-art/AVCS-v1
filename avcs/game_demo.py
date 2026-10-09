@@ -89,10 +89,11 @@ def run_game_demo(duration_seconds: float = 3.0, virtual_motor: bool = True) -> 
 
     reflexes_fired = []
 
-    @controller.on_surprise_reflex(threshold=0.25)
+    # Calibrated surprise spike threshold with non-blocking reflex action
+    @controller.on_surprise_reflex(threshold=0.92)
     def on_game_surprise(pkt: NeuroPacket):
         reflexes_fired.append((pkt.timestamp, pkt.surprise_score))
-        controller.tap_key("space")  # Emergency dodge/jump
+        controller.tap_key("space", duration=0.005)  # Fast non-blocking dodge/jump
 
     print(f"Tracking 60Hz game loop for {duration_seconds:.1f} seconds...")
     start_t = time.time()
@@ -112,8 +113,13 @@ def run_game_demo(duration_seconds: float = 3.0, virtual_motor: bool = True) -> 
         tick_start = time.perf_counter()
         pkt = streamer.step_once()
 
-        # Proportional tracking aim towards moving target
-        target = game_screen.target_pos
+        # Proportional tracking aim towards visual target
+        # Fallback to simulated target_pos if foveal hotspots are still converging
+        target = (
+            (pkt.action_hotspots[0][0], pkt.action_hotspots[0][1])
+            if pkt.action_hotspots
+            else game_screen.target_pos
+        )
         curr_aim = controller.aim_towards((target[0], target[1]), gain=0.6, max_step=0.08)
 
         tick_time_ms = (time.perf_counter() - tick_start) * 1000.0

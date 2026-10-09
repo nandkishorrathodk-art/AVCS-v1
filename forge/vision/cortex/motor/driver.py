@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import List, Optional, Protocol, Tuple
+from typing import List, Optional, Protocol, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe, SafetyBreakoutException
 
@@ -52,6 +52,12 @@ class OSCursorDriver(Protocol):
     def press_key(self, key: str, hold_duration: float = 0.02) -> None:
         ...
 
+    def key_down(self, key: str) -> None:
+        ...
+
+    def key_up(self, key: str) -> None:
+        ...
+
     def press_hotkey(self, *keys: str) -> None:
         ...
 
@@ -72,10 +78,16 @@ class VirtualCursorDriver:
         self.trajectory_history: List[Tuple[float, float]] = [(self._norm_x, self._norm_y)]
         self.typed_history: List[str] = []
         self.key_history: List[str] = []
+        self.held_keys: Set[str] = set()
 
     @property
     def screen_size(self) -> Tuple[int, int]:
         return self._screen_size
+
+    def _check_failsafe(self) -> None:
+        px, py = self.get_position_pixels()
+        w, h = self._screen_size
+        self.failsafe.check(px, py, w, h)
 
     def get_position_pixels(self) -> Tuple[int, int]:
         w, h = self._screen_size
@@ -109,7 +121,15 @@ class VirtualCursorDriver:
         px, py = self.get_position_pixels()
         self.move_to_pixels(px + dx, py + dy)
 
+    def mouse_down(self, button: str = "left") -> None:
+        self._check_failsafe()
+        self.click_history.append((self._norm_x, self._norm_y, f"{button}_down"))
+
+    def mouse_up(self, button: str = "left") -> None:
+        self.click_history.append((self._norm_x, self._norm_y, f"{button}_up"))
+
     def click(self, button: str = "left", hold_duration: float = 0.02) -> None:
+        self._check_failsafe()
         self.click_history.append((self._norm_x, self._norm_y, button))
 
     def double_click(self, button: str = "left", interval: float = 0.08) -> None:
@@ -123,6 +143,7 @@ class VirtualCursorDriver:
         clear_first: bool = False,
         press_enter: bool = False,
     ) -> None:
+        self._check_failsafe()
         if clear_first:
             self.key_history.append("ctrl+a")
             self.key_history.append("backspace")
@@ -130,11 +151,30 @@ class VirtualCursorDriver:
         if press_enter:
             self.key_history.append("enter")
 
+    def key_down(self, key: str) -> None:
+        self._check_failsafe()
+        k = str(key).lower().strip()
+        self.held_keys.add(k)
+        self.key_history.append(f"{k}_down")
+
+    def key_up(self, key: str) -> None:
+        k = str(key).lower().strip()
+        self.held_keys.discard(k)
+        self.key_history.append(f"{k}_up")
+
     def press_key(self, key: str, hold_duration: float = 0.02) -> None:
+        self._check_failsafe()
         self.key_history.append(key)
 
     def press_hotkey(self, *keys: str) -> None:
+        self._check_failsafe()
         self.key_history.append("+".join(str(k) for k in keys))
+
+    def panic_release(self) -> None:
+        self.held_keys.clear()
+
+    def close(self) -> None:
+        self.panic_release()
 
 
 
