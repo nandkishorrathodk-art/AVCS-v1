@@ -14,6 +14,7 @@ from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe
 
 # Input Types
 INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
 
 # Win32 Mouse Event Flags
 MOUSEEVENTF_MOVE = 0x0001
@@ -25,6 +26,51 @@ MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
+
+# Win32 Keyboard Event Flags
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_SCANCODE = 0x0008
+
+# Standard Virtual-Key Codes
+VK_BACK = 0x08
+VK_TAB = 0x09
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12  # Alt
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_LEFT = 0x25
+VK_UP = 0x26
+VK_RIGHT = 0x27
+VK_DOWN = 0x28
+VK_DELETE = 0x2E
+
+KEY_NAME_TO_VK = {
+    "enter": VK_RETURN,
+    "return": VK_RETURN,
+    "tab": VK_TAB,
+    "space": VK_SPACE,
+    "backspace": VK_BACK,
+    "back": VK_BACK,
+    "delete": VK_DELETE,
+    "del": VK_DELETE,
+    "escape": VK_ESCAPE,
+    "esc": VK_ESCAPE,
+    "up": VK_UP,
+    "down": VK_DOWN,
+    "left": VK_LEFT,
+    "right": VK_RIGHT,
+    "shift": VK_SHIFT,
+    "ctrl": VK_CONTROL,
+    "control": VK_CONTROL,
+    "alt": VK_MENU,
+    "win": 0x5B,
+    "windows": 0x5B,
+    "cmd": 0x5B,
+}
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
@@ -48,8 +94,21 @@ class MOUSEINPUT(ctypes.Structure):
     ]
 
 
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
 class _INPUT_UNION(ctypes.Union):
-    _fields_ = [("mi", MOUSEINPUT)]
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+    ]
 
 
 class INPUT(ctypes.Structure):
@@ -221,3 +280,102 @@ class Win32CursorDriver:
         self.click(button=button)
         time.sleep(interval)
         self.click(button=button)
+
+    def _send_key_input(self, vk: int = 0, scan: int = 0, flags: int = 0) -> None:
+        """Dispatches serialized keyboard event via SendInput."""
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.ki = KEYBDINPUT(
+            wVk=vk,
+            wScan=scan,
+            dwFlags=flags,
+            time=0,
+            dwExtraInfo=0,
+        )
+        self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    def _resolve_vk(self, vk_or_name: int | str) -> int:
+        if isinstance(vk_or_name, int):
+            return vk_or_name
+        name = str(vk_or_name).lower().strip()
+        if name in KEY_NAME_TO_VK:
+            return KEY_NAME_TO_VK[name]
+        if len(name) == 1 and name.isalnum():
+            return ord(name.upper())
+        raise ValueError(f"Unknown key name: '{vk_or_name}'")
+
+    def key_down(self, vk_or_name: int | str) -> None:
+        self.check_hardware_failsafe()
+        vk = self._resolve_vk(vk_or_name)
+        self._send_key_input(vk=vk, flags=0)
+
+    def key_up(self, vk_or_name: int | str) -> None:
+        vk = self._resolve_vk(vk_or_name)
+        self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
+
+    def press_key(self, vk_or_name: int | str, hold_duration: float = 0.02) -> None:
+        self.key_down(vk_or_name)
+        if hold_duration > 0:
+            time.sleep(hold_duration)
+        self.key_up(vk_or_name)
+
+    def press_hotkey(self, *keys: int | str, delay_between: float = 0.02) -> None:
+        """Presses multiple keys simultaneously in sequence, then releases in reverse."""
+        self.check_hardware_failsafe()
+        vks = [self._resolve_vk(k) for k in keys]
+        for vk in vks:
+            self._send_key_input(vk=vk, flags=0)
+            if delay_between > 0:
+                time.sleep(delay_between)
+        for vk in reversed(vks):
+            self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
+            if delay_between > 0:
+                time.sleep(delay_between)
+
+    def type_char(self, char: str) -> None:
+        """Sends a single Unicode character to the active window."""
+        self.check_hardware_failsafe()
+        code_point = ord(char)
+        # Unicode KeyDown
+        self._send_key_input(vk=0, scan=code_point, flags=KEYEVENTF_UNICODE)
+        # Unicode KeyUp
+        self._send_key_input(vk=0, scan=code_point, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        """Types string directly into active focus using SendInput Unicode events.
+
+        Args:
+            text: Text string to type.
+            key_delay_ms: Inter-character delay in milliseconds for natural input timing.
+            clear_first: If True, executes Ctrl+A followed by Backspace to clear existing input.
+            press_enter: If True, presses Enter key after typing text.
+        """
+        self.check_hardware_failsafe()
+        if clear_first:
+            self.press_hotkey("ctrl", "a")
+            time.sleep(0.03)
+            self.press_key("backspace")
+            time.sleep(0.03)
+
+        delay_sec = max(0.0, key_delay_ms / 1000.0)
+        for ch in text:
+            self.check_hardware_failsafe()
+            if ch == "\n":
+                self.press_key(VK_RETURN)
+            elif ch == "\t":
+                self.press_key(VK_TAB)
+            else:
+                self.type_char(ch)
+            if delay_sec > 0:
+                time.sleep(delay_sec)
+
+        if press_enter:
+            time.sleep(0.02)
+            self.press_key(VK_RETURN)
+

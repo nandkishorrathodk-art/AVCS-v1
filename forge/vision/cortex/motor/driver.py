@@ -40,6 +40,21 @@ class OSCursorDriver(Protocol):
     def double_click(self, button: str = "left", interval: float = 0.08) -> None:
         ...
 
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        ...
+
+    def press_key(self, key: str, hold_duration: float = 0.02) -> None:
+        ...
+
+    def press_hotkey(self, *keys: str) -> None:
+        ...
+
 
 class VirtualCursorDriver:
     """In-memory simulated cursor driver for headless testing and CI."""
@@ -55,6 +70,8 @@ class VirtualCursorDriver:
         self.failsafe = CornerBreakoutFailSafe(enabled=failsafe)
         self.click_history: List[Tuple[float, float, str]] = []
         self.trajectory_history: List[Tuple[float, float]] = [(self._norm_x, self._norm_y)]
+        self.typed_history: List[str] = []
+        self.key_history: List[str] = []
 
     @property
     def screen_size(self) -> Tuple[int, int]:
@@ -98,6 +115,27 @@ class VirtualCursorDriver:
     def double_click(self, button: str = "left", interval: float = 0.08) -> None:
         self.click(button=button)
         self.click(button=button)
+
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        if clear_first:
+            self.key_history.append("ctrl+a")
+            self.key_history.append("backspace")
+        self.typed_history.append(text)
+        if press_enter:
+            self.key_history.append("enter")
+
+    def press_key(self, key: str, hold_duration: float = 0.02) -> None:
+        self.key_history.append(key)
+
+    def press_hotkey(self, *keys: str) -> None:
+        self.key_history.append("+".join(str(k) for k in keys))
+
 
 
 def get_default_driver(force_virtual: bool = False, failsafe: bool = True) -> OSCursorDriver:

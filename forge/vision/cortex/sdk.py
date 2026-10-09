@@ -173,6 +173,74 @@ class ScreenEye:
             realtime=realtime,
         )
 
+    def click_target(
+        self,
+        query: str,
+        button: str = "left",
+        timeout_seconds: float = 1.5,
+        force_virtual: bool = False,
+        realtime: bool = False,
+    ) -> bool:
+        """Locates visual target by query and physically steers cursor to click it."""
+        target = self.locate(query)
+        res = self.steer_hand_physical(
+            target_gaze=target,
+            click_on_arrival=True,
+            timeout_seconds=timeout_seconds,
+            force_virtual=force_virtual,
+            realtime=realtime,
+        )
+        return bool(res.contact_acquired)
+
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+        force_virtual: bool = False,
+    ) -> None:
+        """Types text via the OS hardware or virtual keyboard driver."""
+        from forge.vision.cortex.motor import get_default_driver
+        driver = get_default_driver(force_virtual=force_virtual)
+        driver.type_text(
+            text=text,
+            key_delay_ms=key_delay_ms,
+            clear_first=clear_first,
+            press_enter=press_enter,
+        )
+
+    def press_key(self, key: str, force_virtual: bool = False) -> None:
+        """Presses and releases a single key via keyboard driver."""
+        from forge.vision.cortex.motor import get_default_driver
+        driver = get_default_driver(force_virtual=force_virtual)
+        driver.press_key(key)
+
+    def press_hotkey(self, *keys: str, force_virtual: bool = False) -> None:
+        """Presses and releases a hotkey combination via keyboard driver."""
+        from forge.vision.cortex.motor import get_default_driver
+        driver = get_default_driver(force_virtual=force_virtual)
+        driver.press_hotkey(*keys)
+
+    def type_into(
+        self,
+        query: str,
+        text: str,
+        clear_first: bool = True,
+        press_enter: bool = True,
+        force_virtual: bool = False,
+    ) -> bool:
+        """Locates an input field, clicks it to gain focus, and types text."""
+        success = self.click_target(query=query, force_virtual=force_virtual)
+        if success:
+            self.type_text(
+                text=text,
+                clear_first=clear_first,
+                press_enter=press_enter,
+                force_virtual=force_virtual,
+            )
+        return success
+
     def get_affordances(self, action_type: str = "clickable") -> List[Tuple[float, float, float]]:
         """Returns list of normalized (x, y, confidence) points for interactive controls."""
         state = self.current_state or self.perceive_now()

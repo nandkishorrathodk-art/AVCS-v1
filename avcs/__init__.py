@@ -27,6 +27,20 @@ from avcs.weights import (
     get_weights_path,
     load_avcs_weights,
 )
+from avcs.stream import (
+    NeuroPacket,
+    NeuroStreamBus,
+    RealTimeNeuroStreamer,
+    GameReflexController,
+)
+from avcs.drivers import (
+    BaseAVCSDriver,
+    StepResult,
+    AnthropicAVCSDriver,
+    OpenAIAVCSDriver,
+    OllamaAVCSDriver,
+)
+from avcs.mcp import AVCSMCPServer, run_mcp_server
 
 __version__ = "0.2.0"
 __author__ = "Praxis Neural"
@@ -59,6 +73,19 @@ __all__ = [
     "get_weights_path",
     "load_avcs_weights",
     "download_weights",
+    # Real-Time Neuro-Streaming & Reflex
+    "NeuroPacket",
+    "NeuroStreamBus",
+    "RealTimeNeuroStreamer",
+    "GameReflexController",
+    # LLM Drivers & MCP Server
+    "BaseAVCSDriver",
+    "StepResult",
+    "AnthropicAVCSDriver",
+    "OpenAIAVCSDriver",
+    "OllamaAVCSDriver",
+    "AVCSMCPServer",
+    "run_mcp_server",
     # Native Desktop GUI
     "launch_gui",
     "AVCSDesktopApp",

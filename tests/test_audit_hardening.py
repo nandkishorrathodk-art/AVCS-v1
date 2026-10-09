@@ -106,3 +106,4 @@ def test_sdk_bare_decorator_and_close():
         assert eye.is_stable() or not eye.is_stable()
     
     eye.close()
+
