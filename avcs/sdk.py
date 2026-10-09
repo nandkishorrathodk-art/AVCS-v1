@@ -21,6 +21,7 @@ from avcs.billing import RateCard, SessionUsageReceipt, UsageMeter
 from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
 from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
+from avcs.memory import UIMLTree, VisualDiff, VisualMemorySnapshot
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
 from forge.vision.cortex.sdk import ScreenEye
@@ -185,6 +186,21 @@ class HumanEyeClient:
         """Inspects fine-grained element properties at central fovea (<2ms)."""
         return self.eye.inspect_fovea(centroid=centroid)
 
+    def get_scene_tree(self) -> UIMLTree:
+        """Returns the current DOM-less UIML scene tree (<1ms, <150 tokens)."""
+        return self.eye.get_scene_tree()
+
+    def get_visual_diff(self, prior_action: str = "observe") -> VisualDiff:
+        """Computes minimal causal state delta for LLM agent turn (<1ms, 30-50 tokens)."""
+        return self.eye.get_visual_diff(prior_action=prior_action)
+
+    def get_context_prompt(self, max_delta_turns: int = 10) -> str:
+        """Emits ultra-compact multi-turn LLM agent prompt (<300 tokens, >93% token savings)."""
+        return self.eye.get_context_prompt(max_delta_turns=max_delta_turns)
+
+    def get_memory_snapshot(self) -> VisualMemorySnapshot:
+        """Returns complete episodic memory history across multi-turn session."""
+        return self.eye.memory.get_snapshot()
 
     def track(self, target: Optional[Tuple[float, float]] = None) -> Optional[Tuple[float, float]]:
         """Engages biological smooth pursuit tracking on a target or salient moving object."""

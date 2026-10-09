@@ -64,6 +64,19 @@ from avcs.grounding import (
     GroundingResult,
     LanguageGazeGrounder,
 )
+from avcs.memory import (
+    AffordanceType,
+    BoundingBox,
+    EntityLifecycle,
+    PersistentUIRegistry,
+    SemanticSceneTreeExtractor,
+    UIMLElement,
+    UIMLTree,
+    VisualDiff,
+    VisualDiffEngine,
+    VisualMemoryManager,
+    VisualMemorySnapshot,
+)
 from avcs.events import (
     VisualEvent,
     VisualEventStreamer,
@@ -99,6 +112,18 @@ __all__ = [
     "VisualEvent",
     "VisualEventStreamer",
     "VisualEventType",
+    # Phase 3: Semantic DOM-less Scene Tree & Multi-Turn Episodic Memory
+    "UIMLTree",
+    "UIMLElement",
+    "BoundingBox",
+    "VisualDiff",
+    "VisualMemorySnapshot",
+    "VisualMemoryManager",
+    "SemanticSceneTreeExtractor",
+    "PersistentUIRegistry",
+    "VisualDiffEngine",
+    "AffordanceType",
+    "EntityLifecycle",
     # Developer SDK Class
     "ScreenEye",
     # Core Neural Model & State
