@@ -51,10 +51,23 @@ class AVCSDesktopApp:
         self.latest_state: Optional[CortexState] = None
 
         self._build_ui()
+        self._apply_capture_exclusion()
         self._start_perception_thread()
         self._schedule_gui_refresh()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _apply_capture_exclusion(self) -> None:
+        """Excludes this HUD window from OS screen capture to eliminate recursive mirror feedback."""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                self.root.update_idletasks()
+                hwnd = int(self.root.wm_frame(), 16)
+                # WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
+                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+            except Exception:
+                pass
 
     def _build_ui(self) -> None:
         # Top Header Bar
