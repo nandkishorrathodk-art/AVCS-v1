@@ -92,6 +92,7 @@ class NeuromuscularServoingController:
 
         prev_x, prev_y = x0, y0
         prev_vx, prev_vy = 0.0, 0.0
+        prev_tremor_x, prev_tremor_y = 0.0, 0.0
 
         for i in range(num_steps + 1):
             tau = float(i) / float(num_steps)  # Normalized time in [0.0, 1.0]
@@ -105,16 +106,22 @@ class NeuromuscularServoingController:
             nom_x = x0 + dx * poly
             nom_y = y0 + dy * poly
 
-            # Physiological 8-12 Hz micro-tremor (scaled down near target docking)
+            # Physiological 8-12 Hz micro-tremor (autoregressive pink-noise filter)
             tremor_scale = self.micro_tremor_std * (1.0 - 0.5 * tau)
-            jx = random.gauss(0.0, tremor_scale)
-            jy = random.gauss(0.0, tremor_scale)
+            raw_jx = random.gauss(0.0, tremor_scale)
+            raw_jy = random.gauss(0.0, tremor_scale)
+            jx = 0.65 * prev_tremor_x + 0.35 * raw_jx
+            jy = 0.65 * prev_tremor_y + 0.35 * raw_jy
+            prev_tremor_x, prev_tremor_y = jx, jy
 
             cur_x = float(np.clip(nom_x + jx, 0.0, 1.0))
             cur_y = float(np.clip(nom_y + jy, 0.0, 1.0))
 
-            vx = (cur_x - prev_x) / dt if i > 0 else 0.0
-            vy = (cur_y - prev_y) / dt if i > 0 else 0.0
+            # Analytical minimum jerk velocity combined with smooth tremor delta
+            nom_vx = dx * d_poly
+            nom_vy = dy * d_poly
+            vx = float(nom_vx + (jx / max(dt, 1e-4) * 0.15)) if i > 0 else 0.0
+            vy = float(nom_vy + (jy / max(dt, 1e-4) * 0.15)) if i > 0 else 0.0
             acc = math.hypot(vx - prev_vx, vy - prev_vy) / dt if i > 1 else 0.0
 
             points.append(

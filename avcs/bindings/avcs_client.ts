@@ -40,8 +40,21 @@ export class AVCSNodeClient {
     if (!fs.existsSync(this.bufferPath)) {
       return false;
     }
-    this.fd = fs.openSync(this.bufferPath, 'r');
-    return true;
+    if (this.fd !== null) {
+      try {
+        fs.closeSync(this.fd);
+      } catch {
+        // ignore
+      }
+      this.fd = null;
+    }
+    try {
+      this.fd = fs.openSync(this.bufferPath, 'r');
+      return true;
+    } catch {
+      this.fd = null;
+      return false;
+    }
   }
 
   public readLatest(): AVCSPerceptionState | null {
@@ -53,7 +66,10 @@ export class AVCSNodeClient {
 
     try {
       const headerBuf = Buffer.alloc(36);
-      fs.readSync(this.fd!, headerBuf, 0, 36, 0);
+      const headerBytesRead = fs.readSync(this.fd!, headerBuf, 0, 36, 0);
+      if (headerBytesRead < 36) {
+        return null;
+      }
 
       const magic = headerBuf.subarray(0, 4).toString('utf-8');
       if (magic !== 'AVCS') {
@@ -67,9 +83,15 @@ export class AVCSNodeClient {
 
       const timestamp = headerBuf.readDoubleLE(20);
       const payloadLen = headerBuf.readUInt32LE(28);
+      if (payloadLen <= 0 || payloadLen > 10 * 1024 * 1024) {
+        return null;
+      }
 
       const payloadBuf = Buffer.alloc(payloadLen);
-      fs.readSync(this.fd!, payloadBuf, 0, payloadLen, 36);
+      const payloadBytesRead = fs.readSync(this.fd!, payloadBuf, 0, payloadLen, 36);
+      if (payloadBytesRead < payloadLen) {
+        return null;
+      }
 
       const parsed = JSON.parse(payloadBuf.toString('utf-8'));
       this.lastSeq = seq;

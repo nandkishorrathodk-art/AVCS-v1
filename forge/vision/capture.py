@@ -61,7 +61,7 @@ class ScreenCapture:
         arr = np.asarray(shot)
         # mss delivers BGRA on Windows/X11; convert to genuine RGB for neural cortex
         if arr.ndim == 3 and arr.shape[-1] >= 3:
-            return arr[:, :, [2, 1, 0]].copy()
+            return arr[:, :, 2::-1].copy()
         return arr.copy()
 
     def close(self) -> None:
@@ -194,6 +194,7 @@ class Win32FastCapture:
         self._src_h = 0
         self._dst_w = 0
         self._dst_h = 0
+        self._h_desk = None
         self._is_open = False
 
     def open(self) -> "Win32FastCapture":
@@ -208,10 +209,12 @@ class Win32FastCapture:
         self._user32 = ctypes.windll.user32
         self._gdi32 = ctypes.windll.gdi32
 
+        self._h_desk = None
         # Ensure thread desktop access
         try:
             hdesk = self._user32.OpenInputDesktop(0, False, 0x01FF)
             if hdesk:
+                self._h_desk = hdesk
                 self._user32.SetThreadDesktop(hdesk)
         except Exception:
             pass
@@ -303,6 +306,9 @@ class Win32FastCapture:
                 SRCCOPY,
             )
         else:
+            HALFTONE = 4
+            self._gdi32.SetStretchBltMode(self._h_mem_dc, HALFTONE)
+            self._gdi32.SetBrushOrgEx(self._h_mem_dc, 0, 0, None)
             ret = self._gdi32.StretchBlt(
                 self._h_mem_dc,
                 0,
@@ -318,8 +324,9 @@ class Win32FastCapture:
             )
         if not ret:
             raise CaptureError("Win32 BitBlt/StretchBlt failed")
-        # 32-bit DIB memory order is BGRA -> convert to RGB
-        return self._raw_np[:, :, [2, 1, 0]].copy()
+        self._gdi32.GdiFlush()
+        # 32-bit DIB memory order is BGRA -> convert to RGB via zero-strided copy
+        return self._raw_np[:, :, 2::-1].copy()
 
     def _cleanup_handles(self) -> None:
         if self._gdi32 and self._h_bitmap:
@@ -340,6 +347,12 @@ class Win32FastCapture:
             except Exception:
                 pass
             self._h_screen_dc = None
+        if self._user32 and getattr(self, "_h_desk", None):
+            try:
+                self._user32.CloseDesktop(self._h_desk)
+            except Exception:
+                pass
+            self._h_desk = None
         self._is_open = False
 
     def close(self) -> None:

@@ -130,10 +130,10 @@ class VisualMemoryManager:
         if self.initial_tree is None and self.latest_tree is None:
             return "No visual context available."
 
-        base_tree = self.initial_tree or self.latest_tree
+        current_tree = self.latest_tree or self.initial_tree
         lines: List[str] = [
             "### Current Visual UI State (AVCS DOM-less UIML):",
-            base_tree.to_string(),  # type: ignore
+            current_tree.to_string(),  # type: ignore
         ]
 
         # Recent causal delta history

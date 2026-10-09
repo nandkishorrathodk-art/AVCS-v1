@@ -13,6 +13,7 @@ In AVCS, language guides visual attention without generating any text tokens:
 from __future__ import annotations
 
 from typing import Optional, Tuple
+import zlib
 
 import torch
 import torch.nn as nn
@@ -129,7 +130,7 @@ class CharNGramEncoder(nn.Module):
             ]
             if not ngrams:
                 ngrams = [q_clean]
-            hashes = [abs(hash(ng)) % self.hash_bins for ng in ngrams]
+            hashes = [zlib.crc32(ng.encode("utf-8")) % self.hash_bins for ng in ngrams]
             indices_batch.append(hashes)
 
         max_len = max(len(h) for h in indices_batch)

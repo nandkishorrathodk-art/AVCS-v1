@@ -59,7 +59,13 @@ class SharedMemoryBroadcaster:
         # To guarantee cross-platform support across Windows/Linux/macOS, we back it with a file
         temp_dir = tempfile.gettempdir()
         self._temp_path = os.path.join(temp_dir, f"{self.buffer_name}.bin")
-        self._file = open(self._temp_path, "wb+")
+        if os.path.exists(self._temp_path):
+            try:
+                self._file = open(self._temp_path, "r+b")
+            except Exception:
+                self._file = open(self._temp_path, "w+b")
+        else:
+            self._file = open(self._temp_path, "w+b")
         self._file.truncate(self.buffer_size)
         self._file.flush()
 
@@ -102,8 +108,13 @@ class SharedMemoryBroadcaster:
         # Max payload capacity check
         max_payload = self.buffer_size - HEADER_SIZE
         if payload_len > max_payload:
-            raw_json = raw_json[:max_payload]
-            payload_len = max_payload
+            payload_dict = {
+                "error": "payload_truncated",
+                "original_len": payload_len,
+                "max_capacity": max_payload,
+            }
+            raw_json = json.dumps(payload_dict).encode("utf-8")
+            payload_len = len(raw_json)
 
         crc = binascii.crc32(raw_json) & 0xFFFFFFFF
 

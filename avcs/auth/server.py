@@ -23,7 +23,7 @@ class EnterpriseLicensingServer:
     """Enterprise licensing engine for issuance and node validation."""
 
     def __init__(self, master_signing_key: Optional[str] = None) -> None:
-        self.master_key = master_signing_key or "praxis_avcs_enterprise_master_key_2026"
+        self.master_key = master_signing_key or LicenseManager.DEFAULT_MASTER_KEY
         self.manager = LicenseManager(signing_key=self.master_key)
 
     def issue_enterprise_license(

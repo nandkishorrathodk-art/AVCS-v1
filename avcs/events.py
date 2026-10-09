@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import enum
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -50,6 +51,7 @@ class VisualEventStreamer:
 
     def __init__(self, history_size: int = 200) -> None:
         self.history_size = history_size
+        self._lock = threading.Lock()
         self.event_history: collections.deque[VisualEvent] = collections.deque(maxlen=history_size)
         self._listeners: Dict[VisualEventType, List[Callable[[VisualEvent], None]]] = {
             t: [] for t in VisualEventType
@@ -71,11 +73,12 @@ class VisualEventStreamer:
     ) -> Callable:
         """Subscribes a callback to specific or all visual events."""
         def decorator(fn: Callable[[VisualEvent], None]) -> Callable:
-            if event_type is None:
-                self._all_listeners.append(fn)
-            else:
-                t = VisualEventType(event_type) if isinstance(event_type, str) else event_type
-                self._listeners[t].append(fn)
+            with self._lock:
+                if event_type is None:
+                    self._all_listeners.append(fn)
+                else:
+                    t = VisualEventType(event_type) if isinstance(event_type, str) else event_type
+                    self._listeners[t].append(fn)
             return fn
 
         if callback is not None:
@@ -179,13 +182,17 @@ class VisualEventStreamer:
 
         # Dispatch events to listeners
         for ev in new_events:
-            self.event_history.append(ev)
-            for fn in self._listeners.get(ev.event_type, []):
+            with self._lock:
+                self.event_history.append(ev)
+                typed_cbs = list(self._listeners.get(ev.event_type, []))
+                all_cbs = list(self._all_listeners)
+
+            for fn in typed_cbs:
                 try:
                     fn(ev)
                 except Exception as exc:
                     print(f"[VisualEventStreamer] Error in event listener: {exc}")
-            for fn in self._all_listeners:
+            for fn in all_cbs:
                 try:
                     fn(ev)
                 except Exception as exc:
@@ -195,9 +202,11 @@ class VisualEventStreamer:
 
     def get_recent_events(self, limit: int = 20) -> List[VisualEvent]:
         """Returns the most recent visual events."""
-        return list(self.event_history)[-limit:]
+        with self._lock:
+            return list(self.event_history)[-limit:]
 
     def clear(self) -> None:
         """Clears event history."""
-        self.event_history.clear()
+        with self._lock:
+            self.event_history.clear()
 

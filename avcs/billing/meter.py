@@ -74,7 +74,7 @@ class UsageMeter:
 
         self._lock = threading.Lock()
         self.started_at: float = time.time()
-        self.last_active_time: float = self.started_at
+        self.last_active_time: float = time.monotonic()
         self.active_runtime_seconds: float = 0.0
         self.is_active: bool = False
 
@@ -89,20 +89,20 @@ class UsageMeter:
         with self._lock:
             if not self.is_active:
                 self.is_active = True
-                self.last_active_time = time.time()
+                self.last_active_time = time.monotonic()
 
     def pause(self) -> None:
         """Pauses perception time tracking (e.g., when eye enters idle state)."""
         with self._lock:
             if self.is_active:
-                now = time.time()
+                now = time.monotonic()
                 self.active_runtime_seconds += max(0.0, now - self.last_active_time)
                 self.is_active = False
 
     def record_frames(self, count: int = 1) -> None:
         """Records processed real-time perception frames and updates runtime."""
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             if self.is_active:
                 self.active_runtime_seconds += max(0.0, now - self.last_active_time)
                 self.last_active_time = now
@@ -129,7 +129,7 @@ class UsageMeter:
         with self._lock:
             current = self.active_runtime_seconds
             if self.is_active:
-                current += max(0.0, time.time() - self.last_active_time)
+                current += max(0.0, time.monotonic() - self.last_active_time)
             return current
 
     def calculate_cost(self) -> float:

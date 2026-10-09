@@ -130,6 +130,11 @@ class HumanEyeClient:
     def close(self) -> None:
         """Stops client and closes all visual resources."""
         self.stop()
+        if hasattr(self.source, "close"):
+            try:
+                self.source.close()
+            except Exception:
+                pass
 
     def __enter__(self) -> HumanEyeClient:
         return self
@@ -364,15 +369,6 @@ class HumanEyeClient:
     def generate_receipt(self) -> SessionUsageReceipt:
         """Issues an immutable, cryptographically signed usage receipt for billing."""
         return self.meter.generate_receipt()
-
-    def close(self) -> None:
-        """Stops perception and releases hardware locks."""
-        self.stop()
-        if hasattr(self.source, "close"):
-            try:
-                self.source.close()
-            except Exception:
-                pass
 
 
 def eye(

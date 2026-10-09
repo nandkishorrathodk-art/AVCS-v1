@@ -34,7 +34,12 @@ class PersistentUIRegistry:
         """
         existing_ids = [
             eid for eid, life in self.lifecycles.items()
-            if life in (EntityLifecycle.VISIBLE, EntityLifecycle.OCCLUDED)
+            if life in (
+                EntityLifecycle.VISIBLE,
+                EntityLifecycle.OCCLUDED,
+                EntityLifecycle.OFF_SCREEN_ABOVE,
+                EntityLifecycle.OFF_SCREEN_BELOW,
+            )
         ]
 
         if not existing_ids:
@@ -69,6 +74,20 @@ class PersistentUIRegistry:
                 # Spatial euclidean distance
                 spatial_dist = math.hypot(exp_cx - new_cx, exp_cy - new_cy)
 
+                # Bounding Box IoU (flow-compensated)
+                b1 = old_elem.bbox
+                b2 = new_elem.bbox
+                ix1 = max(b1.xmin + dx, b2.xmin)
+                iy1 = max(b1.ymin + dy, b2.ymin)
+                ix2 = min(b1.xmax + dx, b2.xmax)
+                iy2 = min(b1.ymax + dy, b2.ymax)
+                iw = max(0.0, ix2 - ix1)
+                ih = max(0.0, iy2 - iy1)
+                inter = iw * ih
+                union = b1.area + b2.area - inter
+                iou = inter / max(union, 1e-6)
+                iou_cost = (1.0 - iou) * 0.25
+
                 # Role consistency cost
                 role_cost = 0.0 if old_elem.role == new_elem.role else 0.35
 
@@ -86,7 +105,7 @@ class PersistentUIRegistry:
                     cos_sim = float(np.dot(old_elem.visual_embedding, new_elem.visual_embedding) / denom)
                     vis_cost = (1.0 - cos_sim) * 0.3
 
-                total_cost = 0.50 * spatial_dist + role_cost + label_cost + vis_cost
+                total_cost = 0.40 * spatial_dist + iou_cost + role_cost + label_cost + vis_cost
                 C[i, j] = total_cost
 
         # 2. Solve Optimal Assignment (Hungarian / greedy minimum cost matching)
@@ -96,7 +115,10 @@ class PersistentUIRegistry:
         matched_new: Set[int] = set()
         active_elements: List[UIMLElement] = []
 
-        for r, c in zip(row_ind, col_ind):
+        # Sort matched pairs by column index (preserving input order of observed_elements)
+        pairs = sorted(zip(row_ind, col_ind), key=lambda x: x[1])
+
+        for r, c in pairs:
             if C[r, c] < self.cost_threshold:
                 old_id = existing_ids[r]
                 elem = observed_elements[c]

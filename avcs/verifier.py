@@ -117,10 +117,16 @@ class VisualRippleVerifier:
         # 1. Local Optical Flow Ripple
         ripple_energy = self.calculate_local_ripple(target, post_state.motion_field)
 
-        # 2. Predictive Coding Surprise Pulse
+        # 2. Photometric Local Delta against pre_state
+        photometric_delta = 0.0
+        if pre_state is not None and getattr(pre_state, "motion_field", None) is not None:
+            pre_local = self.calculate_local_ripple(target, pre_state.motion_field)
+            photometric_delta = abs(ripple_energy - pre_local)
+
+        # 3. Predictive Coding Surprise Pulse
         surprise_pulse = post_state.surprise_score
 
-        # 3. State Transition Detection (Delta_visual)
+        # 4. State Transition Detection (Delta_visual)
         diff = post_state.visual_diff
         structural_change = False
         if diff is not None:
@@ -130,11 +136,16 @@ class VisualRippleVerifier:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        # Decision Logic: Did the screen react?
-        verified = (
+        # Decision Logic: Did the screen react locally to the physical actuation?
+        # Requires local ripple, structural change, local photometric delta, or localized surprise
+        local_reaction = (
             ripple_energy >= self.min_ripple_threshold
-            or surprise_pulse >= self.min_surprise_threshold
             or structural_change
+            or photometric_delta >= self.min_ripple_threshold
+        )
+        verified = (
+            local_reaction
+            or (surprise_pulse >= self.min_surprise_threshold and (ripple_energy > 0.005 or structural_change))
         )
 
         status = VerificationStatus.VERIFIED if verified else VerificationStatus.RETRY_MICRO_JITTER
@@ -200,9 +211,20 @@ class VisualRippleVerifier:
             jitter_target = (float(np.clip(tx + ox, 0.0, 1.0)), float(np.clip(ty + oy, 0.0, 1.0)))
             pre_retry = self.eye.observe()
             self._move_cursor(jitter_target[0], jitter_target[1])
-            self.driver.click(button="left")
 
-            res_jitter = self.verify_action(f"retry_jitter@{jitter_target}", jitter_target, pre_retry)
+            if action_type == "type":
+                self.driver.click(button="left")
+                time.sleep(0.04)
+                if text_content and hasattr(self.driver, "type_text"):
+                    self.driver.type_text(text_content)
+                elif text_content and hasattr(self.driver, "press_key"):
+                    self.driver.press_key(text_content)
+            elif action_type == "double_click":
+                self.driver.double_click(button="left")
+            else:
+                self.driver.click(button="left")
+
+            res_jitter = self.verify_action(f"retry_{action_type}@{jitter_target}", jitter_target, pre_retry)
             if res_jitter.is_successful:
                 res_jitter.status = VerificationStatus.VERIFIED
                 res_jitter.recovery_attempt = 2
