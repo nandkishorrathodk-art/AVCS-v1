@@ -87,6 +87,12 @@ from avcs.verifier import (
     VerificationStatus,
     VisualRippleVerifier,
 )
+from avcs.ipc import (
+    IPCPerceptionFrame,
+    SharedMemoryBroadcaster,
+    SharedMemoryReader,
+)
+from avcs.auth.server import EnterpriseLicensingServer
 from avcs.events import (
     VisualEvent,
     VisualEventStreamer,
@@ -141,6 +147,11 @@ __all__ = [
     "VisualRippleVerifier",
     "VerificationResult",
     "VerificationStatus",
+    # Phase 5: High-Speed IPC & Enterprise Licensing
+    "IPCPerceptionFrame",
+    "SharedMemoryBroadcaster",
+    "SharedMemoryReader",
+    "EnterpriseLicensingServer",
     # Developer SDK Class
     "ScreenEye",
     # Core Neural Model & State

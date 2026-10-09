@@ -102,11 +102,14 @@ class LicenseManager:
         max_seats: int = 1,
         features: Optional[List[str]] = None,
         bind_to_machine: bool = False,
+        machine_fingerprint: Optional[str] = None,
     ) -> str:
         """Issues a cryptographically signed commercial license string."""
         now = time.time()
         lic_id = f"LIC_{uuid.uuid4().hex[:12].upper()}"
         feats = features or ["60fps", "win32_motor", "visual_servoing", "stream_bus"]
+
+        target_fp = machine_fingerprint or (get_machine_fingerprint() if bind_to_machine else None)
 
         payload_dict = {
             "license_id": lic_id,
@@ -116,7 +119,7 @@ class LicenseManager:
             "created_at": now,
             "expires_at": now + (duration_days * 86400.0),
             "features": feats,
-            "machine_fingerprint": get_machine_fingerprint() if bind_to_machine else None,
+            "machine_fingerprint": target_fp,
         }
 
         payload_bytes = json.dumps(payload_dict, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -125,10 +128,15 @@ class LicenseManager:
         sig = hmac.new(self.signing_key, payload_bytes, hashlib.sha256).hexdigest()
         return f"AVCS-{payload_b64}.{sig}"
 
+    def generate_license_key(self, *args, **kwargs) -> str:
+        """Alias for generate_license."""
+        return self.generate_license(*args, **kwargs)
+
     def verify_license(
         self,
         token: str,
         enforce_machine_binding: bool = False,
+        expected_machine_fingerprint: Optional[str] = None,
     ) -> LicensePayload:
         """Validates license integrity, expiration date, and hardware binding."""
         clean_token = token.strip()
@@ -164,8 +172,8 @@ class LicenseManager:
 
         # Hardware binding check
         bound_fp = data.get("machine_fingerprint")
-        if enforce_machine_binding and bound_fp:
-            current_fp = get_machine_fingerprint()
+        if bound_fp and (enforce_machine_binding or expected_machine_fingerprint is not None):
+            current_fp = expected_machine_fingerprint or get_machine_fingerprint()
             if current_fp != bound_fp:
                 raise LicenseBindingError(
                     f"License is hardware-bound to machine '{bound_fp}', but running on '{current_fp}'."
