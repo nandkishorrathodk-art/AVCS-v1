@@ -80,6 +80,11 @@ class HandEyeServoingController:
 
         consecutive_contacts = 0
         contact_confirmed = False
+        prev_commanded_pos: Optional[Tuple[float, float]] = None
+
+        # Autoregressive physiological tremor state (8-12 Hz biological tremor)
+        tremor_x, tremor_y = 0.0, 0.0
+        ar_rho = 0.85
 
         while True:
             now = time.perf_counter()
@@ -88,6 +93,16 @@ class HandEyeServoingController:
                 break
 
             curr_pos = self.driver.get_position_normalized()
+
+            # Physical user override detection: check if human snatched the mouse
+            if prev_commanded_pos is not None and hasattr(self.driver, "failsafe"):
+                if hasattr(self.driver.failsafe, "check_override"):
+                    self.driver.failsafe.check_override(
+                        actual_pos=curr_pos,
+                        expected_pos=prev_commanded_pos,
+                        threshold_norm=0.08,
+                    )
+
             motor_state = self.servoing.compute_motor_flow(
                 gaze_target=target_gaze,
                 current_cursor=curr_pos,
@@ -120,13 +135,17 @@ class HandEyeServoingController:
             step_x = vx * tick_dt
             step_y = vy * tick_dt
 
-            # Add biological physiological micro-jitter if far from target
-            if self.add_human_jitter and motor_state.distance_to_target > 0.05:
-                step_x += random.gauss(0.0, self.jitter_std)
-                step_y += random.gauss(0.0, self.jitter_std)
+            # Autoregressive physiological tremor (faded smoothly near basin)
+            if self.add_human_jitter and motor_state.distance_to_target > self.servoing.foveal_contact_radius:
+                fade = min(1.0, (motor_state.distance_to_target - self.servoing.foveal_contact_radius) / 0.05)
+                tremor_x = ar_rho * tremor_x + (1.0 - ar_rho) * random.gauss(0.0, self.jitter_std)
+                tremor_y = ar_rho * tremor_y + (1.0 - ar_rho) * random.gauss(0.0, self.jitter_std)
+                step_x += tremor_x * fade
+                step_y += tremor_y * fade
 
             next_x = max(0.0, min(1.0, curr_pos[0] + step_x))
             next_y = max(0.0, min(1.0, curr_pos[1] + step_y))
+            prev_commanded_pos = (next_x, next_y)
 
             # Apply incremental movement to physical driver
             self.driver.move_to_normalized(next_x, next_y)
@@ -142,6 +161,8 @@ class HandEyeServoingController:
         total_ms = (time.perf_counter() - t_start) * 1000.0
 
         if contact_confirmed and click_on_arrival:
+            if hasattr(self.driver, "check_hardware_failsafe"):
+                self.driver.check_hardware_failsafe()
             self.driver.click()
 
         return ServoingResult(

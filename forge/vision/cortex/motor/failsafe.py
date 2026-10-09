@@ -47,3 +47,21 @@ class CornerBreakoutFailSafe:
                 f"corner ({pixel_x}, {pixel_y}). Motor control relinquished to user."
             )
 
+    def check_override(
+        self,
+        actual_pos: Tuple[float, float],
+        expected_pos: Tuple[float, float],
+        threshold_norm: float = 0.08,
+    ) -> None:
+        """Detects physical human resistance (user snatching mouse during servoing)."""
+        if not self.enabled:
+            return
+        dx = actual_pos[0] - expected_pos[0]
+        dy = actual_pos[1] - expected_pos[1]
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist > threshold_norm:
+            raise SafetyBreakoutException(
+                f"[AVCS Safety Fail-Safe] Manual override detected: cursor diverted by {dist:.3f} "
+                f"from planned trajectory. Control relinquished to user."
+            )
+

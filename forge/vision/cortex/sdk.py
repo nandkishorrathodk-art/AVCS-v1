@@ -102,19 +102,27 @@ class ScreenEye:
             time.sleep(poll_interval)
         return False
 
-    def look_at(self, query: str) -> Tuple[float, float]:
+    def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """Directs the foveal gaze to lock onto the target element."""
-        dummy_text = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device)
-        frame = self.source.grab()
-        state = self.cortex.perceive(frame, text_embedding=dummy_text, device=self.device)
+        import hashlib
+        # Deterministic text query embedding via SHA256 seed for reproducible visual attention
+        seed = int(hashlib.sha256(query.encode("utf-8")).hexdigest()[:8], 16)
+        rng = torch.Generator(device=self.device)
+        rng.manual_seed(seed)
+        text_emb = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device, generator=rng)
+        text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
+
+        if frame is None:
+            frame = self.source.grab()
+        state = self.cortex.perceive(frame, text_embedding=text_emb, device=self.device)
         target = state.query_target or state.fixation
         # Update retinal gaze fixation
         self.cortex.retina.update_fixation(target_fixation=target)
         return target
 
-    def locate(self, query: str) -> Tuple[float, float]:
+    def locate(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """Alias for look_at: returns normalized (x, y) target coordinates."""
-        return self.look_at(query)
+        return self.look_at(query, frame=frame)
 
     def steer_hand(
         self,
@@ -220,13 +228,28 @@ class ScreenEye:
 
     def on_affordance(
         self,
-        action_type: str = "clickable",
+        action_type: Any = "clickable",
         min_confidence: float = 0.5,
-    ) -> Callable[[Callable[[CortexState], None]], Callable[[CortexState], None]]:
-        """Decorator to trigger callbacks when specific interactive affordances appear."""
+    ) -> Any:
+        """Decorator to trigger callbacks when specific interactive affordances appear.
+
+        Supports both bare and parameterized styles:
+        >>> @eye.on_affordance
+        ... def on_click(state): ...
+        >>> @eye.on_affordance(action_type="typeable", min_confidence=0.6)
+        ... def on_input(state): ...
+        """
+        if callable(action_type):
+            # Bare decorator: @eye.on_affordance
+            self._affordance_callbacks.append(("clickable", min_confidence, action_type))
+            return action_type
+
+        act_type = str(action_type)
+
         def decorator(cb: Callable[[CortexState], None]) -> Callable[[CortexState], None]:
-            self._affordance_callbacks.append((action_type, min_confidence, cb))
+            self._affordance_callbacks.append((act_type, min_confidence, cb))
             return cb
+
         return decorator
 
     def _dispatch_state(self, state: CortexState) -> None:
@@ -249,16 +272,25 @@ class ScreenEye:
 
     def _dispatch_surprise(self, state: CortexState) -> None:
         for thresh, cb in self._surprise_callbacks:
-            if state.surprise_score >= thresh:
+            if state.surprise_score >= thresh or state.stability_state == "surprise_event":
                 try:
                     cb(state)
                 except Exception as e:
                     print(f"[ScreenEye] Surprise callback error: {e}")
 
+    def close(self) -> None:
+        """Closes ScreenEye and releases capture resources."""
+        self.stop()
+        if hasattr(self.source, "close"):
+            try:
+                self.source.close()
+            except Exception:
+                pass
+
     def __enter__(self) -> ScreenEye:
         return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.stop()
+        self.close()
 
 

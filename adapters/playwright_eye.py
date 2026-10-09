@@ -69,14 +69,17 @@ class AVCSPlaywrightEye:
         # Ensure page is stabilized
         self.wait_until_visual_stable(timeout=min(2.0, timeout))
 
-        # Foveate on semantic target
-        target_norm = self.eye.look_at(label_or_intent)
+        # Grab page screenshot frame
+        frame = self.grab_page_frame()
+
+        # Foveate on semantic target using browser buffer
+        target_norm = self.eye.look_at(label_or_intent, frame=frame)
         vw, vh = self.get_viewport_size()
 
         click_x = int(round(target_norm[0] * vw))
         click_y = int(round(target_norm[1] * vh))
 
-        # Perform human-like mouse action in Playwright
+        # Perform mouse action in Playwright
         if hasattr(self.page, "mouse") and hasattr(self.page.mouse, "click"):
             self.page.mouse.move(click_x, click_y)
             if click_delay > 0:
@@ -92,10 +95,12 @@ class AVCSPlaywrightEye:
         clear_first: bool = True,
     ) -> Tuple[int, int]:
         """Visually locates a text field, clicks to focus, and types input string."""
+        import sys
         x, y = self.visual_click(field_label)
         if clear_first and hasattr(self.page, "keyboard"):
-            # Select all and delete existing text
-            self.page.keyboard.press("Control+A")
+            # Select all and delete existing text (cross-platform)
+            select_key = "Meta+A" if sys.platform == "darwin" else "Control+A"
+            self.page.keyboard.press(select_key)
             self.page.keyboard.press("Backspace")
 
         if hasattr(self.page, "keyboard") and hasattr(self.page.keyboard, "type"):
@@ -105,6 +110,11 @@ class AVCSPlaywrightEye:
 
     def assert_element_visible(self, label_or_intent: str) -> bool:
         """Visual assertion: returns True if element is grounded with high confidence."""
-        norm_x, norm_y = self.eye.look_at(label_or_intent)
-        state = self.eye.current_state or self.eye.perceive_now()
+        frame = self.grab_page_frame()
+        norm_x, norm_y = self.eye.look_at(label_or_intent, frame=frame)
+        state = self.eye.current_state or self.eye.perceive_now(frame=frame)
         return 0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0 and state.category_confidence > 0.1
+
+    # Aliases for developer convenience
+    click_visual = visual_click
+    input_text = visual_type

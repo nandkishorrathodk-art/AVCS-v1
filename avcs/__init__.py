@@ -71,3 +71,10 @@ def launch_gui() -> None:
     from avcs.gui import launch_gui as _launch
     _launch()
 
+
+def __getattr__(name: str):
+    if name == "AVCSDesktopApp":
+        from avcs.gui import AVCSDesktopApp
+        return AVCSDesktopApp
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

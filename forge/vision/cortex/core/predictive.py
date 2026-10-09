@@ -53,16 +53,20 @@ class PredictiveCodingEngine(nn.Module):
 
         self.prev_latent: Optional[torch.Tensor] = None
         self.predicted_latent: Optional[torch.Tensor] = None
+        self.current_state: str = "stable"
+        self.consecutive_surprises: int = 0
 
     def reset(self) -> None:
         """Reset internal temporal memory."""
         self.prev_latent = None
         self.predicted_latent = None
+        self.current_state = "stable"
+        self.consecutive_surprises = 0
 
     def forward(
         self,
         current_latent: torch.Tensor,
-    ) -> tuple[torch.Tensor, float, str, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Process current screen latent and return temporal dynamics.
 
         Parameters
@@ -72,8 +76,7 @@ class PredictiveCodingEngine(nn.Module):
         Returns
         -------
         updated_memory: (B, latent_dim)
-        surprise_score: float (prediction error magnitude)
-        stability_state: str ("stable", "animating", "transitioning", "surprise_event")
+        surprise_tensor: (B, 1)
         stability_logits: (B, 4)
         """
         B = current_latent.shape[0]
@@ -82,14 +85,18 @@ class PredictiveCodingEngine(nn.Module):
         if self.prev_latent is None or self.prev_latent.shape[0] != B:
             self.prev_latent = current_latent
             self.predicted_latent = current_latent
+            self.consecutive_surprises = 0
 
         # 2. Compute Prediction Error (Surprise)
         norm_obs = F.normalize(current_latent, dim=-1)
         norm_pred = F.normalize(self.predicted_latent, dim=-1)
-        surprise_tensor = 1.0 - (norm_obs * norm_pred).sum(dim=-1, keepdim=True) # (B, 1)
+        surprise_tensor = 1.0 - (norm_obs * norm_pred).sum(dim=-1, keepdim=True)  # (B, 1)
 
-        # 3. Update temporal visual state
-        updated_memory = self.transition(current_latent, self.prev_latent)
+        # 3. Anomaly-Gated Temporal Memory Update
+        # Sudden acute spikes are dampened until confirmed across multiple ticks
+        raw_memory = self.transition(current_latent, self.prev_latent)
+        gate = torch.clamp(1.0 - 0.5 * surprise_tensor, 0.2, 1.0)
+        updated_memory = gate * raw_memory + (1.0 - gate) * self.prev_latent
 
         # 4. Predict NEXT frame's latent state (residual around current memory)
         next_predicted = updated_memory + self.predictor(updated_memory)
@@ -103,7 +110,39 @@ class PredictiveCodingEngine(nn.Module):
         return updated_memory, surprise_tensor, stability_logits
 
 
-def decode_stability(stability_logits: torch.Tensor) -> str:
-    """Decodes stability logits tensor into a human-readable state string."""
-    idx = int(stability_logits.argmax(dim=-1)[0].item())
-    return STABILITY_STATES[idx] if idx < len(STABILITY_STATES) else "stable"
+def decode_stability(
+    stability_logits: torch.Tensor,
+    surprise_score: Optional[float] = None,
+    prev_state: Optional[str] = None,
+) -> str:
+    """Decodes stability logits tensor into a human-readable state string.
+
+    Uses Schmitt-trigger dual-threshold hysteresis when prev_state and surprise_score
+    are provided to prevent high-frequency frame flicker.
+    """
+    raw_idx = int(stability_logits.argmax(dim=-1)[0].item())
+    raw_state = STABILITY_STATES[raw_idx] if raw_idx < len(STABILITY_STATES) else "stable"
+
+    if prev_state is None or surprise_score is None:
+        return raw_state
+
+    # Schmitt-Trigger Hysteresis:
+    # High threshold to leave 'stable' (0.22), low threshold to return (0.08)
+    if prev_state == "stable":
+        if surprise_score > 0.55:
+            return "surprise_event"
+        if surprise_score > 0.22:
+            return "animating" if raw_state in ["animating", "transitioning"] else raw_state
+        return "stable"
+    elif prev_state in ["animating", "transitioning"]:
+        if surprise_score > 0.55:
+            return "surprise_event"
+        if surprise_score < 0.08:
+            return "stable"
+        return prev_state
+    elif prev_state == "surprise_event":
+        if surprise_score < 0.25:
+            return "transitioning"
+        return "surprise_event"
+
+    return raw_state

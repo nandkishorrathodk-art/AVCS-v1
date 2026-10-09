@@ -60,11 +60,14 @@ def run_cost_reduction_benchmark(
 
     print(f"Simulating continuous desktop stream for {duration_seconds:.1f} seconds at {fps} FPS...")
     total_ticks = int(duration_seconds * fps)
+    dt = 1.0 / max(fps, 1)
+    simulated_time = 1000.0
 
     for i in range(total_ticks):
         frame = source.grab()
-        # Evaluate reflex filter
-        filter_layer.should_emit_screenshot(frame=frame)
+        # Evaluate reflex filter with virtual clock progression
+        filter_layer.should_emit_screenshot(frame=frame, timestamp=simulated_time)
+        simulated_time += dt
 
     stats = filter_layer.stats
 

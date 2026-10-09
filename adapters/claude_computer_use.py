@@ -57,14 +57,18 @@ class AVCSClaudeStreamFilter:
         self.last_sent_category: Optional[str] = None
         self.stats = StreamFilterStats()
 
-    def should_emit_screenshot(self, frame: Optional[np.ndarray] = None) -> Tuple[bool, str]:
+    def should_emit_screenshot(
+        self,
+        frame: Optional[np.ndarray] = None,
+        timestamp: Optional[float] = None,
+    ) -> Tuple[bool, str]:
         """Evaluates whether the current screen state warrants sending to Claude.
 
         Returns:
             (should_emit: bool, reason: str)
         """
         self.stats.total_screen_ticks += 1
-        now = time.time()
+        now = timestamp if timestamp is not None else time.time()
         state = self.eye.perceive_now(frame=frame)
 
         # 1. Emit if this is the very first frame (initial agent observation)
@@ -72,29 +76,38 @@ class AVCSClaudeStreamFilter:
             self._record_emission(state, now)
             return True, "Initial observation frame"
 
-        # 2. Enforce minimum throttle interval
+        # 2. Acute Emergency Event: Major anomaly/modal popup strictly bypasses throttle
+        if state.stability_state == "surprise_event" or state.surprise_score >= 0.85:
+            self._record_emission(state, now)
+            return True, f"Emergency surprise bypass (score: {state.surprise_score:.2f})"
+
+        # 3. Enforce minimum throttle interval for routine frames
         if (now - self.last_sent_timestamp) < self.min_seconds_between_frames:
             self._record_suppression()
             return False, "Rate-limited (min interval)"
 
-        # 3. Suppress if UI is actively animating or in layout shift
+        # 4. Suppress if UI is actively animating or in layout shift
         if state.stability_state in ["animating", "transitioning"]:
             self._record_suppression()
             return False, f"Screen animating ({state.stability_state})"
 
-        # 4. Emit if high predictive coding surprise occurred (modal, alert, dialog)
+        # 5. Emit if visual surprise occurred (modal, alert, dialog)
         if state.surprise_score >= self.surprise_threshold:
             self._record_emission(state, now)
             return True, f"Visual surprise triggered (score: {state.surprise_score:.2f})"
 
-        # 5. Emit if application UI category changed (e.g. browser -> code editor)
+        # 6. Emit if application UI category changed (e.g. browser -> code editor)
         if state.primary_category != self.last_sent_category and state.category_confidence > 0.4:
             self._record_emission(state, now)
             return True, f"Category transition ({self.last_sent_category} -> {state.primary_category})"
 
-        # 6. Otherwise, screen has not meaningfully changed; suppress frame
+        # 7. Otherwise, screen has not meaningfully changed; suppress frame
         self._record_suppression()
         return False, "Redundant frame (no semantic shift)"
+
+    def post_action_settle(self, timeout: Optional[float] = None) -> bool:
+        """Waits for UI animations/loading triggered by agent action to finish."""
+        return self.eye.wait_until_stable(timeout=timeout or self.settle_timeout)
 
     def format_claude_screenshot(self, frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """Formats the current frame into Anthropic's Computer Use API payload."""
@@ -113,6 +126,24 @@ class AVCSClaudeStreamFilter:
                 "media_type": "image/png",
                 "data": b64_data,
             },
+        }
+
+    def format_tool_result(
+        self,
+        tool_use_id: str,
+        frame: Optional[np.ndarray] = None,
+        text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Formats an Anthropic tool_result message block containing the screenshot."""
+        img_payload = self.format_claude_screenshot(frame)
+        content_items = []
+        if text:
+            content_items.append({"type": "text", "text": text})
+        content_items.append(img_payload)
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content_items,
         }
 
     def wait_and_capture(self) -> Dict[str, Any]:

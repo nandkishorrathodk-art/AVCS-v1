@@ -49,6 +49,7 @@ class AVCSDesktopApp:
         self.current_target_gaze: Optional[Tuple[float, float]] = None
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_state: Optional[CortexState] = None
+        self._canvas_img_id: Optional[int] = None
 
         self._build_ui()
         self._apply_capture_exclusion()
@@ -373,7 +374,7 @@ class AVCSDesktopApp:
         img = Image.fromarray(frame).resize((cw, ch), Image.BILINEAR)
         draw = ImageDraw.Draw(img)
 
-        # 1. Draw Dorsal Affordance Hotspots
+        # 1. Draw Dorsal Affordance Hotspots (Dual-Stroke for high contrast on light/dark themes)
         if self.show_affordances and state.action_hotspots:
             for nx, ny, act_type, conf in state.action_hotspots:
                 px = int(nx * cw)
@@ -381,11 +382,14 @@ class AVCSDesktopApp:
                 radius = 16
                 color = "#00ff88" if act_type == "clickable" else "#ffaa00"
 
-                # Box outline
+                # Outer black shadow halo for contrast against white backgrounds
+                draw.rectangle([px - radius - 1, py - radius - 1, px + radius + 1, py + radius + 1], outline="#000000", width=3)
                 draw.rectangle([px - radius, py - radius, px + radius, py + radius], outline=color, width=2)
+                # Label background shadow
+                draw.text((px - radius + 1, py - radius - 13), f"{act_type} {conf:.0%}", fill="#000000")
                 draw.text((px - radius, py - radius - 14), f"{act_type} {conf:.0%}", fill=color)
 
-        # 2. Draw Foveal Gaze Reticle Crosshair
+        # 2. Draw Foveal Gaze Reticle Crosshair (Dual-Stroke Neon + Black Halo)
         if self.show_fovea:
             fx, fy = self.current_target_gaze or state.fixation
             cx = int(fx * cw)
@@ -393,17 +397,24 @@ class AVCSDesktopApp:
             cross_size = 20
             reticle_color = "#00ffff"  # Neon cyan
 
-            # Outer targeting circle
+            # Outer targeting circle with shadow
+            draw.ellipse([cx - 25, cy - 25, cx + 25, cy + 25], outline="#000000", width=4)
             draw.ellipse([cx - 24, cy - 24, cx + 24, cy + 24], outline=reticle_color, width=2)
-            # Center crosshair
-            draw.line([cx - cross_size, cy, cx + cross_size, cy], fill=reticle_color, width=2)
-            draw.line([cx, cy - cross_size, cx, cy + cross_size], fill=reticle_color, width=2)
+            # Center crosshair with shadow
+            draw.line([cx - cross_size, cy, cx + cross_size, cy], fill="#000000", width=3)
+            draw.line([cx, cy - cross_size, cx, cy + cross_size], fill="#000000", width=3)
+            draw.line([cx - cross_size, cy, cx + cross_size, cy], fill=reticle_color, width=1)
+            draw.line([cx, cy - cross_size, cx, cy + cross_size], fill=reticle_color, width=1)
+            draw.text((cx + 13, cy + 13), "FOVEA", fill="#000000")
             draw.text((cx + 12, cy + 12), "FOVEA", fill=reticle_color)
 
-        # Convert to PhotoImage and display
+        # Convert to PhotoImage and update canvas item without memory leak
         photo = ImageTk.PhotoImage(image=img)
-        self.canvas.create_image(0, 0, image=photo, anchor=tk.NW)
-        self.canvas._current_photo = photo  # prevent garbage collection
+        if self._canvas_img_id is None:
+            self._canvas_img_id = self.canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+        else:
+            self.canvas.itemconfig(self._canvas_img_id, image=photo)
+        self.canvas._current_photo = photo  # prevent Python GC
 
     def _update_telemetry_labels(self, state: CortexState) -> None:
         self.lbl_category.config(text=state.primary_category)
