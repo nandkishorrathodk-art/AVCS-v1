@@ -22,6 +22,15 @@ from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
 from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
 from avcs.memory import UIMLTree, VisualDiff, VisualMemorySnapshot
+from avcs.servoing import (
+    NeuromuscularServoingController,
+    NeuromuscularServoingResult,
+)
+from avcs.verifier import (
+    VerificationResult,
+    VerificationStatus,
+    VisualRippleVerifier,
+)
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
 from forge.vision.cortex.sdk import ScreenEye
@@ -89,6 +98,8 @@ class HumanEyeClient:
         self.eye = HumanEye(source=self.source, device=self.device)
         self.events = VisualEventStreamer()
         self.motor_driver = get_default_driver(force_virtual=self.force_virtual_motor)
+        self.servoing = NeuromuscularServoingController(driver=self.motor_driver)
+        self.verifier = VisualRippleVerifier(eye=self.eye, driver=self.motor_driver)
 
         # 5. Background Perception Loop
         self._running = False
@@ -244,6 +255,69 @@ class HumanEyeClient:
         self.motor_driver.type_text(text)
         if press_enter:
             self.motor_driver.press_key("enter")
+
+    def move_to(
+        self,
+        target: str | Tuple[float, float],
+        realtime: bool = False,
+    ) -> NeuromuscularServoingResult:
+        """Executes smooth Fitts' Law neuromuscular motor movement to target."""
+        self.meter.record_action("servoing_move")
+        if isinstance(target, str):
+            coords = self.look_at(target)
+        else:
+            coords = target
+        return self.servoing.servo_to(coords, realtime=realtime)
+
+    def click_and_verify(
+        self,
+        target: Optional[str | Tuple[float, float]] = None,
+        button: str = "left",
+        max_recovery_tier: int = 3,
+    ) -> VerificationResult:
+        """Clicks target and runs closed-loop visual ripple assertion with 5-tier self-healing."""
+        self.meter.record_action(f"click_verify_{button}")
+        if target is not None:
+            if isinstance(target, str):
+                coords = self.look_at(target)
+            else:
+                coords = target
+        else:
+            coords = self.current_state.gaze_fixation
+
+        return self.verifier.execute_and_verify(
+            action_type="click",
+            target=coords,
+            max_recovery_tier=max_recovery_tier,
+        )
+
+    def type_and_verify(
+        self,
+        target: str | Tuple[float, float],
+        text: str,
+        clear_first: bool = True,
+        press_enter: bool = True,
+    ) -> VerificationResult:
+        """Foveates onto input field, types text, and visually verifies the change."""
+        self.meter.record_action("type_verify")
+        if isinstance(target, str):
+            coords = self.look_at(target)
+        else:
+            coords = target
+
+        if clear_first:
+            self.motor_driver.move_to(coords[0], coords[1], realtime=False)
+            self.motor_driver.click(button="left")
+            self.motor_driver.press_hotkey("ctrl", "a")
+            self.motor_driver.press_key("backspace")
+
+        content = text + ("\n" if press_enter else "")
+        return self.verifier.execute_and_verify(
+            action_type="type",
+            target=coords,
+            text_content=content,
+            max_recovery_tier=3,
+        )
 
     def type_into(
         self,

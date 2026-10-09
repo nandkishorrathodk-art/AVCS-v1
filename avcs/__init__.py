@@ -77,6 +77,16 @@ from avcs.memory import (
     VisualMemoryManager,
     VisualMemorySnapshot,
 )
+from avcs.servoing import (
+    NeuromuscularServoingController,
+    NeuromuscularServoingResult,
+    NeuromuscularTrajectoryPoint,
+)
+from avcs.verifier import (
+    VerificationResult,
+    VerificationStatus,
+    VisualRippleVerifier,
+)
 from avcs.events import (
     VisualEvent,
     VisualEventStreamer,
@@ -124,6 +134,13 @@ __all__ = [
     "VisualDiffEngine",
     "AffordanceType",
     "EntityLifecycle",
+    # Phase 4: Closed-Loop Physical Hand-Eye Coordination & Visual Verification
+    "NeuromuscularServoingController",
+    "NeuromuscularServoingResult",
+    "NeuromuscularTrajectoryPoint",
+    "VisualRippleVerifier",
+    "VerificationResult",
+    "VerificationStatus",
     # Developer SDK Class
     "ScreenEye",
     # Core Neural Model & State

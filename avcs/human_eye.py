@@ -578,7 +578,10 @@ class HumanEye(nn.Module):
 
         t_in = torch.from_numpy(frame_rgb).float() / 255.0
         t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
-        t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
+        if t_in.shape[-2:] != self.input_size:
+            t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
+        else:
+            t_resized = t_in
 
         feat = self.backbone(t_resized)
         self._latest_raw_frame = frame
@@ -614,22 +617,31 @@ class HumanEye(nn.Module):
         else:
             stability = "stable"
 
+        # 7. Step Episodic Memory Manager (Phase 3)
+        if self.memory.latest_tree is not None and surprise < 0.05 and not moving_objs:
+            current_tree = self.memory.latest_tree
+            diff = VisualDiff(
+                turn_index=self.memory.turn_index,
+                prior_action="observe",
+                surprise_score=surprise,
+                causal_summary="Screen static and ready for next action.",
+            )
+        else:
+            diff = self.memory.step(
+                affordances=affordances,
+                category=cat_name,
+                category_confidence=cat_conf,
+                foveal_inspection=self._last_foveal_inspection,
+                moving_objects=moving_objs,
+                surprise_score=surprise,
+                prior_action="observe",
+            )
+            current_tree = self.memory.latest_tree
+
         t_end = time.perf_counter()
         dt_ms = (t_end - t0) * 1000.0
         self._latencies.append(dt_ms)
         fps = 1000.0 / max(dt_ms, 0.1)
-
-        # 7. Step Episodic Memory Manager (Phase 3)
-        diff = self.memory.step(
-            affordances=affordances,
-            category=cat_name,
-            category_confidence=cat_conf,
-            foveal_inspection=self._last_foveal_inspection,
-            moving_objects=moving_objs,
-            surprise_score=surprise,
-            prior_action="observe",
-        )
-        current_tree = self.memory.latest_tree
 
         state = HumanEyeState(
             timestamp=t_end,
