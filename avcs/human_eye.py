@@ -26,6 +26,12 @@ import torch.nn.functional as F
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.core.backbone import ConvBNAct, InvertedResidual
 from forge.vision.cortex.core.ventral import UI_CATEGORIES, VentralSemanticStream
+from avcs.grounding import (
+    FovealAcuityEngine,
+    FovealInspection,
+    GroundingResult,
+    LanguageGazeGrounder,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,6 +65,9 @@ class HumanEyeState:
     affordance_hotspots: List[Tuple[float, float, str, float]] # Interactive targets
     primary_category: str                # Scene category
     category_confidence: float
+    active_query: Optional[str] = None   # Current language grounding target query
+    grounding_result: Optional[GroundingResult] = None # Detailed grounding metrics
+    foveal_inspection: Optional[FovealInspection] = None # High-acuity central fovea analysis
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -75,6 +84,10 @@ class HumanEyeState:
             "stability": self.stability,
             "surprise_score": round(self.surprise_score, 4),
             "primary_category": self.primary_category,
+            "active_query": self.active_query,
+            "foveal_element": (
+                self.foveal_inspection.element_kind if self.foveal_inspection else None
+            ),
         }
 
 
@@ -314,6 +327,11 @@ class SmoothPursuitTracker:
 
         return self.gaze, self.velocity, self.contact_acquired
 
+    @property
+    def current_gaze(self) -> Tuple[float, float]:
+        """Returns current gaze fixation coordinate."""
+        return self.gaze
+
 
 class HumanEye(nn.Module):
     """The Complete Real-Time Biological Human Eye Intelligence Model."""
@@ -367,6 +385,17 @@ class HumanEye(nn.Module):
         # 5. Smooth Pursuit Gaze Controller
         self.pursuit = SmoothPursuitTracker()
 
+        # 6. Natural Language Gaze Grounding & Dual-Fovea Acuity Engine (Phase 2)
+        self.grounder = LanguageGazeGrounder(visual_dim=feature_dim, text_dim=feature_dim).to(self.device)
+        self.fovea_engine = FovealAcuityEngine(device=str(self.device))
+        self._active_query: Optional[str] = None
+        self._last_grounding: Optional[GroundingResult] = None
+        self._last_foveal_inspection: Optional[FovealInspection] = None
+        self._latest_raw_frame: Optional[np.ndarray] = None
+        self._last_feat: Optional[torch.Tensor] = None
+        self._last_affordances: List[Tuple[float, float, str, float]] = []
+        self._lock_target: Optional[Tuple[float, float]] = None
+
         # Telemetry & Callbacks
         self.frame_count: int = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=100)
@@ -388,6 +417,79 @@ class HumanEye(nn.Module):
         if hasattr(self.source, "close") and callable(self.source.close):
             self.source.close()
 
+    def look_at(
+        self,
+        query: str,
+        frame: Optional[np.ndarray] = None,
+        inspect: bool = True,
+    ) -> GroundingResult:
+        """Grounds natural language query onto screen, updates gaze fixation, and inspects fovea (<4ms)."""
+        f = frame if frame is not None else self._latest_raw_frame
+        if f is None:
+            f = self.source.grab()
+            self._latest_raw_frame = f
+
+        # If visual features are not yet cached, extract them
+        if self._last_feat is None:
+            H, W = f.shape[:2]
+            sy = max(1, H // self.input_size[0])
+            sx = max(1, W // self.input_size[1])
+            f_sub = f[::sy, ::sx]
+            if f_sub.ndim == 2:
+                f_rgb = np.stack([f_sub] * 3, axis=-1)
+            else:
+                f_rgb = f_sub[..., :3] if f_sub.shape[-1] > 3 else f_sub
+
+            t_in = torch.from_numpy(f_rgb).float() / 255.0
+            t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
+            t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
+            feat = self.backbone(t_resized)
+            self._last_feat = feat
+            self._last_affordances = self.affordance_head.find_hotspots(feat)
+        else:
+            feat = self._last_feat
+
+        # Ground query onto visual features
+        res = self.grounder.ground(
+            visual_features=feat,
+            query=query,
+            affordances=self._last_affordances,
+        )
+
+        self._active_query = query
+        self._last_grounding = res
+        self._lock_target = res.target_coord
+
+        # Saccade gaze directly to target coordinate
+        self.pursuit.update(detected_target=res.target_coord)
+
+        # Inspect high-acuity central fovea
+        if inspect and f is not None:
+            self._last_foveal_inspection = self.fovea_engine.inspect(f, res.target_coord)
+
+        return res
+
+    def unlock_target(self) -> None:
+        """Unlocks active target and resumes autonomous motion tracking."""
+        self._lock_target = None
+        self._active_query = None
+
+    def inspect_fovea(
+        self,
+        centroid: Optional[Tuple[float, float]] = None,
+        frame: Optional[np.ndarray] = None,
+    ) -> FovealInspection:
+        """Inspects foveal central vision at specified coordinate or current gaze fixation."""
+        target = centroid or self.pursuit.current_gaze
+        f = frame if frame is not None else self._latest_raw_frame
+        if f is None:
+            f = self.source.grab()
+            self._latest_raw_frame = f
+
+        inspection = self.fovea_engine.inspect(f, target)
+        self._last_foveal_inspection = inspection
+        return inspection
+
     @torch.inference_mode()
     def observe(
         self,
@@ -408,7 +510,7 @@ class HumanEye(nn.Module):
         motion_field, mean_motion, moving_objs, surprise = self.motion_engine.process(frame)
 
         # 3. Smooth Pursuit Target Assignment (<0.1ms)
-        tracked_target = lock_target
+        tracked_target = lock_target or self._lock_target
         tracked_vel = (0.0, 0.0)
         if tracked_target is None and moving_objs:
             # Auto-pursue most salient moving entity
@@ -438,6 +540,8 @@ class HumanEye(nn.Module):
         t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
 
         feat = self.backbone(t_resized)
+        self._latest_raw_frame = frame
+        self._last_feat = feat
 
         # Ventral scene semantics
         ventral_out = self.ventral(feat)
@@ -448,6 +552,7 @@ class HumanEye(nn.Module):
 
         # Fast Dorsal interactive affordances (<0.5ms)
         affordances = self.affordance_head.find_hotspots(feat, action_type="clickable", top_k=3, threshold=0.25)
+        self._last_affordances = affordances
 
         # 5. Closed-Loop Hand-Eye Motor Flow
         motor_flow = (0.0, 0.0)
@@ -491,6 +596,9 @@ class HumanEye(nn.Module):
             affordance_hotspots=affordances,
             primary_category=cat_name,
             category_confidence=cat_conf,
+            active_query=self._active_query,
+            grounding_result=self._last_grounding,
+            foveal_inspection=self._last_foveal_inspection,
         )
         self._last_state = state
 

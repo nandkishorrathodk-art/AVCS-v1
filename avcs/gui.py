@@ -335,13 +335,23 @@ class AVCSDesktopApp:
         query = self.query_entry.get().strip()
         if not query:
             return
-        # Execute gaze grounding
+        # Execute language grounding via HumanEye
         try:
-            target = self.eye.look_at(query)
+            res = self.human_eye.look_at(query)
+            target = res.target_coord
             self.current_target_gaze = target
-            self.gaze_pos_lbl.config(text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f})")
+            insp = self.human_eye._last_foveal_inspection
+            foveal_str = f" [{insp.element_kind}]" if insp else ""
+            self.gaze_pos_lbl.config(
+                text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f}){foveal_str}"
+            )
         except Exception as e:
-            messagebox.showerror("Grounding Error", str(e))
+            try:
+                target = self.eye.look_at(query)
+                self.current_target_gaze = target
+                self.gaze_pos_lbl.config(text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f})")
+            except Exception:
+                messagebox.showerror("Grounding Error", str(e))
 
     def on_steer_clicked(self, click: bool = False) -> None:
         target = self.current_target_gaze or self.eye.cortex.retina.current_fixation
@@ -468,6 +478,15 @@ class AVCSDesktopApp:
             draw.line([tx - 10, ty, tx + 10, ty], fill=lock_color, width=2)
             draw.line([tx, ty - 10, tx, ty + 10], fill=lock_color, width=2)
             draw.text((tx + 14, ty - 8), "PURSUIT LOCK", fill=lock_color)
+
+        # 5. Draw Foveal Acuity High-Resolution Inspection Box
+        if self.show_fovea and self.human_eye._last_foveal_inspection:
+            insp = self.human_eye._last_foveal_inspection
+            x1, y1, x2, y2 = insp.bbox
+            px1, py1 = int(x1 * cw), int(y1 * ch)
+            px2, py2 = int(x2 * cw), int(y2 * ch)
+            draw.rectangle([px1, py1, px2, py2], outline="#ffd700", width=2)
+            draw.text((px1, max(0, py1 - 13)), f"FOVEA: {insp.element_kind.upper()} ({insp.confidence:.0%})", fill="#ffd700")
 
         # Convert to PhotoImage and update canvas item without memory leak
         photo = ImageTk.PhotoImage(image=img)

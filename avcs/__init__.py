@@ -57,6 +57,13 @@ from avcs.human_eye import (
     RealTimeCorticalBackbone,
     SmoothPursuitTracker,
 )
+from avcs.grounding import (
+    FovealAcuityEngine,
+    FovealAcuityHead,
+    FovealInspection,
+    GroundingResult,
+    LanguageGazeGrounder,
+)
 from avcs.events import (
     VisualEvent,
     VisualEventStreamer,
@@ -83,6 +90,12 @@ __all__ = [
     "RealTimeCorticalBackbone",
     "FastAffordanceHead",
     "SmoothPursuitTracker",
+    # Phase 2: Language Grounding & Foveation
+    "LanguageGazeGrounder",
+    "FovealAcuityEngine",
+    "FovealAcuityHead",
+    "GroundingResult",
+    "FovealInspection",
     "VisualEvent",
     "VisualEventStreamer",
     "VisualEventType",

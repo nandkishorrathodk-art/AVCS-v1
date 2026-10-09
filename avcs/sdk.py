@@ -19,6 +19,7 @@ import numpy as np
 from avcs.auth import LicenseManager, LicensePayload, LicenseTier
 from avcs.billing import RateCard, SessionUsageReceipt, UsageMeter
 from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
+from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
@@ -118,6 +119,12 @@ class HumanEyeClient:
         """Stops client and closes all visual resources."""
         self.stop()
 
+    def __enter__(self) -> HumanEyeClient:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _run_loop(self) -> None:
         interval = 1.0 / max(1, self.target_fps)
         while self._running:
@@ -162,20 +169,22 @@ class HumanEyeClient:
         return self.events.subscribe(event_type=event_type, callback=callback)
 
     def look_at(self, query_or_coords: str | Tuple[float, float]) -> Tuple[float, float]:
-        """Directs high-acuity gaze and foveation to target."""
+        """Directs high-acuity gaze and foveation to target using language grounding (<4ms)."""
         self.meter.record_query()
         if isinstance(query_or_coords, tuple):
             coords = query_or_coords
+            self.eye.track(coords)
+            self.eye.inspect_fovea(centroid=coords)
+            return coords
         else:
-            # Semantic search across conscious affordances
-            state = self.current_state
-            if state.affordance_hotspots:
-                coords = (state.affordance_hotspots[0][0], state.affordance_hotspots[0][1])
-            else:
-                coords = (0.5, 0.5)
+            # Top-down natural language gaze grounding (<4ms)
+            res = self.eye.look_at(query=query_or_coords, inspect=True)
+            return res.target_coord
 
-        self.eye.track(coords)
-        return coords
+    def inspect(self, centroid: Optional[Tuple[float, float]] = None) -> FovealInspection:
+        """Inspects fine-grained element properties at central fovea (<2ms)."""
+        return self.eye.inspect_fovea(centroid=centroid)
+
 
     def track(self, target: Optional[Tuple[float, float]] = None) -> Optional[Tuple[float, float]]:
         """Engages biological smooth pursuit tracking on a target or salient moving object."""
