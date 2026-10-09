@@ -59,7 +59,15 @@ __all__ = [
     "get_weights_path",
     "load_avcs_weights",
     "download_weights",
+    # Native Desktop GUI
+    "launch_gui",
+    "AVCSDesktopApp",
     # Metadata
     "__version__",
 ]
+
+def launch_gui() -> None:
+    """Launches the AVCS Desktop Station GUI application."""
+    from avcs.gui import launch_gui as _launch
+    _launch()
 

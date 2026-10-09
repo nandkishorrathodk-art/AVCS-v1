@@ -62,6 +62,7 @@ Issues = "https://github.com/Praxis-Neural/AVCS/issues"
 [project.scripts]
 avcs-benchmark = "avcs.benchmark:main"
 avcs-hud = "avcs.dashboard:main"
+avcs-gui = "avcs.gui:launch_gui"
 
 [tool.setuptools.packages.find]
 where = ["."]

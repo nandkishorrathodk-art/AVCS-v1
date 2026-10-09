@@ -105,3 +105,4 @@ class Win32CursorDriver:
         self.click(button=button)
         time.sleep(interval)
         self.click(button=button)
+

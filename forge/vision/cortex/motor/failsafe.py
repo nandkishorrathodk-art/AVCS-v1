@@ -46,3 +46,4 @@ class CornerBreakoutFailSafe:
                 f"[AVCS Safety Fail-Safe] Emergency abort triggered: cursor entered {corner_name} "
                 f"corner ({pixel_x}, {pixel_y}). Motor control relinquished to user."
             )
+

@@ -11,6 +11,7 @@ Both hand the reflex layer nothing but pixels -- there is no other channel.
 """
 from __future__ import annotations
 
+import sys
 import time
 from typing import Iterator
 
@@ -34,6 +35,15 @@ class ScreenCapture:
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise CaptureError("mss is not installed; `pip install mss`") from exc
         try:
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    u32 = ctypes.windll.user32
+                    hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
+                    if hdesk:
+                        u32.SetThreadDesktop(hdesk)
+                except Exception:
+                    pass
             # mss renamed the factory: `MSS` is current, `mss` is deprecated.
             factory = getattr(mss, "MSS", None) or mss.mss
             self._sct = factory()
@@ -48,7 +58,11 @@ class ScreenCapture:
             self.open()
         assert self._sct is not None
         shot = self._sct.grab(self._sct.monitors[self.monitor])
-        return np.asarray(shot)[:, :, :3].copy()
+        arr = np.asarray(shot)
+        # mss delivers BGRA on Windows/X11; convert to genuine RGB for neural cortex
+        if arr.ndim == 3 and arr.shape[-1] >= 3:
+            return arr[:, :, [2, 1, 0]].copy()
+        return arr.copy()
 
     def close(self) -> None:
         if self._sct is not None:

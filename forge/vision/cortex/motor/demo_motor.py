@@ -71,3 +71,4 @@ if __name__ == "__main__":
     parser.add_argument("--speed", type=float, default=1.5, help="Speed scaling factor")
     args = parser.parse_args()
     run_motor_demo(live=args.live, speed=args.speed)
+

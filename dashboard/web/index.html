@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AVCS | Enterprise Fleet Perception Console</title>
+  <style>
+    :root {
+      --bg: #090c10;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --accent: #58a6ff;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
+    body { background-color: var(--bg); color: var(--text); padding: 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.5px; }
+    .status-badge { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 20px; background: rgba(63, 185, 80, 0.15); color: var(--success); border: 1px solid rgba(63, 185, 80, 0.3); }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+
+    .main-grid { display: grid; grid-template-columns: 2.8fr 1.2fr; gap: 20px; }
+    .stream-container { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; position: relative; }
+    .stream-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: rgba(0,0,0,0.3); border-bottom: 1px solid var(--border); }
+    .stream-title { font-size: 14px; font-weight: 600; color: var(--text-muted); }
+    .stream-view { width: 100%; aspect-ratio: 16/9; background: #000; display: flex; align-items: center; justify-content: center; }
+    .stream-view img { width: 100%; height: 100%; object-fit: contain; }
+
+    .telemetry-sidebar { display: flex; flex-direction: column; gap: 16px; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .card-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-muted); margin-bottom: 12px; }
+    .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-value { font-weight: 600; font-family: monospace; }
+
+    .meter-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+    .meter-fill { height: 100%; width: 45%; background: var(--accent); transition: width 0.3s ease; }
+
+    .fleet-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+    .fleet-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; cursor: pointer; transition: border-color 0.2s; }
+    .fleet-card:hover { border-color: var(--accent); }
+    .fleet-card-header { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+    .fleet-thumb { width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 4px; overflow: hidden; }
+    .fleet-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M3 12c2.5-5 6.5-8 9-8s6.5 3 9 8c-2.5 5-6.5 8-9 8s-6.5-3-9-8z"></path>
+      </svg>
+      <h1>PRAXIS NEURAL // AVCS CORTEX FLEET</h1>
+    </div>
+    <div class="status-badge">
+      <div class="pulse-dot"></div>
+      <span>LIVE OCULAR STREAM (30 FPS)</span>
+    </div>
+  </header>
+
+  <main class="main-grid">
+    <div class="stream-container">
+      <div class="stream-header">
+        <span class="stream-title">PRIMARY FOVEAL OCULAR FEED & HUD OVERLAY</span>
+        <span id="res-badge" style="font-size: 12px; color: var(--text-muted); font-family: monospace;">1280x720 • 25ms GPU</span>
+      </div>
+      <div class="stream-view">
+        <img id="mjpg-stream" src="/stream.mjpg" alt="AVCS Real-Time Perception Stream" onerror="this.src='/snapshot.png'">
+      </div>
+    </div>
+
+    <div class="telemetry-sidebar">
+      <div class="card">
+        <div class="card-title">Cortical Perception State</div>
+        <div class="stat-row">
+          <span>UI Scene Category</span>
+          <span class="stat-value" id="val-cat" style="color: var(--accent);">editor_code</span>
+        </div>
+        <div class="stat-row">
+          <span>Stability Gating</span>
+          <span class="stat-value" id="val-stability" style="color: var(--success);">stable</span>
+        </div>
+        <div class="stat-row">
+          <span>Fiston Free-Energy Surprise</span>
+          <span class="stat-value" id="val-surprise">0.021</span>
+        </div>
+        <div class="meter-bar">
+          <div class="meter-fill" id="meter-surprise" style="width: 2.1%;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Motor & Affordance Servoing</div>
+        <div class="stat-row">
+          <span>Clickable Buttons Detected</span>
+          <span class="stat-value" id="val-clickables">2 targets</span>
+        </div>
+        <div class="stat-row">
+          <span>Typeable Input Fields</span>
+          <span class="stat-value" id="val-typeables">2 targets</span>
+        </div>
+        <div class="stat-row">
+          <span>Foveal Fixation Gaze</span>
+          <span class="stat-value" id="val-gaze">(0.50, 0.50)</span>
+        </div>
+        <div class="stat-row">
+          <span>Hand-Eye Alignment</span>
+          <span class="stat-value" id="val-contact" style="color: var(--success);">LOCKED</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Fleet Telemetry</div>
+        <div class="stat-row">
+          <span>Monitored Agents</span>
+          <span class="stat-value" id="val-fleet-count">4 virtual nodes</span>
+        </div>
+        <div class="stat-row">
+          <span>Cumulative Frames Processed</span>
+          <span class="stat-value" id="val-total-frames">1,842</span>
+        </div>
+        <div class="stat-row">
+          <span>VLM Cloud Tokens Saved</span>
+          <span class="stat-value" id="val-tokens-saved" style="color: var(--success);">142,400 tokens</span>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <section style="margin-top: 30px;">
+    <h2 style="font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px;">Active Agent Fleet Nodes</h2>
+    <div class="fleet-grid" id="fleet-container">
+      <!-- Dynamically populated or rendered static fleet nodes -->
+      <div class="fleet-card">
+        <div class="fleet-card-header">
+          <span>Agent-01 (VS Code Coder)</span>
+          <span style="color: var(--success);">● Active</span>
+        </div>
+        <div class="fleet-thumb"><img src="/stream.mjpg" alt="Agent-01"></div>
+      </div>
+      <div class="fleet-card">
+        <div class="fleet-card-header">
+          <span>Agent-02 (Browser Web QA)</span>
+          <span style="color: var(--success);">● Active</span>
+        </div>
+        <div class="fleet-thumb"><img src="/stream.mjpg" alt="Agent-02"></div>
+      </div>
+      <div class="fleet-card">
+        <div class="fleet-card-header">
+          <span>Agent-03 (Financial Excel)</span>
+          <span style="color: var(--success);">● Active</span>
+        </div>
+        <div class="fleet-thumb"><img src="/stream.mjpg" alt="Agent-03"></div>
+      </div>
+      <div class="fleet-card">
+        <div class="fleet-card-header">
+          <span>Agent-04 (Terminal CLI Bot)</span>
+          <span style="color: var(--success);">● Active</span>
+        </div>
+        <div class="fleet-thumb"><img src="/stream.mjpg" alt="Agent-04"></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    // Poll live telemetry JSON endpoint
+    async function updateTelemetry() {
+      try {
+        const resp = await fetch('/api/telemetry');
+        if (resp.ok) {
+          const data = await resp.json();
+          document.getElementById('val-cat').textContent = data.primary_category || 'editor_code';
+          document.getElementById('val-stability').textContent = data.stability_state || 'stable';
+          document.getElementById('val-surprise').textContent = (data.surprise_score || 0).toFixed(3);
+          const pct = Math.min(100, Math.max(0, (data.surprise_score || 0) * 100));
+          document.getElementById('meter-surprise').style.width = pct + '%';
+          if (data.action_hotspots) {
+            const clicks = data.action_hotspots.filter(h => h[2] === 'clickable').length;
+            const types = data.action_hotspots.filter(h => h[2] === 'typeable').length;
+            document.getElementById('val-clickables').textContent = clicks + ' targets';
+            document.getElementById('val-typeables').textContent = types + ' targets';
+          }
+        }
+      } catch (e) {
+        // Fallback gracefully if running on simple MJPEG server without REST API
+      }
+    }
+    setInterval(updateTelemetry, 1000);
+  </script>
+</body>
+</html>
+
