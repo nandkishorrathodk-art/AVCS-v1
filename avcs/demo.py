@@ -9,8 +9,14 @@ Runs the flagship end-to-end demonstration of the Universal Human Eye Intelligen
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 import time
+
+# Ensure repository root is on sys.path regardless of execution working directory
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 import avcs
 from avcs.events import VisualEvent
@@ -34,6 +40,13 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
     print("Human Eye online. Streaming continuous visual perception...\n")
     start_t = time.perf_counter()
     ticks = 0
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
 
     try:
         while time.perf_counter() - start_t < duration_seconds:
@@ -61,6 +74,13 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
 
     except KeyboardInterrupt:
         print("\nDemo interrupted by operator.")
+    finally:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
 
     total_time = time.perf_counter() - start_t
     effective_fps = ticks / max(0.001, total_time)

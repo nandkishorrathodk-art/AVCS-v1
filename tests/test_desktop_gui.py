@@ -23,6 +23,7 @@ def test_desktop_gui_app_initialization_and_widgets():
     assert app.lbl_category is not None
     assert app.lbl_stability is not None
     assert app.lbl_surprise is not None
+    assert app.lbl_latency is not None
 
     # Test query input change
     app.query_entry.delete(0, tk.END)
@@ -31,8 +32,12 @@ def test_desktop_gui_app_initialization_and_widgets():
 
     # Test overlay toggle callbacks
     app.var_fovea.set(False)
+    app.var_motion.set(False)
+    app.var_pursuit.set(False)
     app._on_overlay_toggle()
     assert app.show_fovea is False
+    assert app.show_motion is False
+    assert app.show_pursuit is False
 
     app.var_top.set(True)
     app._on_top_toggle()
@@ -40,3 +45,4 @@ def test_desktop_gui_app_initialization_and_widgets():
 
     # Clean teardown
     app.on_close()
+

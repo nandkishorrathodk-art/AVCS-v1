@@ -4,6 +4,14 @@ Real-Time Non-Generative Biological Visual Perception Foundation for Screen AI A
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path regardless of execution working directory
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 from forge.vision.cortex.sdk import ScreenEye
 from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
 from forge.vision.cortex.config import CortexConfig

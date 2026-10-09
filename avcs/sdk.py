@@ -47,7 +47,7 @@ class HumanEyeClient:
         # 1. Resolve Screen Capture Source
         if source is None or source == "desktop":
             try:
-                self.source = open_capture()
+                self.source = open_capture(prefer_real=True, threaded=True)
             except Exception:
                 self.source = SyntheticScreen()
         elif isinstance(source, str) and source == "synthetic":
@@ -112,6 +112,11 @@ class HumanEyeClient:
             self._worker_thread.join(timeout=1.0)
             self._worker_thread = None
         self.meter.pause()
+        self.eye.close()
+
+    def close(self) -> None:
+        """Stops client and closes all visual resources."""
+        self.stop()
 
     def _run_loop(self) -> None:
         interval = 1.0 / max(1, self.target_fps)

@@ -320,15 +320,37 @@ class HumanEye(nn.Module):
 
     def __init__(
         self,
-        source: Optional[ScreenCapture] = None,
+        source: Optional[Any] = None,
         device: str = "cpu",
         feature_dim: int = 128,
         input_size: Tuple[int, int] = (128, 128),
+        threaded_capture: bool = True,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
         self.input_size = input_size
-        self.source = source or SyntheticScreen()
+
+        # Optimize CPU threads for real-time biological visual cortex throughput
+        if str(self.device) == "cpu" and torch.get_num_threads() > 4:
+            try:
+                torch.set_num_threads(4)
+            except Exception:
+                pass
+
+        if source is None:
+            self.source = open_capture(prefer_real=True, threaded=threaded_capture)
+        elif isinstance(source, str):
+            if source == "desktop":
+                self.source = open_capture(prefer_real=True, threaded=threaded_capture)
+            elif source == "synthetic":
+                self.source = SyntheticScreen()
+            else:
+                self.source = open_capture(prefer_real=True, threaded=threaded_capture)
+        elif threaded_capture and not hasattr(source, "_thread"):
+            from forge.vision.capture import ThreadedScreenCapture
+            self.source = ThreadedScreenCapture(source).open()
+        else:
+            self.source = source or SyntheticScreen()
 
         # 1. Biological Motion Pathway (Magnocellular)
         self.motion_engine = MagnocellularMotionEngine(grid_rows=16, grid_cols=24)
@@ -361,7 +383,12 @@ class HumanEye(nn.Module):
             return fn
         return decorator
 
-    @torch.no_grad()
+    def close(self) -> None:
+        """Closes visual stream source."""
+        if hasattr(self.source, "close") and callable(self.source.close):
+            self.source.close()
+
+    @torch.inference_mode()
     def observe(
         self,
         frame: Optional[np.ndarray] = None,

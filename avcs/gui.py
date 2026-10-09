@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image, ImageTk, ImageDraw
 
 from avcs import ScreenEye, CortexState
+from avcs.human_eye import HumanEye, HumanEyeState
 from forge.vision.cortex.motor import (
     HandEyeServoingController,
     get_default_driver,
@@ -37,6 +38,7 @@ class AVCSDesktopApp:
 
         self.fps = fps
         self.eye = ScreenEye(fps=fps)
+        self.human_eye = HumanEye(source=self.eye.source, threaded_capture=True)
         self.driver = get_default_driver(force_virtual=False)
         self.servoing_controller = HandEyeServoingController(driver=self.driver)
 
@@ -44,11 +46,14 @@ class AVCSDesktopApp:
         self.running = True
         self.show_fovea = True
         self.show_affordances = True
+        self.show_motion = True
+        self.show_pursuit = True
         self.show_trajectory = True
         self.always_on_top = False
         self.current_target_gaze: Optional[Tuple[float, float]] = None
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_state: Optional[CortexState] = None
+        self.latest_human_state: Optional[HumanEyeState] = None
         self._canvas_img_id: Optional[int] = None
 
         self._build_ui()
@@ -233,6 +238,7 @@ class AVCSDesktopApp:
         self.lbl_stability = self._make_stat_row(sec3, "Stability:", "stable", "#3fb950")
         self.lbl_surprise = self._make_stat_row(sec3, "Surprise Error:", "0.003", "#f0f6fc")
         self.lbl_hotspots = self._make_stat_row(sec3, "Affordances:", "2 Buttons, 2 Inputs", "#f0f6fc")
+        self.lbl_latency = self._make_stat_row(sec3, "Cortical Latency:", "7.0 ms", "#3fb950")
         self.lbl_fps = self._make_stat_row(sec3, "Perception FPS:", f"{self.fps} FPS", "#3fb950")
 
         # Section 4: Display Options & Toggles
@@ -271,6 +277,30 @@ class AVCSDesktopApp:
             command=self._on_overlay_toggle,
         ).pack(anchor=tk.W)
 
+        self.var_motion = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            sec4,
+            text="Show Optical Motion Vectors",
+            variable=self.var_motion,
+            fg="#c9d1d9",
+            bg="#161b22",
+            selectcolor="#0d1117",
+            activebackground="#161b22",
+            command=self._on_overlay_toggle,
+        ).pack(anchor=tk.W)
+
+        self.var_pursuit = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            sec4,
+            text="Show Smooth Pursuit Lock",
+            variable=self.var_pursuit,
+            fg="#c9d1d9",
+            bg="#161b22",
+            selectcolor="#0d1117",
+            activebackground="#161b22",
+            command=self._on_overlay_toggle,
+        ).pack(anchor=tk.W)
+
         self.var_top = tk.BooleanVar(value=False)
         tk.Checkbutton(
             sec4,
@@ -294,6 +324,8 @@ class AVCSDesktopApp:
     def _on_overlay_toggle(self) -> None:
         self.show_fovea = self.var_fovea.get()
         self.show_affordances = self.var_affordance.get()
+        self.show_motion = self.var_motion.get()
+        self.show_pursuit = self.var_pursuit.get()
 
     def _on_top_toggle(self) -> None:
         self.always_on_top = self.var_top.get()
@@ -342,8 +374,15 @@ class AVCSDesktopApp:
                 try:
                     frame = self.eye.source.grab()
                     state = self.eye.perceive_now(frame=frame)
+                    # Also compute biological human eye perception (magnocellular flow + pursuit)
+                    try:
+                        human_state = self.human_eye.observe(frame=frame)
+                    except Exception:
+                        human_state = None
+
                     self.latest_frame = frame
                     self.latest_state = state
+                    self.latest_human_state = human_state
                 except Exception:
                     pass
 
@@ -408,6 +447,28 @@ class AVCSDesktopApp:
             draw.text((cx + 13, cy + 13), "FOVEA", fill="#000000")
             draw.text((cx + 12, cy + 12), "FOVEA", fill=reticle_color)
 
+        # 3. Draw Magnocellular Optical Motion Vectors & Moving Entities
+        if self.show_motion and self.latest_human_state and self.latest_human_state.moving_objects:
+            for obj in self.latest_human_state.moving_objects:
+                ox, oy = int(obj.centroid[0] * cw), int(obj.centroid[1] * ch)
+                r = int(max(12, min(50, obj.area * cw * 0.4)))
+                # Motion bounding box
+                draw.rectangle([ox - r, oy - r, ox + r, oy + r], outline="#00e5ff", width=2)
+                # Motion heading arrow
+                vx, vy = int(obj.velocity[0] * cw * 0.3), int(obj.velocity[1] * ch * 0.3)
+                draw.line([ox, oy, ox + vx, oy + vy], fill="#00ff66", width=3)
+                draw.text((ox - r, oy - r - 12), f"ENTITY | v={obj.speed:.2f}", fill="#00ff66")
+
+        # 4. Draw Smooth Pursuit Target Lock
+        if self.show_pursuit and self.latest_human_state and self.latest_human_state.pursuit_target:
+            tx = int(self.latest_human_state.pursuit_target[0] * cw)
+            ty = int(self.latest_human_state.pursuit_target[1] * ch)
+            lock_color = "#ff007f"  # Neon magenta
+            draw.ellipse([tx - 18, ty - 18, tx + 18, ty + 18], outline=lock_color, width=3)
+            draw.line([tx - 10, ty, tx + 10, ty], fill=lock_color, width=2)
+            draw.line([tx, ty - 10, tx, ty + 10], fill=lock_color, width=2)
+            draw.text((tx + 14, ty - 8), "PURSUIT LOCK", fill=lock_color)
+
         # Convert to PhotoImage and update canvas item without memory leak
         photo = ImageTk.PhotoImage(image=img)
         if self._canvas_img_id is None:
@@ -426,10 +487,20 @@ class AVCSDesktopApp:
         types = len([h for h in (state.action_hotspots or []) if h[2] == "typeable"])
         self.lbl_hotspots.config(text=f"{clicks} Buttons, {types} Inputs")
 
+        if self.latest_human_state is not None:
+            self.lbl_latency.config(text=f"{self.latest_human_state.latency_ms:.1f} ms")
+            self.lbl_fps.config(text=f"{self.latest_human_state.fps:.1f} FPS")
+        else:
+            self.lbl_fps.config(text=f"{self.fps} FPS")
+
     def on_close(self) -> None:
         self.running = False
         try:
             self.eye.stop()
+        except Exception:
+            pass
+        try:
+            self.human_eye.close()
         except Exception:
             pass
         self.root.destroy()
