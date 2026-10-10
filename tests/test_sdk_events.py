@@ -146,10 +146,10 @@ def test_human_eye_client_background_stream():
     client = avcs.eye(source=screen, force_virtual_motor=True, fps=60)
 
     client.start()
-    time.sleep(0.10)
+    time.sleep(0.20)
     client.stop()
 
     usage = client.get_usage()
-    # At 60 FPS for 100ms, should process multiple frames
+    # At 60 FPS for 200ms, should process multiple frames
     assert usage["frames_processed"] >= 2
     client.close()

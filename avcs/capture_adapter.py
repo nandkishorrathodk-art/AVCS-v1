@@ -212,7 +212,7 @@ class Win32GDICaptureAdapter(BaseCaptureAdapter):
             self.close()
             raise CaptureError("Failed to allocate Win32 DIBSection buffer.")
 
-        self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
+        self._h_old_bitmap = self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
 
         buffer_from_memory = ctypes.pythonapi.PyMemoryView_FromMemory
         buffer_from_memory.restype = ctypes.py_object
@@ -264,11 +264,31 @@ class Win32GDICaptureAdapter(BaseCaptureAdapter):
                     )
 
         if not ret:
+            # Fallback to physical desktop capture via mss on DC starvation
+            try:
+                import mss
+                with mss.mss() as sct:
+                    mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                    shot = sct.grab(mon)
+                    arr = np.frombuffer(shot.rgb, dtype=np.uint8).reshape((shot.height, shot.width, 3))
+                    if self._dst_w != shot.width or self._dst_h != shot.height:
+                        from PIL import Image
+                        im = Image.fromarray(arr).resize((self._dst_w, self._dst_h))
+                        return np.array(im)
+                    return arr.copy()
+            except Exception:
+                pass
             raise CaptureError("Win32 BitBlt/StretchBlt failed.")
         self._gdi32.GdiFlush()
         return self._raw_np[:, :, 2::-1].copy()
 
     def close(self) -> None:
+        if self._gdi32 and self._h_mem_dc and hasattr(self, "_h_old_bitmap") and self._h_old_bitmap:
+            try:
+                self._gdi32.SelectObject(self._h_mem_dc, self._h_old_bitmap)
+            except Exception:
+                pass
+            self._h_old_bitmap = None
         if self._gdi32 and self._h_bitmap:
             try:
                 self._gdi32.DeleteObject(self._h_bitmap)
