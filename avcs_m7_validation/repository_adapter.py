@@ -43,8 +43,23 @@ class RepositoryValidationAdapter:
             self.capture = getattr(broker.eye, "_source", None)
         else:
             self.capture = InteractiveSyntheticCaptureAdapter(width=640, height=480)
-            eye = HumanEye(source=self.capture, device="cpu")
+            eye = HumanEye(source=self.capture, device="cpu", threaded_capture=False)
             driver = VirtualCursorDriver(failsafe=False)
+            # Link simulated physical action dispatch directly to interactive visual motion
+            orig_click = driver.click
+            def _click_with_visual_pulse(*args: Any, **kwargs: Any) -> None:
+                if self.capture is not None and hasattr(self.capture, "trigger_motion"):
+                    self.capture.trigger_motion(0.5, 0.5)
+                return orig_click(*args, **kwargs)
+            driver.click = _click_with_visual_pulse  # type: ignore
+
+            orig_press_key = driver.press_key
+            def _press_key_with_visual_pulse(*args: Any, **kwargs: Any) -> None:
+                if self.capture is not None and hasattr(self.capture, "trigger_motion"):
+                    self.capture.trigger_motion(0.5, 0.5)
+                return orig_press_key(*args, **kwargs)
+            driver.press_key = _press_key_with_visual_pulse  # type: ignore
+
             safety = ActionSafetyController()
             self.broker = ActionBroker(eye=eye, driver=driver, safety_controller=safety)
 
@@ -74,14 +89,7 @@ class RepositoryValidationAdapter:
             evidence_method = "unknown"
             action_type = "click"
 
-        # Step 1: Capture and observe initial state through HumanEye
-        state = self.broker.observe()
-
-        # In synthetic validation mode, trigger simulated interactive visual delta
-        if self.capture is not None and hasattr(self.capture, "trigger_motion"):
-            self.capture.trigger_motion(0.5, 0.5)
-
-        # Step 2: Route bounded action through ActionBroker
+        # Route bounded action through ActionBroker
         req = ActionRequest(
             action_id=f"act-{run_id}",
             action_type=action_type,

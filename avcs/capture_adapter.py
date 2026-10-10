@@ -343,7 +343,11 @@ class InteractiveSyntheticCaptureAdapter(SyntheticCaptureAdapter):
         self._motion_patch = (px, py, 32)
 
     def grab(self) -> np.ndarray:
-        frame = super().grab()
+        self._tick += 1
+        frame = np.full((self.height, self.width, 3), 40, dtype=np.uint8)
+        # High-contrast UI grid texture ensuring non-zero spatial gradients for optical flow
+        frame[::8, :] = 180
+        frame[:, ::8] = 180
         if self._motion_patch:
             px, py, r = self._motion_patch
             self._motion_patch = None
