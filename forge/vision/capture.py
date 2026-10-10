@@ -409,6 +409,15 @@ class ThreadedScreenCapture:
         return self
 
     def _worker(self) -> None:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                u32 = ctypes.windll.user32
+                hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
+                if hdesk:
+                    u32.SetThreadDesktop(hdesk)
+            except Exception:
+                pass
         sleep_interval = 1.0 / max(1.0, self.target_fps * 1.2) if self.target_fps > 0 else 0.005
         while self._running:
             try:
