@@ -102,7 +102,7 @@ async def test_repository_backend_high_risk_authorized_confirmed():
     async with AVCSClient(backend) as client:
         obs = await client.observe()
         result = await client.click(
-            point=NormalizedPoint(0.5, 0.5),
+            point=NormalizedPoint(0.42, 0.58),
             observation=obs,
             risk=RiskLevel.HIGH,
             authorization_ref="valid_token_123",

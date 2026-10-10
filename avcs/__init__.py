@@ -103,6 +103,16 @@ from avcs.sdk import (
     eye,
 )
 from avcs.mcp import AVCSMCPServer, run_mcp_server
+from avcs.cortex_2m import (
+    AffordanceHead2M,
+    CorticalBackbone2M,
+    HumanEye2M,
+    LanguageGrounder2M,
+    UnifiedCortex2M,
+    UNIVERSAL_AFFORDANCE_CLASSES,
+    UNIVERSAL_APP_CATEGORIES,
+    VentralStream2M,
+)
 
 __version__ = "0.2.0"
 __author__ = "Praxis Neural"
@@ -119,6 +129,15 @@ __all__ = [
     "RealTimeCorticalBackbone",
     "FastAffordanceHead",
     "SmoothPursuitTracker",
+    # Scaled 2.0M Parameter Cortical Foundation Model
+    "UnifiedCortex2M",
+    "HumanEye2M",
+    "CorticalBackbone2M",
+    "AffordanceHead2M",
+    "VentralStream2M",
+    "LanguageGrounder2M",
+    "UNIVERSAL_APP_CATEGORIES",
+    "UNIVERSAL_AFFORDANCE_CLASSES",
     # Phase 2: Language Grounding & Foveation
     "LanguageGazeGrounder",
     "FovealAcuityEngine",

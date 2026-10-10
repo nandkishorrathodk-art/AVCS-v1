@@ -336,17 +336,21 @@ class InteractiveSyntheticCaptureAdapter(SyntheticCaptureAdapter):
     def __init__(self, width: int = 640, height: int = 480) -> None:
         super().__init__(width=width, height=height)
         self._motion_patch: Optional[Tuple[int, int, int]] = None
+        self._pulse_count: int = 0
 
     def trigger_motion(self, x: float, y: float) -> None:
         px = int(round(x * (self.width - 1)))
         py = int(round(y * (self.height - 1)))
         self._motion_patch = (px, py, 18)
+        self._pulse_count = 3
 
     def grab(self) -> np.ndarray:
         frame = super().grab()
-        if self._motion_patch:
+        if self._motion_patch and self._pulse_count > 0:
             px, py, r = self._motion_patch
-            self._motion_patch = None
+            self._pulse_count -= 1
+            if self._pulse_count == 0:
+                self._motion_patch = None
             y1 = max(0, py - r)
             y2 = min(self.height, py + r)
             x1 = max(0, px - r)
