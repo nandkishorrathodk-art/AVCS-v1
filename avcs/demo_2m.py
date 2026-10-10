@@ -91,3 +91,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_demo_2m(duration_seconds=args.seconds, capture_mode=args.source)
+
