@@ -190,23 +190,45 @@ class VentralStream2M(nn.Module):
         in_dim: int = 256,
         latent_dim: int = 256,
         num_categories: int = len(UNIVERSAL_APP_CATEGORIES),
+        dorsal_classes: int = len(UNIVERSAL_AFFORDANCE_CLASSES),
     ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
+        # Lateral projection: integrates dorsal affordance summary into ventral recognition
+        self.dorsal_lateral = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(dorsal_classes, 64),
+            nn.GELU(),
+        )
         self.fc = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(in_dim, 512),
+            nn.Linear(in_dim + 64, 512),
             nn.GELU(),
             nn.Linear(512, latent_dim),
         )
         self.classifier = nn.Linear(latent_dim, num_categories)
 
-    def forward(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (visual_latent_embedding, category_logits)."""
-        latent = self.fc(feat)
-        cat_logits = self.classifier(latent)
-        return latent, cat_logits
+    def forward(
+        self,
+        feat: torch.Tensor,
+        dorsal_context: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (normalized_visual_latent_embedding, category_logits)."""
+        pool_feat = F.adaptive_avg_pool2d(feat, 1).flatten(1)
+        if dorsal_context is not None:
+            d_ctx = self.dorsal_lateral(dorsal_context)
+            fused = torch.cat([pool_feat, d_ctx], dim=1)
+        else:
+            dummy_ctx = torch.zeros(pool_feat.size(0), 64, device=feat.device, dtype=feat.dtype)
+            fused = torch.cat([pool_feat, dummy_ctx], dim=1)
+
+        raw_latent = self.fc[2:](fused)  # Skip the Flatten/Pool and run Linear->GELU->Linear
+        # Anti-collapse L2-normalization for metric contrastive embedding
+        norm_latent = F.normalize(raw_latent, p=2, dim=-1)
+        cat_logits = self.classifier(norm_latent)
+        return norm_latent, cat_logits
 
 
 class LanguageGrounder2M(nn.Module):
@@ -230,7 +252,7 @@ class LanguageGrounder2M(nn.Module):
 
 
 class UnifiedCortex2M(nn.Module):
-    """The Complete 2.40 Million Parameter Scaled Visual Cortex Model."""
+    """The Complete 2.40 Million Parameter Scaled Visual Cortex Model with Lateral Cross-Stream Flow."""
 
     def __init__(self, feature_dim: int = 256) -> None:
         super().__init__()
@@ -250,8 +272,10 @@ class UnifiedCortex2M(nn.Module):
         text_emb: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         feat = self.backbone(x)
+        # 1. Dorsal stream computes spatial affordance field
         aff_logits = self.affordance(feat)
-        latent, cat_logits = self.ventral(feat)
+        # 2. Lateral Cross-Stream Information Flow: Dorsal spatial density informs Ventral recognition
+        latent, cat_logits = self.ventral(feat, dorsal_context=aff_logits)
         out = {
             "feat": feat,
             "affordance_logits": aff_logits,
