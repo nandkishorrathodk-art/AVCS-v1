@@ -462,37 +462,33 @@ class PhaseDPreflightEngine:
 
     def audit_12_scenario_live_readiness(self) -> PreflightCheckResult:
         """Audits live application coverage across all 12 validation scenarios."""
-        # Check scenario catalog
-        scenario_count = len(SCENARIOS)
-        supported_live_scenarios = [
-            # Only isolated_control_activation has a dedicated, tested live target harness
-            "isolated_control_activation"
-        ]
+        from avcs_m7_validation.live_harness import (
+            list_supported_scenarios,
+            validate_catalog_coverage,
+        )
 
-        # Check existing live adapters for the 12 benchmark scenarios
-        unmapped_scenarios = [s.scenario_id for s in SCENARIOS if s.scenario_id not in supported_live_scenarios]
+        all_mapped, unmapped = validate_catalog_coverage()
+        supported = list_supported_scenarios()
 
         details = {
-            "catalog_scenario_count": scenario_count,
-            "live_mapped_scenarios": supported_live_scenarios,
-            "unmapped_scenarios": unmapped_scenarios,
-            "unmapped_count": len(unmapped_scenarios),
+            "catalog_scenario_count": len(SCENARIOS),
+            "live_mapped_scenarios": supported,
+            "unmapped_scenarios": unmapped,
+            "unmapped_count": len(unmapped),
             "policy": (
                 "Per PHASE_D_PREFLIGHT_CHECKLIST.md § 2: The scenario catalog must map each scenario "
                 "to an actual supported live application. Unsupported scenarios fail preflight; no fixture fallback."
             ),
         }
 
-        # If any of the 12 catalog scenarios lack a live application binding, this check fails/blocks
-        all_ready = len(unmapped_scenarios) == 0
         err = (
-            f"11/12 benchmark scenarios ({', '.join(unmapped_scenarios[:4])}...) "
-            "do not have live desktop application harnesses installed. Bulk 1,800-trial execution is blocked."
-        ) if not all_ready else None
+            f"{len(unmapped)}/{len(SCENARIOS)} benchmark scenarios ({', '.join(unmapped[:4])}...) "
+            "do not have live desktop application harnesses registered. Bulk 1,800-trial execution is blocked."
+        ) if not all_mapped else None
 
         return PreflightCheckResult(
             name="5. 12-Scenario Live Application Readiness Audit",
-            status=PreflightStatus.PASSED if all_ready else PreflightStatus.BLOCKED,
+            status=PreflightStatus.PASSED if all_mapped else PreflightStatus.BLOCKED,
             details=details,
             error_message=err,
         )
