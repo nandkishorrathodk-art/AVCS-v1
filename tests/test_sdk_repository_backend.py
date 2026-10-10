@@ -130,7 +130,7 @@ async def test_repository_backend_coordinate_conversion():
     """Verify exact coordinate translation between NormalizedPoint and broker target_coord."""
     driver = VirtualCursorDriver()
     cap = InteractiveSyntheticCaptureAdapter().open()
-    eye = HumanEye(source=cap)
+    eye = HumanEye(source=cap, threaded_capture=False)
     safety = ActionSafetyController()
     broker = ActionBroker(eye=eye, driver=driver, safety_controller=safety, settle_delay_s=0.001)
 

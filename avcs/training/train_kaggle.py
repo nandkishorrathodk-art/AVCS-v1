@@ -28,16 +28,7 @@ if _repo_root not in sys.path:
 
 from avcs.cortex_2m import UnifiedCortex2M, UNIVERSAL_AFFORDANCE_CLASSES, UNIVERSAL_APP_CATEGORIES
 from avcs.training.dataset import UniversalScreenDataset
-
-
-def compute_anti_collapse_variance_loss(latent: torch.Tensor, gamma: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
-    """VICReg Variance Regularization: mathematically prevents latent representation collapse.
-    Enforces that standard deviation across the batch per feature dimension is at least gamma.
-    """
-    if latent.size(0) <= 1:
-        return torch.tensor(0.0, device=latent.device)
-    std = torch.sqrt(latent.var(dim=0) + eps)
-    return torch.mean(torch.clamp(gamma - std, min=0.0))
+from avcs.training.vicreg_safeguard import normalize_embedding, vicreg_variance_loss
 
 
 def train_cortex_2m(
@@ -129,9 +120,9 @@ def train_cortex_2m(
                 loss_aff = affordance_loss_fn(out["affordance_logits"], aff_targets)
                 loss_cat = category_loss_fn(out["category_logits"], cat_targets)
                 loss_ground = grounding_loss_fn(out["grounding_map"], ground_targets)
-                loss_var = compute_anti_collapse_variance_loss(out["visual_latent"])
+                loss_var = vicreg_variance_loss(out["visual_latent_raw"], target_std=1.0)
 
-                # Multi-task loss formulation with anti-collapse safeguard
+                # Multi-task loss formulation with anti-collapse safeguard on pre-normalization projection
                 loss = 1.0 * loss_aff + 0.5 * loss_cat + 2.0 * loss_ground + 1.0 * loss_var
 
             scaler.scale(loss).backward()

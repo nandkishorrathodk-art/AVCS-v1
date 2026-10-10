@@ -67,6 +67,9 @@ def test_cortex_2m_forward_pass():
     assert "affordance_logits" in out
     assert out["affordance_logits"].shape == (2, 24, 8, 8)
 
+    assert "visual_latent_raw" in out
+    assert out["visual_latent_raw"].shape == (2, 256)
+
     assert "visual_latent" in out
     assert out["visual_latent"].shape == (2, 256)
 
@@ -140,23 +143,29 @@ def test_lateral_cross_stream_flow():
 
 
 def test_anti_collapse_variance_regularization():
-    """Verifies mathematical properties of anti-collapse variance loss and normalized visual latents."""
-    from avcs.training.train_kaggle import compute_anti_collapse_variance_loss
+    """Verifies mathematical properties of VICReg variance loss and normalized visual latents."""
+    from avcs.training.vicreg_safeguard import vicreg_variance_loss, normalize_embedding
 
-    # 1. Collapsed state (all representations identical)
-    collapsed_latent = torch.ones(8, 256)
-    loss_collapsed = compute_anti_collapse_variance_loss(collapsed_latent, gamma=1.0)
-    assert loss_collapsed.item() > 0.95, f"Expected heavy penalty on collapse, got {loss_collapsed.item()}"
+    # 1. Collapsed state (small variance batch is penalized)
+    low_var_latent = torch.full((16, 256), 0.2) + torch.randn(16, 256) * 1e-3
+    loss_collapsed = vicreg_variance_loss(low_var_latent, target_std=1.0)
+    assert loss_collapsed.item() > 0.95, f"Expected heavy penalty on low variance, got {loss_collapsed.item()}"
 
     # 2. Diverse state (standard normal samples with unit variance)
-    diverse_latent = torch.randn(32, 256)
-    loss_diverse = compute_anti_collapse_variance_loss(diverse_latent, gamma=1.0)
+    diverse_latent = torch.randn(64, 256)
+    loss_diverse = vicreg_variance_loss(diverse_latent, target_std=1.0)
     assert loss_diverse.item() < 0.25, f"Expected low penalty on diverse representations, got {loss_diverse.item()}"
 
-    # 3. Output latents from cortex are L2-normalized
+    # 3. Model outputs both unnormalized projection and L2-normalized embedding
     cortex = UnifiedCortex2M(feature_dim=256)
     x = torch.randn(4, 3, 128, 128)
     out = cortex(x)
-    norms = torch.norm(out["visual_latent"], p=2, dim=-1)
-    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+
+    # visual_latent_raw has unconstrained norm
+    raw_norms = torch.norm(out["visual_latent_raw"], p=2, dim=-1)
+    assert not torch.allclose(raw_norms, torch.ones_like(raw_norms), atol=1e-3)
+
+    # visual_latent is strictly unit-L2 normalized
+    unit_norms = torch.norm(out["visual_latent"], p=2, dim=-1)
+    assert torch.allclose(unit_norms, torch.ones_like(unit_norms), atol=1e-5)
 

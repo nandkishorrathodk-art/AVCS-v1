@@ -158,12 +158,22 @@ class Win32CursorDriver:
 
     def __init__(self, failsafe: bool = True) -> None:
         self.user32 = ctypes.windll.user32
+        self._attach_input_desktop()
         self._init_dpi_awareness()
         self._setup_ctypes_signatures()
         self._init_high_res_timer()
         self.failsafe = CornerBreakoutFailSafe(enabled=failsafe)
         self._active_keys: Set[int] = set()
         atexit.register(self.panic_release)
+
+    def _attach_input_desktop(self) -> None:
+        """Attaches current thread to interactive input desktop to enable physical input routing."""
+        try:
+            h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+            if h_desk:
+                self.user32.SetThreadDesktop(h_desk)
+        except Exception:
+            pass
 
     def _init_dpi_awareness(self) -> None:
         """Enables Per-Monitor V2 DPI awareness to prevent coordinate scaling drift."""

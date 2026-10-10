@@ -87,7 +87,7 @@ class RepositoryAVCSBackend:
             self.capture = InteractiveSyntheticCaptureAdapter().open()
 
         if self.eye is None:
-            self.eye = HumanEye(source=self.capture)
+            self.eye = HumanEye(source=self.capture, threaded_capture=False)
 
         if self.driver is None:
             self.driver = VirtualCursorDriver()
@@ -255,10 +255,6 @@ class RepositoryAVCSBackend:
             text_content = request.key
 
         timeout_ms = min(request.timeout_s * 1000.0, 60000.0)
-
-        # In synthetic/interactive capture mode, pulse visual reaction at target
-        if self.capture is not None and hasattr(self.capture, "trigger_motion"):
-            self.capture.trigger_motion(tx, ty)
 
         # 6. Build repository action request
         repo_req = RepoActionRequest(

@@ -13,7 +13,7 @@ import collections
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -214,8 +214,11 @@ class VentralStream2M(nn.Module):
         self,
         feat: torch.Tensor,
         dorsal_context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (normalized_visual_latent_embedding, category_logits)."""
+        return_raw: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Returns (normalized_visual_latent_embedding, category_logits)
+        or (raw_latent, normalized_latent, category_logits) if return_raw is True.
+        """
         pool_feat = F.adaptive_avg_pool2d(feat, 1).flatten(1)
         if dorsal_context is not None:
             d_ctx = self.dorsal_lateral(dorsal_context)
@@ -228,6 +231,8 @@ class VentralStream2M(nn.Module):
         # Anti-collapse L2-normalization for metric contrastive embedding
         norm_latent = F.normalize(raw_latent, p=2, dim=-1)
         cat_logits = self.classifier(norm_latent)
+        if return_raw:
+            return raw_latent, norm_latent, cat_logits
         return norm_latent, cat_logits
 
 
@@ -275,11 +280,12 @@ class UnifiedCortex2M(nn.Module):
         # 1. Dorsal stream computes spatial affordance field
         aff_logits = self.affordance(feat)
         # 2. Lateral Cross-Stream Information Flow: Dorsal spatial density informs Ventral recognition
-        latent, cat_logits = self.ventral(feat, dorsal_context=aff_logits)
+        raw_latent, norm_latent, cat_logits = self.ventral(feat, dorsal_context=aff_logits, return_raw=True)
         out = {
             "feat": feat,
             "affordance_logits": aff_logits,
-            "visual_latent": latent,
+            "visual_latent_raw": raw_latent,
+            "visual_latent": norm_latent,
             "category_logits": cat_logits,
         }
         if text_emb is not None:
