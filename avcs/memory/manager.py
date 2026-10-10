@@ -6,8 +6,9 @@ while cutting vision token costs by >93%.
 """
 from __future__ import annotations
 
+import collections
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Deque
 
 from avcs.memory.diff_engine import VisualDiffEngine
 from avcs.memory.registry import PersistentUIRegistry
@@ -35,7 +36,7 @@ class VisualMemoryManager:
         self.turn_index: int = 0
         self.initial_tree: Optional[UIMLTree] = None
         self.latest_tree: Optional[UIMLTree] = None
-        self.diff_history: List[VisualDiff] = []
+        self.diff_history: Deque[VisualDiff] = collections.deque(maxlen=100)
 
         # Economics & Telemetry
         self.total_tokens_avoided: int = 0
@@ -139,7 +140,7 @@ class VisualMemoryManager:
         # Recent causal delta history
         if len(self.diff_history) > 1:
             lines.append("\n### Recent Visual State Transitions:")
-            recent_deltas = self.diff_history[1:][-max_delta_turns:]
+            recent_deltas = list(self.diff_history)[1:][-max_delta_turns:]
             for delta in recent_deltas:
                 lines.append(delta.to_prompt_delta())
 

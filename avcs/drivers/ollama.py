@@ -31,10 +31,14 @@ class OllamaAVCSDriver(BaseAVCSDriver):
         self.tools = get_ollama_tools()
 
     def step(self, tool_call_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """Dispatches an Ollama tool_call and returns role='tool' message dict."""
         fn = tool_call_obj.get("function", {})
         name = fn.get("name", "")
         args = fn.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
 
         output, success, error = self.execute_tool(name, args)
         content_text = json.dumps(output) if success else json.dumps({"error": error})

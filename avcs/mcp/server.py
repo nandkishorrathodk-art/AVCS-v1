@@ -218,6 +218,7 @@ class AVCSMCPServer:
                 msg = f"Foveated and clicked '{query}': {'success' if ok else 'failed'}"
                 return [{"type": "text", "text": msg}]
 
+            should_arrival_click = (not double_click and button == "left")
             if x is not None and y is not None:
                 x_f = float(x)
                 y_f = float(y)
@@ -226,14 +227,16 @@ class AVCSMCPServer:
                     raise ValueError(f"Normalized coordinates ({x}, {y}) must be finite numbers within [0.0, 1.0]")
                 res = eye.steer_hand_physical(
                     target_gaze=(x_f, y_f),
-                    click_on_arrival=True,
+                    click_on_arrival=should_arrival_click,
                     force_virtual=self.force_virtual_motor,
                     realtime=False,
                 )
+                from forge.vision.cortex.motor import get_default_driver
+                driver = get_default_driver(force_virtual=self.force_virtual_motor)
                 if double_click:
-                    from forge.vision.cortex.motor import get_default_driver
-                    driver = get_default_driver(force_virtual=self.force_virtual_motor)
                     driver.double_click(button=button)
+                elif button != "left":
+                    driver.click(button=button)
                 msg = f"Steered to ({x_f:.4f}, {y_f:.4f}) and clicked {button}. Contact: {res.contact_acquired}"
                 return [{"type": "text", "text": msg}]
 
@@ -241,11 +244,17 @@ class AVCSMCPServer:
             gaze = eye.cortex.retina.current_fixation
             res = eye.steer_hand_physical(
                 target_gaze=gaze,
-                click_on_arrival=True,
+                click_on_arrival=should_arrival_click,
                 force_virtual=self.force_virtual_motor,
                 realtime=False,
             )
-            return [{"type": "text", "text": f"Clicked at gaze fixation ({gaze[0]:.4f}, {gaze[1]:.4f})"}]
+            from forge.vision.cortex.motor import get_default_driver
+            driver = get_default_driver(force_virtual=self.force_virtual_motor)
+            if double_click:
+                driver.double_click(button=button)
+            elif button != "left":
+                driver.click(button=button)
+            return [{"type": "text", "text": f"Clicked {button} at gaze fixation ({gaze[0]:.4f}, {gaze[1]:.4f})"}]
 
         elif name == "type_text":
             text = args.get("text", "")

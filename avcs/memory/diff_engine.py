@@ -47,14 +47,24 @@ class VisualDiffEngine:
             else:
                 p_elem = prev_elems[eid]
                 changes = []
+                if p_elem.label != elem.label:
+                    changes.append(f'label="{p_elem.label}" -> "{elem.label}"')
                 if p_elem.current_value != elem.current_value:
                     changes.append(f'val="{p_elem.current_value}" -> "{elem.current_value}"')
                 if p_elem.is_active != elem.is_active:
                     changes.append(f"active={elem.is_active}")
                 if p_elem.is_disabled != elem.is_disabled:
                     changes.append(f"disabled={elem.is_disabled}")
+                if p_elem.is_primary != elem.is_primary:
+                    changes.append(f"primary={elem.is_primary}")
                 if p_elem.role != elem.role:
                     changes.append(f"role={elem.role.value}")
+
+                # Detect dimension resize (>2% width/height change)
+                dw = abs(elem.bbox.width - p_elem.bbox.width)
+                dh = abs(elem.bbox.height - p_elem.bbox.height)
+                if dw > 0.02 or dh > 0.02:
+                    changes.append(f"resized(w={elem.bbox.width:.2f},h={elem.bbox.height:.2f})")
 
                 # Detect movement (>3% screen shift)
                 dcx = elem.bbox.center[0] - p_elem.bbox.center[0]

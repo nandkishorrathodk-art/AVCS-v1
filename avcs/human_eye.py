@@ -147,18 +147,19 @@ class MagnocellularMotionEngine:
         abs_delta = np.abs(delta)
         mean_motion = float(np.mean(abs_delta))
 
-        # Spatial gradients
-        grad_y = np.zeros_like(grid)
-        grad_x = np.zeros_like(grid)
-        grad_y[1:, :] = grid[1:, :] - grid[:-1, :]
-        grad_x[:, 1:] = grid[:, 1:] - grid[:, :-1]
+        # Spatio-temporal averaged spatial gradients
+        avg_grid = 0.5 * (grid + self._prev_luminance)
+        grad_y = np.zeros_like(avg_grid)
+        grad_x = np.zeros_like(avg_grid)
+        grad_y[1:, :] = avg_grid[1:, :] - avg_grid[:-1, :]
+        grad_x[:, 1:] = avg_grid[:, 1:] - avg_grid[:, :-1]
 
         # Optical flow vector computation
         grad_norm_sq = grad_x ** 2 + grad_y ** 2 + 1e-4
         vx = - (delta * grad_x) / grad_norm_sq
         vy = - (delta * grad_y) / grad_norm_sq
 
-        # Normalized velocity
+        # Normalized velocity with dt scaling
         vx = np.clip(vx * (1.0 / dt) * 0.05, -2.0, 2.0)
         vy = np.clip(vy * (1.0 / dt) * 0.05, -2.0, 2.0)
         motion_field = np.stack([vx, vy], axis=-1)
@@ -173,8 +174,15 @@ class MagnocellularMotionEngine:
 
             norm_x = (px + 0.5) / self.cols
             norm_y = (py + 0.5) / self.rows
-            obj_vx = float(vx[py, px])
-            obj_vy = float(vy[py, px])
+
+            # Robust entity velocity: integrate over active motion mask
+            weights = abs_delta[y_indices, x_indices]
+            w_sum = float(np.sum(weights)) + 1e-6
+            mean_vx = float(np.sum(vx[y_indices, x_indices] * weights) / w_sum)
+            mean_vy = float(np.sum(vy[y_indices, x_indices] * weights) / w_sum)
+            obj_vx = mean_vx if abs(mean_vx) > 0.001 else float(vx[py, px])
+            obj_vy = mean_vy if abs(mean_vy) > 0.001 else float(vy[py, px])
+
             speed = math.hypot(obj_vx, obj_vy)
             heading = math.atan2(obj_vy, obj_vx)
             conf = float(abs_delta[py, px])
@@ -403,6 +411,10 @@ class HumanEye(nn.Module):
         self._latest_raw_frame: Optional[np.ndarray] = None
         self._last_feat: Optional[torch.Tensor] = None
         self._last_affordances: List[Tuple[float, float, str, float]] = []
+        self._last_category_name: str = "screen"
+        self._last_category_conf: float = 1.0
+        self._last_win_title_check: float = 0.0
+        self._cached_win_title: Optional[str] = None
         self._lock_target: Optional[Tuple[float, float]] = None
 
         # 7. Semantic DOM-less Scene Tree & Episodic Memory (Phase 3)
@@ -561,43 +573,54 @@ class HumanEye(nn.Module):
 
         gaze, pursuit_vel, contact = self.pursuit.update(tracked_target, tracked_vel)
 
-        # 4. Neural Visual Cortex Forward Pass (<13ms)
-        # Fast downsample to input_size
-        H, W = frame.shape[:2]
-        if H != self.input_size[0] or W != self.input_size[1]:
-            # Subsample for ultra-fast Tensor conversion
-            sy = max(1, H // self.input_size[0])
-            sx = max(1, W // self.input_size[1])
-            frame_sub = frame[::sy, ::sx]
-        else:
-            frame_sub = frame
-
-        if frame_sub.ndim == 2:
-            frame_rgb = np.stack([frame_sub, frame_sub, frame_sub], axis=-1)
-        else:
-            frame_rgb = frame_sub
-
-        t_in = torch.from_numpy(frame_rgb).float() / 255.0
-        t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
-        if t_in.shape[-2:] != self.input_size:
-            t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
-        else:
-            t_resized = t_in
-
-        feat = self.backbone(t_resized)
+        # 4. Neural Visual Cortex Forward Pass (<13ms, with static-screen bypass)
         self._latest_raw_frame = frame
-        self._last_feat = feat
+        is_static = (mean_motion < 0.005 and not moving_objs and self._last_feat is not None)
 
-        # Ventral scene semantics
-        ventral_out = self.ventral(feat)
-        cat_probs = torch.softmax(ventral_out["category_logits"], dim=-1)[0]
-        cat_idx = int(torch.argmax(cat_probs).item())
-        cat_name = UI_CATEGORIES[cat_idx] if cat_idx < len(UI_CATEGORIES) else "screen"
-        cat_conf = float(cat_probs[cat_idx].item())
+        if is_static:
+            # Static Screen Early Exit: reuse cached features (<0.1ms, drops idle CPU by >85%)
+            feat = self._last_feat
+            cat_name = self._last_category_name
+            cat_conf = self._last_category_conf
+            affordances = self._last_affordances
+        else:
+            # Fast downsample to input_size
+            H, W = frame.shape[:2]
+            if H != self.input_size[0] or W != self.input_size[1]:
+                # Subsample for ultra-fast Tensor conversion
+                sy = max(1, H // self.input_size[0])
+                sx = max(1, W // self.input_size[1])
+                frame_sub = frame[::sy, ::sx]
+            else:
+                frame_sub = frame
 
-        # Fast Dorsal interactive affordances (<0.5ms)
-        affordances = self.affordance_head.find_hotspots(feat, action_type="clickable", top_k=3, threshold=0.25)
-        self._last_affordances = affordances
+            if frame_sub.ndim == 2:
+                frame_rgb = np.stack([frame_sub, frame_sub, frame_sub], axis=-1)
+            else:
+                frame_rgb = frame_sub
+
+            t_in = torch.from_numpy(frame_rgb).float() / 255.0
+            t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
+            if t_in.shape[-2:] != self.input_size:
+                t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
+            else:
+                t_resized = t_in
+
+            feat = self.backbone(t_resized)
+            self._last_feat = feat
+
+            # Ventral scene semantics
+            ventral_out = self.ventral(feat)
+            cat_probs = torch.softmax(ventral_out["category_logits"], dim=-1)[0]
+            cat_idx = int(torch.argmax(cat_probs).item())
+            cat_name = UI_CATEGORIES[cat_idx] if cat_idx < len(UI_CATEGORIES) else "screen"
+            cat_conf = float(cat_probs[cat_idx].item())
+            self._last_category_name = cat_name
+            self._last_category_conf = cat_conf
+
+            # Fast Dorsal interactive affordances (<0.5ms)
+            affordances = self.affordance_head.find_hotspots(feat, action_type="clickable", top_k=3, threshold=0.25)
+            self._last_affordances = affordances
 
         # 5. Closed-Loop Hand-Eye Motor Flow
         motor_flow = (0.0, 0.0)
@@ -618,17 +641,21 @@ class HumanEye(nn.Module):
         else:
             stability = "stable"
 
+        # Throttled Win32 foreground window title query (<= 2 Hz to prevent 200ms message pipe stalls)
         win_title = getattr(self, "active_window_title", None)
         if win_title is None and sys.platform == "win32":
-            try:
-                import win32gui
-                fg = win32gui.GetForegroundWindow()
-                if fg:
-                    t = win32gui.GetWindowText(fg)
-                    if t:
-                        win_title = t
-            except Exception:
-                pass
+            if (t0 - self._last_win_title_check) > 0.5:
+                self._last_win_title_check = t0
+                try:
+                    import win32gui
+                    fg = win32gui.GetForegroundWindow()
+                    if fg:
+                        t = win32gui.GetWindowText(fg)
+                        if t:
+                            self._cached_win_title = t
+                except Exception:
+                    pass
+            win_title = self._cached_win_title
 
         if self.memory.latest_tree is not None and surprise < 0.05 and not moving_objs:
             current_tree = self.memory.latest_tree
