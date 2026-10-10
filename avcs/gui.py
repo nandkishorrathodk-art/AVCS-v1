@@ -29,7 +29,7 @@ from forge.vision.cortex.motor import (
 class AVCSDesktopApp:
     """Native Computer Desktop GUI for AVCS."""
 
-    def __init__(self, root: tk.Tk, fps: int = 25) -> None:
+    def __init__(self, root: tk.Tk, fps: int = 25, source: Optional[Any] = None) -> None:
         self.root = root
         self.root.title("AVCS // Artificial Visual Cortex - Desktop Station")
         self.root.geometry("1180x760")
@@ -37,9 +37,9 @@ class AVCSDesktopApp:
         self.root.configure(bg="#0d1117")
 
         self.fps = fps
-        self.eye = ScreenEye(fps=fps)
-        self.human_eye = HumanEye(source=self.eye.source, threaded_capture=True)
-        self.driver = get_default_driver(force_virtual=False)
+        self.eye = ScreenEye(fps=fps, source=source)
+        self.human_eye = HumanEye(source=self.eye.source, threaded_capture=True if source is None else False)
+        self.driver = get_default_driver(force_virtual=False if source is None else True)
         self.servoing_controller = HandEyeServoingController(driver=self.driver)
 
         # State tracking
@@ -401,7 +401,8 @@ class AVCSDesktopApp:
                 if sleep_sec > 0:
                     time.sleep(sleep_sec)
 
-        threading.Thread(target=_loop, daemon=True).start()
+        self._perception_thread = threading.Thread(target=_loop, daemon=True)
+        self._perception_thread.start()
 
     def _schedule_gui_refresh(self) -> None:
         if not self.running:
@@ -514,15 +515,23 @@ class AVCSDesktopApp:
 
     def on_close(self) -> None:
         self.running = False
+        if hasattr(self, "_perception_thread") and self._perception_thread is not None:
+            try:
+                self._perception_thread.join(timeout=0.5)
+            except Exception:
+                pass
         try:
-            self.eye.stop()
+            self.eye.close()
         except Exception:
             pass
         try:
             self.human_eye.close()
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 def launch_gui() -> None:

@@ -41,6 +41,7 @@ class LiveHarnessMatrixTests(unittest.TestCase):
         self.temp_dir = Path(tempfile.mkdtemp(prefix="avcs_live_test_"))
 
     def tearDown(self) -> None:
+        time.sleep(0.2)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_registry_maps_all_12_catalog_scenarios(self) -> None:

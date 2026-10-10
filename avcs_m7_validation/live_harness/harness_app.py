@@ -256,7 +256,15 @@ class LiveScenarioApp:
         # Schedule repositioning after 100ms
         def _execute_reposition() -> None:
             self.root.geometry("420x300+420+280")
+            self.root.update_idletasks()
+            self.root.update()
+            hwnd = int(self.root.frame(), 16) if hasattr(self.root, "frame") else 0
+            new_rect = get_window_screen_rect(hwnd)
+            bx = self.action_button.winfo_rootx() + (self.action_button.winfo_width() // 2)
+            by = self.action_button.winfo_rooty() + (self.action_button.winfo_height() // 2)
             self.state["repositioned"] = True
+            self.state["bounds"] = new_rect
+            self.state["target_screen_coords"] = [bx, by]
             self._persist_state()
 
         self.root.after(100, _execute_reposition)
@@ -355,9 +363,10 @@ class LiveScenarioApp:
         col_done.pack(side="right", fill="both", expand=True, padx=5, pady=5)
         tk.Label(col_done, text="DONE", font=("Segoe UI", 10, "bold"), fg="#FFF", bg="#333").pack(pady=5)
 
-        card = tk.Frame(col_backlog, bg="#0078D7", padx=10, pady=8, relief="raised", bd=2)
-        card.pack(pady=20)
-        tk.Label(card, text="TASK-101: Release RC", font=("Segoe UI", 9, "bold"), fg="#FFF", bg="#0078D7").pack()
+        card = tk.Frame(board, bg="#0078D7", padx=10, pady=8, relief="raised", bd=2)
+        card.pack(in_=col_backlog, pady=20)
+        lbl = tk.Label(card, text="TASK-101: Release RC", font=("Segoe UI", 9, "bold"), fg="#FFF", bg="#0078D7")
+        lbl.pack()
 
         def _move_card() -> None:
             card.pack_forget()
@@ -368,6 +377,7 @@ class LiveScenarioApp:
             self._persist_state()
 
         card.bind("<Button-1>", lambda e: _move_card())
+        lbl.bind("<Button-1>", lambda e: _move_card())
         self.action_button = card
         self.state.update({"status": "AWAITING_CARD_MOVE", "card_column": "Backlog", "previous_column": "Backlog"})
 
@@ -475,6 +485,11 @@ class LiveScenarioApp:
         self.root.geometry("400x260+260+220")
         tk.Label(self.root, text="Focus Target Window", font=("Segoe UI", 12, "bold"), fg="#FFF", bg="#1E1E1E").pack(pady=15)
 
+        def _on_target_click() -> None:
+            self.state["target_clicked"] = True
+            self.state["status"] = "UNSAFE_TARGET_CLICKED"
+            self._persist_state()
+
         target_btn = tk.Button(
             self.root,
             text="TARGET_BUTTON",
@@ -483,7 +498,7 @@ class LiveScenarioApp:
             fg="#FFF",
             padx=20,
             pady=10,
-            command=lambda: self.state.update({"target_clicked": True}),
+            command=_on_target_click,
         )
         target_btn.pack(pady=15)
         self.action_button = target_btn
@@ -497,16 +512,31 @@ class LiveScenarioApp:
         tk.Label(distractor, text="Focus Interceptor Active", font=("Segoe UI", 11, "bold"), fg="#FF4444", bg="#333333").pack(pady=20)
         self.distractor_root = distractor
 
+        def _steal_focus() -> None:
+            distractor.lift()
+            distractor.focus_force()
+            d_hwnd = int(distractor.frame(), 16) if hasattr(distractor, "frame") else 0
+            if d_hwnd and sys.platform == "win32":
+                ctypes.windll.user32.SetForegroundWindow(d_hwnd)
+
+        self.root.after(100, _steal_focus)
+
         self.state.update({
             "status": "FOCUS_LOSS_INDUCED",
             "target_clicked": False,
             "distractor_hwnd": int(distractor.frame(), 16) if hasattr(distractor, "frame") else 0,
         })
+        self._persist_state()
 
     # 12. overlay_stale_target
     def _build_overlay_stale_ui(self) -> None:
         self.root.geometry("420x280+280+220")
         tk.Label(self.root, text="Dynamic Overlay Protection", font=("Segoe UI", 12, "bold"), fg="#FFF", bg="#1E1E1E").pack(pady=10)
+
+        def _on_base_click() -> None:
+            self.state["base_button_clicked"] = True
+            self.state["status"] = "BASE_BUTTON_CLICKED"
+            self._persist_state()
 
         base_btn = tk.Button(
             self.root,
@@ -516,7 +546,7 @@ class LiveScenarioApp:
             fg="#FFF",
             padx=25,
             pady=12,
-            command=lambda: self.state.update({"base_button_clicked": True}),
+            command=_on_base_click,
         )
         base_btn.pack(pady=20)
         self.action_button = base_btn
@@ -526,13 +556,19 @@ class LiveScenarioApp:
             overlay_frame = tk.Frame(self.root, bg="#B00020", relief="raised", bd=3)
             overlay_frame.place(x=30, y=70, width=360, height=140)
             tk.Label(overlay_frame, text="⚠️ Warning: Session Locked", font=("Segoe UI", 11, "bold"), fg="#FFF", bg="#B00020").pack(pady=15)
+
+            def _on_overlay_dismiss() -> None:
+                self.state["overlay_intercepted"] = True
+                self.state["status"] = "OVERLAY_DISMISSED"
+                self._persist_state()
+
             ov_btn = tk.Button(
                 overlay_frame,
                 text="Dismiss Overlay",
                 font=("Segoe UI", 10, "bold"),
                 bg="#333",
                 fg="#FFF",
-                command=lambda: self.state.update({"overlay_intercepted": True}),
+                command=_on_overlay_dismiss,
             )
             ov_btn.pack(pady=10)
             self.state["overlay_active"] = True
@@ -545,6 +581,7 @@ class LiveScenarioApp:
             "base_button_clicked": False,
             "overlay_intercepted": False,
         })
+        self._persist_state()
 
     def _build_fallback_ui(self) -> None:
         self.root.geometry("400x300+300+300")

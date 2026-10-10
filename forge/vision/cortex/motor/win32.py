@@ -272,7 +272,17 @@ class Win32CursorDriver:
 
         # 2. Guard against commanding into breakout corner
         self.failsafe.check(clamped_x, clamped_y, w, h)
-        self.user32.SetCursorPos(clamped_x, clamped_y)
+        ret = bool(self.user32.SetCursorPos(clamped_x, clamped_y))
+        if not ret:
+            import threading
+            def _th_move() -> None:
+                h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+                if h_desk:
+                    self.user32.SetThreadDesktop(h_desk)
+                self.user32.SetCursorPos(clamped_x, clamped_y)
+            th = threading.Thread(target=_th_move, name="AVCS-CursorMoveWorker")
+            th.start()
+            th.join(timeout=0.5)
 
     def move_to_normalized(self, nx: float, ny: float) -> None:
         w, h = self.screen_size
@@ -296,7 +306,17 @@ class Win32CursorDriver:
             time=0,
             dwExtraInfo=0,
         )
-        self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        if ret == 0:
+            import threading
+            def _th_mouse() -> None:
+                h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+                if h_desk:
+                    self.user32.SetThreadDesktop(h_desk)
+                self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            th = threading.Thread(target=_th_mouse, name="AVCS-MouseInputWorker")
+            th.start()
+            th.join(timeout=0.5)
 
     def mouse_down(self, button: str = "left") -> None:
         self.check_hardware_failsafe()
@@ -340,7 +360,17 @@ class Win32CursorDriver:
             time=0,
             dwExtraInfo=0,
         )
-        self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        if ret == 0:
+            import threading
+            def _th_key() -> None:
+                h_desk = self.user32.OpenInputDesktop(0, False, 0x01FF)
+                if h_desk:
+                    self.user32.SetThreadDesktop(h_desk)
+                self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            th = threading.Thread(target=_th_key, name="AVCS-KeyInputWorker")
+            th.start()
+            th.join(timeout=0.5)
 
     def _resolve_vk(self, vk_or_name: int | str) -> int:
         if isinstance(vk_or_name, int):

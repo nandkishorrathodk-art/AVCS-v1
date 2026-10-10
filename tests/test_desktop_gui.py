@@ -13,7 +13,7 @@ def test_desktop_gui_app_initialization_and_widgets():
     root = tk.Tk()
     root.withdraw()  # keep window off-screen during headless test
 
-    app = AVCSDesktopApp(root=root, fps=10)
+    app = AVCSDesktopApp(root=root, fps=10, source=SyntheticScreen(640, 480))
 
     assert root.title() == "AVCS // Artificial Visual Cortex - Desktop Station"
     assert app.canvas is not None

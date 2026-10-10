@@ -214,8 +214,12 @@ class NativeDpiRepositionHarness(_BaseSubprocessHarness):
         if self.state_file and self.state_file.is_file():
             try:
                 st = json.loads(self.state_file.read_text(encoding="utf-8"))
-                rect = st.get("bounds", [420, 280, 420, 300])
-                tx, ty = rect[0] + 210, rect[1] + 180
+                target = st.get("target_screen_coords")
+                if target:
+                    tx, ty = int(target[0]), int(target[1])
+                else:
+                    rect = st.get("bounds", [420, 280, 420, 300])
+                    tx, ty = rect[0] + 190, rect[1] + 130
             except Exception:
                 tx, ty = target_coords or self.target_coords
         else:

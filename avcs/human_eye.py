@@ -747,3 +747,18 @@ class HumanEye(nn.Module):
     def p95_latency_ms(self) -> float:
         """Returns 95th percentile latency in milliseconds."""
         return float(np.percentile(self._latencies, 95)) if self._latencies else 0.0
+
+    def close(self) -> None:
+        """Releases underlying capture workers and motor resources."""
+        if hasattr(self, "source") and self.source is not None:
+            if hasattr(self.source, "close") and callable(self.source.close):
+                try:
+                    self.source.close()
+                except Exception:
+                    pass
+
+    def __enter__(self) -> "HumanEye":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
