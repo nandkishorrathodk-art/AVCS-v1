@@ -159,9 +159,13 @@ class AffordanceHead2M(nn.Module):
         feat: torch.Tensor,
         top_k: int = 5,
         threshold: float = 0.02,
+        logits: Optional[torch.Tensor] = None,
     ) -> List[Tuple[float, float, str, float]]:
         """Identifies peak affordances across all 24 geometry classes."""
-        logits = self.forward(feat)[0]  # (num_classes, H, W)
+        if logits is None:
+            logits = self.forward(feat)[0]  # (num_classes, H, W)
+        elif logits.dim() == 4:
+            logits = logits[0]
         probs = torch.softmax(logits, dim=0)
         num_c, H, W = probs.shape
 
@@ -332,6 +336,8 @@ class HumanEye2M:
         self.motion_engine = MagnocellularMotionEngine(grid_rows=16, grid_cols=24)
         self.cortex = UnifiedCortex2M(feature_dim=256).to(self.device)
         self.cortex.eval()
+        if str(self.device) == "cpu":
+            self.cortex = self.cortex.to(memory_format=torch.channels_last)
 
         self.pursuit = SmoothPursuitTracker()
         self.memory = VisualMemoryManager()
@@ -347,10 +353,17 @@ class HumanEye2M:
     def total_parameters(self) -> int:
         return self.cortex.total_parameters
 
-    def perceive(self) -> Dict[str, Any]:
+    def perceive(self, *, frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """Runs a continuous visual perception tick on the screen."""
         t_start = time.perf_counter()
-        raw_frame = self.source.grab()
+        raw_frame = self.source.grab() if frame is None else frame
+        if (
+            not isinstance(raw_frame, np.ndarray)
+            or raw_frame.ndim != 3
+            or raw_frame.shape[2] != 3
+            or raw_frame.dtype != np.uint8
+        ):
+            raise ValueError("frame must be a uint8 RGB array with shape (height, width, 3)")
 
         # 1. Biological Magnocellular Motion Flow
         motion_field, mean_motion, moving_objects, surprise = (
@@ -384,8 +397,10 @@ class HumanEye2M:
         sub = raw_frame[::sy, ::sx][:self.input_size[0], :self.input_size[1]]
         arr = sub.astype(np.float32).transpose(2, 0, 1) / 255.0
         tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
+        if str(self.device) == "cpu":
+            tensor = tensor.to(memory_format=torch.channels_last)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             out = self.cortex(tensor)
             feat = out["feat"]
             cat_logits = out["category_logits"][0]
@@ -393,7 +408,9 @@ class HumanEye2M:
             cat_conf = float(torch.softmax(cat_logits, dim=0)[cat_idx])
             cat_name = UNIVERSAL_APP_CATEGORIES[cat_idx]
 
-            affordances = self.cortex.affordance.find_hotspots(feat, top_k=5)
+            affordances = self.cortex.affordance.find_hotspots(
+                feat, top_k=5, logits=out["affordance_logits"]
+            )
 
         self._cached_affordances = affordances
         self._cached_cat_name = cat_name

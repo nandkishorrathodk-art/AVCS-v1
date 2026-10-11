@@ -157,9 +157,11 @@ class TrialEvidenceAuditor:
         self,
         expected_scenario_count: int = 12,
         expected_modes: Optional[Sequence[Mode]] = None,
+        min_trials: int = 300,
     ) -> None:
         self.expected_scenario_count = expected_scenario_count
         self.expected_modes = list(expected_modes) if expected_modes else list(Mode)
+        self.min_trials = min_trials
 
     def audit_directory(
         self,
@@ -301,7 +303,7 @@ class TrialEvidenceAuditor:
 
         # Gate A: Harness Verification
         harness_passed = (
-            total_records >= 300
+            total_records >= self.min_trials
             and unique_ids == total_records
             and summary_matches
             and not blocking_violations

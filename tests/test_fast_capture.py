@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import sys
 import time
+
 import numpy as np
 import pytest
 
+from avcs.capture_adapter import DisplayGeometry, Win32GDICaptureAdapter
 from forge.vision.capture import (
     ScreenCapture,
     SyntheticScreen,
@@ -72,3 +74,39 @@ def test_open_capture_threaded_flag():
         frame = cap.grab()
         assert frame.ndim == 3 and frame.shape[2] == 3
 
+
+def test_gdi_region_capture_copies_only_requested_pixels():
+    class Gdi:
+        calls = []
+
+        def BitBlt(self, *args):
+            self.calls.append(args)
+            return 1
+
+        def GdiFlush(self):
+            pass
+
+    adapter = Win32GDICaptureAdapter.__new__(Win32GDICaptureAdapter)
+    adapter._is_open = True
+    adapter._geometry = DisplayGeometry(100, 50, 5, 4, 1.0, True)
+    adapter._raw_np = np.zeros((4, 5, 4), dtype=np.uint8)
+    adapter._gdi32 = Gdi()
+    adapter._h_mem_dc = 1
+    adapter._h_screen_dc = 2
+    adapter._raw_np[0, 0] = (3, 2, 1, 255)
+
+    frame = adapter.grab_region((101, 51, 104, 53))
+
+    assert frame.shape == (2, 3, 3)
+    assert frame[0, 0].tolist() == [1, 2, 3]
+    assert adapter._gdi32.calls == [(1, 0, 0, 3, 2, 2, 101, 51, 0x00CC0020)]
+
+
+def test_gdi_region_capture_rejects_out_of_bounds_rectangle():
+    adapter = Win32GDICaptureAdapter.__new__(Win32GDICaptureAdapter)
+    adapter._is_open = True
+    adapter._geometry = DisplayGeometry(100, 50, 5, 4, 1.0, True)
+    adapter._raw_np = np.zeros((4, 5, 4), dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="outside"):
+        adapter.grab_region((99, 50, 102, 52))

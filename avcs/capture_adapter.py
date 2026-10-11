@@ -264,23 +264,99 @@ class Win32GDICaptureAdapter(BaseCaptureAdapter):
                     )
 
         if not ret:
-            # Fallback to physical desktop capture via mss on DC starvation
+            # When Tkinter or external GUI loops corrupt the calling thread's Win32 DC table,
+            # execute capture from an isolated thread where the desktop DC is pristine.
+            import threading
+            thread_res: dict[str, Any] = {}
+
+            def _thread_grab() -> None:
+                try:
+                    t_cap = Win32GDICaptureAdapter(target_size=self.target_size)
+                    t_cap.open()
+                    t_geo = t_cap._geometry or t_cap.get_geometry()
+                    t_ret = False
+                    if t_cap._dst_w == t_geo.virtual_width and t_cap._dst_h == t_geo.virtual_height:
+                        t_ret = bool(t_cap._gdi32.BitBlt(
+                            t_cap._h_mem_dc, 0, 0, t_cap._dst_w, t_cap._dst_h,
+                            t_cap._h_screen_dc, t_geo.virtual_left, t_geo.virtual_top, SRCCOPY,
+                        ))
+                    else:
+                        t_cap._gdi32.SetStretchBltMode(t_cap._h_mem_dc, 4)
+                        t_cap._gdi32.SetBrushOrgEx(t_cap._h_mem_dc, 0, 0, None)
+                        t_ret = bool(t_cap._gdi32.StretchBlt(
+                            t_cap._h_mem_dc, 0, 0, t_cap._dst_w, t_cap._dst_h,
+                            t_cap._h_screen_dc, t_geo.virtual_left, t_geo.virtual_top,
+                            t_geo.virtual_width, t_geo.virtual_height, SRCCOPY,
+                        ))
+                    if t_ret and t_cap._raw_np is not None:
+                        t_cap._gdi32.GdiFlush()
+                        thread_res["frame"] = t_cap._raw_np[:, :, 2::-1].copy()
+                    t_cap.close()
+                except Exception as exc:
+                    thread_res["err"] = exc
+
+            th = threading.Thread(target=_thread_grab, name="AVCS-ThreadGDIWorker")
+            th.start()
+            th.join(timeout=2.0)
+            if "frame" in thread_res:
+                return thread_res["frame"]
+
+            # Fallback to physical desktop capture via ScreenCapture on DC starvation
             try:
-                import mss
-                with mss.mss() as sct:
-                    mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                    shot = sct.grab(mon)
-                    arr = np.frombuffer(shot.rgb, dtype=np.uint8).reshape((shot.height, shot.width, 3))
-                    if self._dst_w != shot.width or self._dst_h != shot.height:
+                from forge.vision.capture import ScreenCapture
+                with ScreenCapture() as sct:
+                    shot = sct.grab()
+                    if self.target_size and (shot.shape[1] != self._dst_w or shot.shape[0] != self._dst_h):
                         from PIL import Image
-                        im = Image.fromarray(arr).resize((self._dst_w, self._dst_h))
+                        im = Image.fromarray(shot).resize((self._dst_w, self._dst_h))
                         return np.array(im)
-                    return arr.copy()
+                    return shot
             except Exception:
                 pass
             raise CaptureError("Win32 BitBlt/StretchBlt failed.")
         self._gdi32.GdiFlush()
         return self._raw_np[:, :, 2::-1].copy()
+
+    def grab_region(self, rect: Tuple[int, int, int, int]) -> np.ndarray:
+        """Capture a physical-screen rectangle directly into the existing GDI buffer."""
+        if not self._is_open:
+            self.open()
+        assert self._raw_np is not None
+        geo = self._geometry or self.get_geometry()
+        left, top, right, bottom = (int(value) for value in rect)
+        width, height = right - left, bottom - top
+        screen_right = geo.virtual_left + geo.virtual_width
+        screen_bottom = geo.virtual_top + geo.virtual_height
+        if (
+            width <= 0
+            or height <= 0
+            or left < geo.virtual_left
+            or top < geo.virtual_top
+            or right > screen_right
+            or bottom > screen_bottom
+        ):
+            raise ValueError(f"Capture rectangle {rect} is outside the physical virtual screen.")
+        if height > self._raw_np.shape[0] or width > self._raw_np.shape[1]:
+            raise ValueError(
+                f"Capture rectangle {rect} exceeds the allocated GDI buffer "
+                f"{self._raw_np.shape[1]}x{self._raw_np.shape[0]}."
+            )
+
+        ret = self._gdi32.BitBlt(
+            self._h_mem_dc,
+            0,
+            0,
+            width,
+            height,
+            self._h_screen_dc,
+            left,
+            top,
+            0x00CC0020,
+        )
+        if not ret:
+            raise CaptureError(f"Win32 BitBlt failed for region {rect}.")
+        self._gdi32.GdiFlush()
+        return self._raw_np[:height, :width, 2::-1].copy()
 
     def close(self) -> None:
         if self._gdi32 and self._h_mem_dc and hasattr(self, "_h_old_bitmap") and self._h_old_bitmap:
@@ -377,4 +453,3 @@ class InteractiveSyntheticCaptureAdapter(SyntheticCaptureAdapter):
             x2 = min(self.width, px + r)
             frame[y1:y2, x1:x2] = 255 - frame[y1:y2, x1:x2]
         return frame
-

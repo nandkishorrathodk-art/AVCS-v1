@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -65,10 +66,33 @@ class LiveScenarioRunner:
         except Exception:
             pass
 
-        # 2. Dispatch Physical Action via SendInput
+        # 2. Dispatch Physical Action via SendInput (isolated worker thread for pristine desktop context)
         t_action_start = time.perf_counter()
         target_coords = harness.get_target_screen_coords(seed)
-        action_meta = harness.dispatch_action(self.driver, seed, target_coords)
+        action_meta: Dict[str, Any] = {}
+        disp_exc: Optional[Exception] = None
+
+        import threading
+        import ctypes
+        def _th_dispatch() -> None:
+            nonlocal action_meta, disp_exc
+            if sys.platform == "win32":
+                try:
+                    h_desk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x01FF)
+                    if h_desk:
+                        ctypes.windll.user32.SetThreadDesktop(h_desk)
+                except Exception:
+                    pass
+            try:
+                action_meta = harness.dispatch_action(self.driver, seed, target_coords)
+            except Exception as exc:
+                disp_exc = exc
+
+        disp_th = threading.Thread(target=_th_dispatch, name="AVCS-LiveDispatchWorker")
+        disp_th.start()
+        disp_th.join(timeout=5.0)
+        if disp_exc is not None:
+            raise disp_exc
         t_action_ms = (time.perf_counter() - t_action_start) * 1000.0
 
         # Settle Delay
