@@ -317,6 +317,47 @@ class Win32GDICaptureAdapter(BaseCaptureAdapter):
         self._gdi32.GdiFlush()
         return self._raw_np[:, :, 2::-1].copy()
 
+    def grab_region(self, rect: Tuple[int, int, int, int]) -> np.ndarray:
+        """Capture a physical-screen rectangle directly into the existing GDI buffer."""
+        if not self._is_open:
+            self.open()
+        assert self._raw_np is not None
+        geo = self._geometry or self.get_geometry()
+        left, top, right, bottom = (int(value) for value in rect)
+        width, height = right - left, bottom - top
+        screen_right = geo.virtual_left + geo.virtual_width
+        screen_bottom = geo.virtual_top + geo.virtual_height
+        if (
+            width <= 0
+            or height <= 0
+            or left < geo.virtual_left
+            or top < geo.virtual_top
+            or right > screen_right
+            or bottom > screen_bottom
+        ):
+            raise ValueError(f"Capture rectangle {rect} is outside the physical virtual screen.")
+        if height > self._raw_np.shape[0] or width > self._raw_np.shape[1]:
+            raise ValueError(
+                f"Capture rectangle {rect} exceeds the allocated GDI buffer "
+                f"{self._raw_np.shape[1]}x{self._raw_np.shape[0]}."
+            )
+
+        ret = self._gdi32.BitBlt(
+            self._h_mem_dc,
+            0,
+            0,
+            width,
+            height,
+            self._h_screen_dc,
+            left,
+            top,
+            0x00CC0020,
+        )
+        if not ret:
+            raise CaptureError(f"Win32 BitBlt failed for region {rect}.")
+        self._gdi32.GdiFlush()
+        return self._raw_np[:height, :width, 2::-1].copy()
+
     def close(self) -> None:
         if self._gdi32 and self._h_mem_dc and hasattr(self, "_h_old_bitmap") and self._h_old_bitmap:
             try:
@@ -412,4 +453,3 @@ class InteractiveSyntheticCaptureAdapter(SyntheticCaptureAdapter):
             x2 = min(self.width, px + r)
             frame[y1:y2, x1:x2] = 255 - frame[y1:y2, x1:x2]
         return frame
-

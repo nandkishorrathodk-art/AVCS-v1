@@ -353,10 +353,17 @@ class HumanEye2M:
     def total_parameters(self) -> int:
         return self.cortex.total_parameters
 
-    def perceive(self) -> Dict[str, Any]:
+    def perceive(self, *, frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """Runs a continuous visual perception tick on the screen."""
         t_start = time.perf_counter()
-        raw_frame = self.source.grab()
+        raw_frame = self.source.grab() if frame is None else frame
+        if (
+            not isinstance(raw_frame, np.ndarray)
+            or raw_frame.ndim != 3
+            or raw_frame.shape[2] != 3
+            or raw_frame.dtype != np.uint8
+        ):
+            raise ValueError("frame must be a uint8 RGB array with shape (height, width, 3)")
 
         # 1. Biological Magnocellular Motion Flow
         motion_field, mean_motion, moving_objects, surprise = (
