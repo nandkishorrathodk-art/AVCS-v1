@@ -1,149 +1,127 @@
 # AVCS // Artificial Visual Cortex System
-## Master Mission, Architecture & Product Goals
+## Master Mission, Reality Baseline & Research Roadmap
 
 ---
 
-## 1. Executive Mission
+## 1. Executive Mission & Vision
 
-The objective of **AVCS (Artificial Visual Cortex System)** is to build the world's first **Universal Real-Time Biological Human Eye Intelligence Platform**.
+The overarching mission of **AVCS (Artificial Visual Cortex System)** is to build a **Real-Time, Goal-Conditioned, Pure-Pixel Desktop Control System** that can operate a computer like a human:
 
-Traditional Vision-Language Models (VLMs) and "computer use" agents are fundamentally broken for real-world automation: they take 2–4 seconds per screenshot, cost \$15–\$30 per workflow in cloud tokens, freeze during animations, and hallucinate $(x, y)$ coordinates.
-
-AVCS solves this by decoupling high-frequency visual perception from slow cognitive reasoning:
-- **AVCS acts as System 1 (Visual Cortex & Brainstem):** Perceives continuous desktop pixels at **60–120 FPS** with **sub-10ms latency** on standard CPU, extracts optical flow, tracks dynamic entities, and detects interactive affordances for **\$0.00**.
-- **Downstream Agents / LLMs act as System 2 (Cerebral Cortex):** Receive lightweight **Differential Visual Events (<50 tokens)** only when state transitions occur, reducing agent latency by **$95\%$** and token costs by **$99\%$**.
+1. **Aankh (System 1 - Visual Perception):** Perceives continuous desktop frames in real time directly from raw RGB framebuffer pixels—without relying on heavy OCR engines, accessibility trees (UIA/DOM), or OS inspect APIs.
+2. **Dimag (System 2 - Cognitive Planning):** Understands the operator's high-level goal, breaks it down into sequential visual action steps, and adapts dynamically to screen state changes.
+3. **Haath (Motor Control):** Dispatches smooth, human-like cursor movements and physical mouse/keyboard inputs to visually grounded targets, with hardware safety breakout failsafes.
+4. **Verification (Optical Oracle):** Confirms that each action actually succeeded by observing fresh visual evidence on screen (optical flow, state changes, window transitions), never by assuming success or faking completions.
 
 ---
 
-## 2. Verified Performance Baseline (Measured on Live Desktop)
+## 2. Honest Current State & Baseline (Unvarnished Truth)
 
-The following metrics are measured and verified end-to-end on a live Windows desktop (Intel quad-core CPU, no GPU):
+To ensure scientific integrity and eliminate false assumptions, the current system state is explicitly defined as an **experimental research prototype**, not a general-purpose autonomous computer-use agent.
 
-| Metric | Target Specification | Measured Achievement | Verification Status |
+| Subsystem | Current Implementation | Measured Reality / Current Limitation | Production Status |
 | :--- | :--- | :--- | :--- |
-| **Perception Latency (p50)** | $< 16.0\text{ ms}$ ($60\text{ Hz}$ budget) | **$8.13\text{ ms}$** | **Exceeded ($2\times$ headroom)** |
-| **Real Desktop Frame Rate** | $\ge 60.0\text{ FPS}$ | **$55.9 - 56.0\text{ FPS}$** (Paced) | **Validated on Windows DWM** |
-| **Magnocellular Optical Flow** | $< 1.0\text{ ms}$ | **$0.82\text{ ms}$** | **Sub-millisecond** |
-| **Neural Backbone Forward** | $< 10.0\text{ ms}$ | **$2.14\text{ ms}$** (4 CPU threads) | **Optimized PyTorch** |
-| **Spatial Affordance Detection** | $< 1.0\text{ ms}$ | **$0.48\text{ ms}$** | **Top-$k$ Spatial Conv** |
-| **Hardware Capture Overhead** | $< 1.0\text{ ms}$ | **$< 0.01\text{ ms}$** | **Threaded DIBSection** |
-| **Smooth Pursuit Tracking Error** | $< 0.15$ mean error | **$0.088$** | **Accelerating Targets** |
-| **Test Suite Reliability** | $100\%$ pass rate | **351 passed, 3 skipped** | **Comprehensive (Phases 1–5)** |
+| **Frame Capture** | `Win32FastCapture` (GDI DIBSection) | Real-time RAM framebuffer capture (~56–60 FPS, <1ms grab overhead). | **Functional** |
+| **Motor Execution** | `Win32CursorDriver` (SendInput) | Can move cursor and dispatch clicks/keystrokes; includes failsafe breakout. | **Functional primitive** (Cannot choose actions on its own) |
+| **Cortical Neural Model** | `Cortex-2M` (`cortex_2m_best.pt`) | 2.43M params trained on **synthetic geometric shapes** (10.83% category accuracy). **Unproven on real UI**. | **Experimental** (Distribution shift to real desktop) |
+| **Goal-Conditioned Grounder** | `GoalConditionedGrounder` (`avcs/goal_grounder.py`) | Pixel/query-conditioned dense click heatmap and real-demonstration trainer are implemented; no real-demonstration checkpoint exists yet. | **Implemented architecture; untrained / not action-ready** |
+| **Language Gaze Grounding** | `LanguageGazeGrounder` | Character n-gram cross-correlation; does not yet reliably ground arbitrary desktop controls. | **Experimental prototype** |
+| **Demonstration Recorder** | `avcs.training.demo_recorder` | Collects labeled click coordinates on isolated, foreground windows. | **Active Data Collection Tool** |
+| **Cognitive Planning** | Multi-step task logic | 2.4M parameters cannot handle long-horizon planning. Requires external System-2 planner. | **Not Implemented Locally** |
+| **End-to-End Autonomy** | Desktop workflows (e.g. Notepad) | Historical tests used scripted shortcuts (`Win+S`, `Ctrl+S`, `Alt+F4`) or file writes, not visual autonomy. | **Unproven / Faked in past** (Now Fail-Closed) |
 
 ---
 
-## 3. Product Architecture
+## 3. Core Architectural Principles (Non-Negotiable Invariants)
 
+1. **Zero-Shortcut Rule for Autonomous Evaluation:**
+   When testing visual autonomy, the system must never cheat via keyboard macros (`Win+S`, `Ctrl+N`, `Ctrl+S`, `Alt+F4`), background OS API hooks, or Python filesystem writes. Every evaluated action must originate from visual target identification and physical motor input.
+2. **Pure Pixels Mandate:**
+   Never depend on browser DOM trees, accessibility APIs (UI Automation, MSAA), or OCR text-scraping crutches. The perception model must learn to ground directly on raw pixel visual features.
+3. **Separation of System-1 and System-2:**
+   - **System 1 (AVCS):** High-frequency visual perception, target grounding $(x, y)$, and motor servoing.
+   - **System 2 (Cognitive Planner):** High-level task reasoning, sub-goal generation, and workflow error recovery (via LLM tool-calling).
+4. **Strict Postcondition Verification:**
+   Task completion must be judged by independent, out-of-band state oracles and verified visual deltas—never self-reported by the executing agent.
+5. **Fail-Closed Safety & Hardware Failsafes:**
+   Cursor control must always yield immediately to human operator breakout (corner failsafe / ESC emergency abort). No destructive testing on personal or unisolated environments.
+
+---
+
+## 4. AVCS Development Stages (Model First, LLM Later)
+
+AVCS is a visual-grounding and motor-control model/system, not a language model.
+Its work therefore begins with pixel/query data and spatial prediction, not
+next-token pretraining. Model readiness and product readiness are separate
+milestones:
+
+| Stage | Deliverable | Exit evidence | Current status |
+| :--- | :--- | :--- | :--- |
+| 1. Model contract | Define inputs, outputs, coordinate spaces, and prohibited shortcuts. | Typed RGB + target-phrase input and spatial heatmap output are documented. | **Done** |
+| 2. Grounding architecture | Build visual encoder, learned goal-text encoder, multi-scale spatial decoder, per-frame stream interface, and fail-closed inference. | Shape/gradient/stream-interface tests; no random-weight predictions or motor authorization. | **Implemented; streaming performance unmeasured** |
+| 3. Demonstration data | Collect and curate opt-in isolated-window human click demonstrations. | Session-separated set with reviewed labels and recorder provenance. | **Not started** |
+| 4. AVCS training | Train the grounder from those real demonstrations only. | Demonstration-provenance checkpoint selected on validation sessions. | **Blocked on data** |
+| 5. Offline model evaluation | Evaluate once on unchanged held-out sessions; calibrate abstention and resolution. | Reproducible report with point distance/PCK, limitations, and no training leakage. | **Pipeline implemented; awaits trained weights/data** |
+| 6. Safe motor interface | Connect grounded points to input only behind freshness, bounds, confidence/calibration, human stop, and independent post-action checks. | Isolated acceptance evidence for one action type at a time. | **Not started** |
+| 7. System-2/LLM integration | Add an optional planner that provides subgoals; AVCS remains responsible for visual grounding. | Explicit protocol and no-LLM baseline preserved. | **Deferred until AVCS model stages complete** |
+| 8. Product readiness | Test across unseen apps/tasks, reliability, privacy, packaging, docs, support, and release monitoring. | Independent reproducible acceptance, failure reporting, security/privacy review. | **Not started** |
+
+For the requested order, **Stages 1–5 build and measure AVCS before any LLM
+integration**. A learned checkpoint requires real labeled pixel demonstrations;
+source code alone cannot create trained visual knowledge. Stage 6 is also kept
+outside model-training claims: moving a cursor is not proof of perception.
+The current `GroundingStream` accepts fresh frames one by one and reports
+measured inference latency/input cadence; it has no temporal memory and is not
+a desktop capture or input driver. Real-time throughput must be measured on the
+target hardware after training. A temporal model would require sequence labels
+and a separately validated architecture.
+Stages 7–8 are integration/productization, not prerequisites for defining the
+model, and do not begin until the operator approves the AVCS-only evidence.
+
+## 5. Realistic 4-Phase Research Roadmap
+
+```mermaid
+flowchart TD
+    Phase1["Phase 1: Goal-Conditioned Pixel Grounder<br/>(architecture + demonstration training pipeline)"]
+    Phase2["Phase 2: Isolated Demonstrations + Offline Training<br/>(recording-session-disjoint evaluation)"]
+    Phase3["Phase 3: System-1 / System-2 Decoupled Interface<br/>(LLM Planner ↔ AVCS Tool Protocol)"]
+    Phase4["Phase 4: Genuine Benchmark Evaluation<br/>(OSWorld / WindowsAgentArena tasks with 0 shortcuts)"]
+
+    Phase1 --> Phase2
+    Phase2 --> Phase3
+    Phase3 --> Phase4
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                   AVCS NEURO-VISUAL PERCEPTION STACK                   │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. HARDWARE CAPTURE LAYER                                              │
-│    • Win32FastCapture: Top-down 32-bit GDI DIBSection, SRCCOPY         │
-│    • ThreadedScreenCapture: Asynchronous double-buffered RAM frame     │
-│    • Zero DWM readback stall (<0.01ms non-blocking grab)               │
-├────────────────────────────────────────────────────────────────────────┤
-│ 2. MAGNOCELLULAR MOTION PATHWAY (<1ms)                                │
-│    • Dense optical flow fields (Δx, Δy) & kinetic scene energy         │
-│    • Moving entity detection (Centroid, velocity, heading, area)       │
-│    • Temporal Predictive Coding & Surprise Error spike detection       │
-├────────────────────────────────────────────────────────────────────────┤
-│ 3. OPTIMIZED CORTICAL BACKBONE (<2.5ms)                                │
-│    • Streamlined Inverted Residual Blocks (MBConv)                     │
-│    • Dense spatial feature pyramid (128-dim continuous feature maps)   │
-├────────────────────────────────────────────────────────────────────────┤
-│ 4. TWO-STREAMS DUAL HEADS (<1ms)                                       │
-│    • Ventral Stream: Latent scene semantics & window classification   │
-│    • Dorsal Stream: Direct 1x1 conv spatial interactive affordances    │
-│      (Clickable buttons, typeable inputs, scroll regions)              │
-├────────────────────────────────────────────────────────────────────────┤
-│ 5. BIOLOGICAL MOTOR & PURSUIT CONTROLLER                              │
-│    • Smooth Pursuit: Velocity feedforward Kalman tracker               │
-│    • Catch-Up Saccades: Ballistic re-centering on accelerating targets │
-│    • Closed-Loop Hand-Eye Motor Servoing: Fitts' Law velocity shaping  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 6. COMMERCIAL IP & EVENT STREAMING                                     │
-│    • VisualEventStreamer: High-level typed differential delta events   │
-│    • Cryptographic HMAC-SHA256 licensing & machine fingerprinting      │
-│    • Real-time granular usage metering & signed billing receipts       │
-└────────────────────────────────────────────────────────────────────────┘
-```
 
----
+### Phase 1: Goal-Conditioned Pixel Grounder (Architecture Implemented; Weights Not Trained)
+- [x] Define a model that consumes raw RGB pixels and a target phrase and emits a dense spatial click-target heatmap.
+- [x] Add a UTF-8 byte-query encoder and query-conditioned visual feature modulation; no OCR or accessibility text is consumed by the model.
+- [x] Add a demonstration loader, recording-session-disjoint train/validation/test split, recorder-manifest checks, and source-data fingerprints.
+- [x] Add a separate held-out evaluation command; it rejects changed demo data and does not dispatch desktop actions or call an LLM.
+- [ ] Obtain recorded real-UI demonstrations before training. No trained weights are currently available for this model.
 
-## 4. Phased Milestone Roadmap
+### Phase 2: Real-World Demonstrations and Grounding Training
+- [x] Build safe, isolated demonstration recorder (`avcs.training.demo_recorder`).
+- [ ] Record high-quality human demonstrations across standard Windows applications (Notepad, Calculator, Settings, File Explorer) in isolated disposable test windows. At least five separate sessions are required by the training split.
+- [ ] Curate session-disjoint Train / Validation / Test sets. The current recorder labels click points, not target bounding boxes.
+- [ ] Train `GoalConditionedGrounder` on genuine demonstrations. The synthetic checkpoint is not used as a pretrained real-UI model.
+- [ ] Report validation click-point distance first; target-hit rate requires bounding-box labels and is not measured by the current recorder.
+- [ ] Evaluate the held-out test split only after model choices are fixed. Offline metrics do not prove end-to-end desktop autonomy.
 
-### Phase 1: Biological Perception & Hardware Foundation [COMPLETED]
-- [x] Magnocellular optical flow engine ($<1\text{ ms}$)
-- [x] Inverted residual neural visual backbone ($<2.5\text{ ms}$)
-- [x] Fast Dorsal spatial affordance head ($<0.5\text{ ms}$)
-- [x] Smooth pursuit gaze tracker with catch-up saccades
-- [x] Native Windows hardware capture engine (`Win32FastCapture`)
-- [x] Asynchronous double-buffered capture thread (`ThreadedScreenCapture`)
-- [x] Differential visual event streamer (`VisualEventStreamer`)
-- [x] Cryptographic licensing and machine fingerprint binding (`avcs/auth/`)
-- [x] Usage metering, token savings calculator, and billing receipts (`avcs/billing/`)
-- [x] High-level developer SDK (`avcs.eye()`)
-- [x] Live desktop demonstration CLI (`python -m avcs.demo`)
-- [x] Native desktop visual HUD station (`avcs/gui.py`)
+### Phase 3: Decoupled System-1 / System-2 Cognitive Architecture
+- [ ] Formalize the System-1 tool interface:
+  - `look_at(subgoal_query) -> (x, y, confidence)`
+  - `move_and_click(x, y) -> visual_delta_detected`
+  - `type_text(string) -> visual_delta_detected`
+  - `inspect_window() -> scene_summary`
+- [ ] Integrate with external System-2 cognitive planners (Ollama / local LLM / hosted API) where the LLM reasons about *what* to do, and AVCS handles *where* and *how* to see and click.
 
----
+### Phase 4: Rigorous Sandbox Evaluation (OSWorld-Verified Alignment)
+- [ ] After the AVCS-only grounder evaluation and later planner integration, benchmark the complete agent in standard, reproducible OS tasks (OSWorld-Verified / WindowsAgentArena subset).
+- [ ] Strict out-of-band evaluation: verify actual application states on disk and OS handles without shortcut bypasses.
+- [ ] Publish honest, auditable success rates with zero inflated claims.
 
-### Phase 2: Open-Vocabulary Language Grounding & Saccadic Foveation [COMPLETED]
-- [x] **Natural Language Gaze Grounding:**
-  - Semantic queries (e.g. *"Submit Order"*, *"search bar in top left"*, *"close icon"*) mapped to spatial coordinates in **$3.37\text{ ms}$** on CPU.
-  - Multi-scale character n-gram text projection aligned with spatial dorsal visual latents with zero random seeding and exact query caching.
-  - Differentiable soft-argmax (DSNT) with conscious affordance hotspot snapping.
-- [x] **Dual-Fovea Acuity Engine (Fovea vs. Periphery):**
-  - Wide-angle low-resolution peripheral awareness ($60\text{ FPS}$) + dynamic high-resolution foveal zoom crop centered on fixation gaze.
-  - Fast foveal element classification (`button`, `input_field`, `icon`, `tab`, `checkbox`, `menu_item`) and boundary contrast scoring in **$3.12\text{ ms}$** on CPU.
-- [x] **High-Level SDK & GUI Integration:**
-  - `client.look_at("Confirm Payment")` and `client.inspect()` exposed in `HumanEyeClient`.
-  - Visual target bounding box rendering in interactive Desktop GUI (`avcs/gui.py`).
-
----
-
-### Phase 3: Semantic DOM-Less Scene Tree & Multi-Turn Episodic Memory (Visual RAG) [COMPLETED]
-- [x] **Hierarchical UI Scene Tree (DOM-less UIML):**
-  - Pure-pixel spatial clustering converting the screen into a structured hierarchy of windows, toolbars, buttons, and input fields in **$0.30\text{ ms}$** p50 on CPU.
-  - Independent of web DOM, accessibility trees, or browser APIs (works on native Windows apps, Electron, SAP, CAD, and games).
-  - Emits ultra-compact, indented UIML representation (<150 tokens per screen).
-- [x] **Multi-Turn Visual State Graph & Re-ID:**
-  - Tracks element identities across window scrolling, resizing, and occlusion via Hungarian bipartite matching (`PersistentUIRegistry`).
-  - Emits causal delta transitions (*"Modal dialog appeared"*, *"Page scrolled 300px down"*, *"Form submitted"*) preserving agent context.
-  - Visual Diff Engine ($\Delta_{\text{visual}}$) cutting multi-turn token consumption by **$>98\%$** ($158,266$ tokens saved across 100 turns).
-- [x] **High-Level SDK & Episodic Context Prompts:**
-  - `client.get_scene_tree()`, `client.get_visual_diff()`, and `client.get_context_prompt()` available on `HumanEyeClient`.
-
----
-
-### Phase 4: Closed-Loop Physical Hand-Eye Coordination & Visual Verification [COMPLETED]
-- [x] **Fitts' Law Neuromuscular Motor Servoing:**
-  - Minimum Jerk 5th-order kinematic trajectory generation with physiological 8–12 Hz micro-tremor in **$0.43\text{ ms}$** on CPU.
-  - Fitts' Law duration scaling ($T = a + b \log_2(1 + D/W)$) producing realistic human cursor kinematics immune to bot-detection filters.
-  - Closed-loop visual feedback verifying final cursor arrival.
-- [x] **Visual Ripple Assertion Verifier:**
-  - Real-time optical flow ripple measurement ($\sum |v_x| + |v_y|$) and predictive surprise pulse verification following actions.
-  - 5-Tier Self-Healing Escalation Ladder (`VERIFIED`, `RETRY_MICRO_JITTER`, `KEYBOARD_FALLBACK`, `SACCADIC_REGROUNDING`, `ESCALATE_BLOCKED`).
-- [x] **High-Level SDK Methods:**
-  - `client.move_to(target)`, `client.click_and_verify(target)`, and `client.type_and_verify(target, text)` integrated in `HumanEyeClient`.
-
----
-
-### Phase 5: Commercial Deployment, High-Speed IPC & Enterprise Packaging [COMPLETED]
-- [x] **High-Throughput IPC Daemon:**
-  - Shared memory ring buffer (`MemoryMappedFile`) streaming $60–120\text{ FPS}$ perception states to external processes in $<0.05\text{ ms}$ latency with CRC32 frame checksums.
-- [x] **Multi-Language Client Bindings:**
-  - Python SDK (`SharedMemoryBroadcaster`, `SharedMemoryReader` in `avcs/ipc.py`), Node.js / TypeScript SDK (`avcs/bindings/avcs_client.ts`), and C99 / C++17 headers (`avcs/bindings/avcs_ipc.h`).
-- [x] **Enterprise Licensing Server:**
-  - Air-gapped cryptographic HMAC-SHA256 license issuance, hardware node fingerprint binding (`avcs/auth/server.py`), and commercial seat verification.
-
----
-
-## 5. Architectural Invariants (Non-Negotiable Principles)
-
-1. **Sub-16ms Real-Time Budget:** Every full perception tick must complete within $16\text{ ms}$ ($>60\text{ FPS}$) on standard CPU.
-2. **CPU-Native Efficiency:** The foundation must run completely on local hardware without requiring expensive GPUs or cloud clusters.
-3. **Pure Pixels Philosophy:** Never rely on application DOMs, browser inspect protocols, or OS accessibility hooks. Pixels are universal.
-4. **Safety & Autonomy:** Hardware motor control must enforce physical breakout failsafes (e.g., slamming the cursor into a corner revokes motor grants instantly).
-5. **Proprietary Commercial IP:** All licensing, cryptographic signatures, and usage metering must remain hardened and production-ready.
+The [official OSWorld repository](https://github.com/xlang-ai/OSWorld) announced
+**OSWorld-Verified** on 2025-07-28 as a refined benchmark release, not a
+standalone model called “OSWorld 2”. Its [release report](https://xlang.ai/blog/osworld-verified)
+describes task/infrastructure fixes and updated evaluation signals. AVCS may
+eventually provide visual target grounding inside an agent evaluated there;
+AVCS by itself is not an OSWorld task-completion agent or score.

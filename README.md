@@ -1,297 +1,81 @@
-# AVCS // Artificial Visual Cortex System
-### Universal Real-Time Biological Human Eye Intelligence Platform for Computer Agents & AI
+# AVCS — Artificial Visual Cortex System
 
-[![Test Suite](https://img.shields.io/badge/tests-351%20passed-brightgreen.svg)](tests/)
-[![Latency](https://img.shields.io/badge/latency-8.13ms%20p50-blue.svg)](GOAL.md)
-[![Frame Rate](https://img.shields.io/badge/throughput-60--120%20FPS-success.svg)](GOAL.md)
-[![Hardware](https://img.shields.io/badge/hardware-CPU%20native%20(no%20GPU)-orange.svg)](GOAL.md)
-[![Architecture](https://img.shields.io/badge/architecture-Two--Streams%20Neuromorphic-purple.svg)](GOAL.md)
+AVCS is an experimental Python research project and SDK for screen visual perception.
+It contains actual neural-network models, in-memory desktop capture pipelines, and empirical
+evaluation harnesses.
 
----
+**AVCS is not a single model**, and it is **not a proven, general-purpose computer-use model**
+for arbitrary desktop tasks. Passing the test suite demonstrates internal software specification
+adherence and tensor contract validity—not open-world visual understanding or automated task completion.
 
-## What is AVCS?
+## Current status
 
-**AVCS (Artificial Visual Cortex System)** is a real-time, non-generative biological visual perception foundation designed to operate as the **Human Eye** for computer-operating AI agents, multi-modal LLMs, and autonomous systems.
+- The `ScreenEye` SDK and supporting perception components provide the
+  repository's desktop-facing API. Capture support and performance depend on
+  the selected backend, hardware, operating system, and workload.
+- `HumanEye2M` is an experimental model path. A checkpoint that loads
+  successfully is not evidence of predictive accuracy; without suitable
+  trained weights it must not be treated as a validated model.
+- `GoalConditionedGrounder` and its demonstration-training pipeline are
+  implemented, but a real-demonstration checkpoint and validated click
+  performance are not included.
+- `TemporalVisualCortex` is a self-supervised temporal research prototype.
+  Its live-capture, training, and evaluation tools are documented in
+  [docs/TEMPORAL_VISUAL_LEARNING.md](docs/TEMPORAL_VISUAL_LEARNING.md).
+  Available desktop runs are small experiments, not evidence of general
+  visual understanding, calibrated motion, or real-time task performance.
 
-Today's "Computer Use" agents (like Claude Computer Use or OpenAI Operator) are severely bottlenecked by naive vision: they take screenshots every 2–4 seconds, burn \$15–\$30 per workflow in cloud tokens, freeze during animations, and hallucinate coordinate clicks.
+Benchmark figures and model claims should be accompanied by the exact
+environment, command, workload, sample count, and report. Do not infer
+end-to-end task success from unit tests, synthetic data, model checkpoint
+loading, or a lower self-supervised loss alone.
 
-AVCS solves this by decoupling high-frequency visual perception from slow cognitive reasoning:
-- **AVCS acts as System 1 (Visual Cortex & Brainstem):** Perceives continuous desktop pixels at **60–120 FPS** with **sub-10ms latency** on standard CPU, extracts optical flow, tracks dynamic entities, grounds natural language queries, and detects interactive affordances for **\$0.00**.
-- **Downstream Agents / LLMs act as System 2 (Cerebral Cortex):** Receive lightweight **Differential Visual Events (<50 tokens)** and compact **DOM-less UIML trees (<150 tokens)** only when state transitions occur, reducing agent latency by **$95\%$** and token costs by **$>98\%$**.
+## Install
 
----
+Python 3.9 or later is declared by the package metadata. Create a virtual
+environment, then install the project and development dependencies:
 
-## Verified Benchmarks (Measured on Live Desktop)
-
-Every number is measured and verified on standard hardware (Intel quad-core CPU, 15 GB RAM, no GPU):
-
-| Metric | Measured Result | Significance |
-| :--- | :--- | :--- |
-| **Median Perception Latency (p50)** | **$8.13\text{ ms}$** | Real-time human visual reaction speed ($<16\text{ ms}$ $60\text{ Hz}$ budget) |
-| **Real Desktop Frame Rate** | **$55.9 - 118.8\text{ FPS}$** | Smooth, continuous desktop perception (dynamic vs. static) |
-| **Hardware Readback Overhead** | **$< 0.01\text{ ms}$** | Win32 GDI DIBSection zero-copy memory mapping |
-| **Magnocellular Optical Flow** | **$0.82\text{ ms}$** | Sub-millisecond velocity fields and sudden surprise spikes |
-| **Language Gaze Grounding** | **$3.37\text{ ms}$** | Fast open-vocabulary spatial resolution on CPU |
-| **Foveal Acuity Head** | **$3.12\text{ ms}$** | High-resolution foveal zoom crop & element categorization |
-| **DOM-less Scene Tree Extraction** | **$0.30\text{ ms}$** | Pure-pixel spatial clustering into compact UIML (<150 tokens) |
-| **Neuromuscular Servoing Plan** | **$0.43\text{ ms}$** | Flash & Hogan 5th-order minimum jerk trajectory generation |
-| **Shared Memory IPC Transfer** | **$< 0.05\text{ ms}$** | Sub-microsecond zero-copy mmap broadcast with CRC32 |
-| **Multi-Turn Token Reduction** | **$> 98\%$** | $158,266$ tokens saved across 100 turns via Visual Diff Engine |
-| **Test Suite Coverage** | **351 passed, 3 skipped** | Full unit, regression, and hardware integration coverage across Phases 1–5 |
-
----
-
-## Architecture Overview
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                   AVCS NEURO-VISUAL PERCEPTION STACK                   │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. HARDWARE ACCELERATION LAYER                                         │
-│    • Win32FastCapture: Top-down 32-bit GDI DIBSection, SRCCOPY         │
-│    • ThreadedScreenCapture: Asynchronous double-buffered RAM frame     │
-│    • Zero DWM readback stall (<0.01ms non-blocking grab)               │
-├────────────────────────────────────────────────────────────────────────┤
-│ 2. MAGNOCELLULAR MOTION PATHWAY (<1ms)                                │
-│    • Dense optical flow fields (Δx, Δy) & kinetic scene energy         │
-│    • Moving entity detection (Centroid, velocity, heading, area)       │
-│    • Temporal Predictive Coding & Surprise Error spike detection       │
-├────────────────────────────────────────────────────────────────────────┤
-│ 3. OPTIMIZED CORTICAL BACKBONE (<2.5ms)                                │
-│    • Streamlined Inverted Residual Blocks (MBConv)                     │
-│    • Dense spatial feature pyramid (128-dim continuous feature maps)   │
-├────────────────────────────────────────────────────────────────────────┤
-│ 4. TWO-STREAMS DUAL HEADS (<1ms)                                       │
-│    • Ventral Stream: Latent scene semantics & window classification   │
-│    • Dorsal Stream: Direct 1x1 conv spatial interactive affordances    │
-│      (Clickable buttons, typeable inputs, scroll regions)              │
-├────────────────────────────────────────────────────────────────────────┤
-│ 5. BIOLOGICAL MOTOR & PURSUIT CONTROLLER                              │
-│    • Smooth Pursuit: Velocity feedforward Kalman tracker               │
-│    • Catch-Up Saccades: Ballistic re-centering on accelerating targets │
-│    • Closed-Loop Hand-Eye Motor Servoing: Fitts' Law velocity shaping  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 6. COMMERCIAL IP & EVENT STREAMING                                     │
-│    • VisualEventStreamer: High-level typed differential delta events   │
-│    • Cryptographic HMAC-SHA256 licensing & machine fingerprinting      │
-│    • Real-time granular usage metering & signed billing receipts       │
-└────────────────────────────────────────────────────────────────────────┘
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
 ```
 
----
+PyTorch installation options vary by operating system and accelerator. If the
+default package resolver does not select the PyTorch build you need, install
+the appropriate PyTorch build for your environment before installing AVCS.
 
-## Quick Start
+## Verify
 
-### 1. Installation
+Run the repository test suite from the project root:
 
-```bash
-# Clone repository
-git clone https://github.com/Parth-labs-in/AVCS.git
-cd AVCS
-
-# Install dependencies (CPU only, no CUDA required)
-python -m pip install numpy torch pillow pywin32 pytest
+```powershell
+python -m pytest tests -q
 ```
 
-### 2. Run the Flagship Live Desktop Demonstration
+Test outcomes can vary by operating system and hardware. The tests are not a
+substitute for isolated live-desktop acceptance tests.
 
-Runs the live $60\text{ FPS}$ continuous perception loop on your active Windows desktop:
+## Temporal model research
 
-```bash
-python -m avcs.demo --seconds 5.0 --capture desktop
-```
+The temporal model experiments require explicit operator consent before live
+desktop capture. Close private windows and use a non-sensitive screen. Raw
+frames are held in bounded memory by the documented tools; optional reports
+contain aggregate metrics. See the protocol, limits, and commands in
+[docs/TEMPORAL_VISUAL_LEARNING.md](docs/TEMPORAL_VISUAL_LEARNING.md).
 
-Output:
-```text
-============================================================================
-    AVCS // ARTIFICIAL VISUAL CORTEX - UNIVERSAL HUMAN EYE DEMONSTRATION
-============================================================================
-Initializing Real-Time Human Eye Engine (Mode: desktop, Target: 60 FPS)...
-Human Eye online. Streaming continuous visual perception...
+## Contributing
 
-[TICK #0168] FPS: 55.9 | Latency:  8.1ms | Category: editor_code    | Gaze: (0.48, 0.52) | Motion: 0.000 (static) | Status: stable
+Contributions are welcome. Before opening a pull request:
 
-----------------------------------------------------------------------------
-SESSION SUMMARY REPORT:
-  • Total Runtime               : 3.01 seconds
-  • Total Visual Frames         : 168 frames
-  • Effective Vision Frame Rate : 55.9 FPS
-  • Median Perception Latency   : 8.13 ms
-  • Differential Events Emitted : 1 events
-  • Cryptographic Receipt ID    : RCPT_985CBA0E1404
-----------------------------------------------------------------------------
-VERDICT: Real-Time Human Eye Intelligence Platform operating at full spec.
-============================================================================
-```
-
-### 3. Launch the Native Visual Neural Desktop HUD
-
-Launches the native desktop station with real-time optical motion vectors, foveal reticles, and smooth pursuit locks:
-
-```bash
-python -m avcs.gui
-```
-
-### 4. Run the High-Speed Gaming & Dynamic Video Benchmark
-
-Benchmarks tracking dynamic video subjects and accelerating gaming entities:
-
-```bash
-python -m avcs.game_benchmark --fps 60 --duration 3.0
-```
-
-### 5. Run the Full Test Suite
-
-Runs all unit, regression, and hardware tests across the repository:
-
-```bash
-python -m pytest tests/ -q
-# 327 passed, 3 skipped in ~79s
-```
-
----
-
-## Developer SDK Quickstart
-
-AVCS provides a high-level developer SDK designed for seamless agent and multi-modal AI integration:
-
-```python
-import avcs
-
-# 1. Initialize the Biological Human Eye Client (60-120 FPS on desktop)
-client = avcs.eye(source="desktop", fps=60)
-
-# 2. Phase 2: Open-Vocabulary Natural Language Gaze Grounding (<3.5ms)
-target = client.look_at("Confirm Payment button")
-print(f"Fixated gaze at: ({target.x:.2f}, {target.y:.2f}) [Confidence: {target.confidence:.2f}]")
-
-inspection = client.inspect(target)
-print(f"Foveal element: {inspection.element_type} [Boundary contrast: {inspection.contrast_score:.2f}]")
-
-# 3. Phase 3: DOM-less Scene Tree & Multi-Turn Visual Memory (<150 tokens)
-tree = client.get_scene_tree()
-print(tree.to_uiml())  # Pure-pixel semantic hierarchy without browser DOM
-
-# Context differential: emits only state delta transitions (<50 tokens)
-diff = client.get_visual_diff()
-print(f"State transition: {diff.summary_narrative}")
-
-# 4. Phase 4: Closed-Loop Neuromuscular Servoing & Visual Verification
-# Fitts' Law 5th-order minimum jerk trajectory + optical ripple assertion
-result = client.click_and_verify("Confirm Payment button")
-print(f"Action status: {result.status} [Optical flow ripple: {result.optical_ripple_energy:.3f}]")
-
-# 5. Phase 5: High-Throughput Zero-Copy Shared Memory IPC (<0.05ms)
-from avcs.ipc import SharedMemoryBroadcaster, SharedMemoryReader
-
-broadcaster = SharedMemoryBroadcaster(buffer_name="avcs_live_stream")
-broadcaster.broadcast(client.perceive().to_dict())
-
-reader = SharedMemoryReader(buffer_name="avcs_live_stream")
-frame = reader.read_latest()
-print(f"IPC Frame #{frame.sequence_number}: Latency {frame.latency_ms:.2f}ms | Category: {frame.primary_category}")
-
-client.close()
-```
-
----
-
-## High-Throughput IPC & Language Bindings (Phase 5)
-
-AVCS runs as a low-latency perception daemon streaming continuous visual states via zero-copy memory-mapped buffers:
-
-### 1. Node.js / TypeScript Client
-```typescript
-import { AVCSNodeClient } from './avcs/bindings/avcs_client';
-
-const client = new AVCSNodeClient('avcs_live_stream');
-if (client.connect()) {
-  const frame = client.readLatest();
-  if (frame) {
-    console.log(`[IPC] Frame #${frame.sequenceNumber} at ${frame.fps} FPS, gaze: (${frame.gazeFixation.x}, ${frame.gazeFixation.y})`);
-  }
-}
-```
-
-### 2. C99 / C++17 Header
-```c
-#include "avcs/bindings/avcs_ipc.h"
-// Read directly from mmap buffer in <1 microsecond
-```
-
----
-
-## Commercial Licensing & Usage Metering
-
-AVCS is built as an enterprise-grade commercial foundation with cryptographic licensing and usage verification:
-
-- **Licensing Engine (`avcs/auth/`):** HMAC-SHA256 signature verification, tamper-proof expiration timestamps, and physical hardware binding (`get_machine_fingerprint()`).
-- **Enterprise Licensing Server CLI:**
-  ```bash
-  # Issue a 1-year Enterprise license bound to the current machine
-  python -m avcs.auth.server --issue --org "Enterprise Labs" --tier enterprise --days 365 --seats 50 --bind-current-machine
-  
-  # Verify a license token
-  python -m avcs.auth.server --verify "AVCS-<token>"
-  ```
-- **Usage Metering (`avcs/billing/`):** Real-time tracking of active perception seconds, visual frames processed, motor actions dispatched, and estimated cloud token/dollar savings vs. naive VLM polling.
-- **Audit Receipts:** Generates cryptographically hashed `SessionUsageReceipt` records for verifiable enterprise billing.
-
----
-
-## Strategic Roadmap & Future Milestones
-
-For the detailed multi-phase architecture roadmap, engineering milestones, and open-vocabulary grounding specifications, see:
-
-👉 **[GOAL.md](GOAL.md)**
-
----
-
-## Repository Layout
-
-```
-avcs/
-  __init__.py             Public API exports & sys.path resolution
-  human_eye.py            Biological Human Eye Engine (Magnocellular, Backbone, Pursuit)
-  grounding.py            Phase 2: Natural Language Gaze Grounding & Foveal Acuity Engine
-  memory/                 Phase 3: Semantic DOM-less Scene Tree & Multi-Turn Memory
-    types.py              UIMLElement, UIMLTree, BoundingBox, VisualDiff
-    tree_extractor.py     Pure-pixel semantic UI hierarchy extraction
-    registry.py           Persistent UI registry & Hungarian Re-ID
-    diff_engine.py        Causal narrative delta synthesizer
-    manager.py            Multi-turn visual memory manager & token budget optimizer
-  servoing.py             Phase 4: Neuromuscular minimum-jerk servoing & Fitts' law
-  verifier.py             Phase 4: Visual ripple assertion verifier & 5-tier escalation
-  ipc.py                  Phase 5: Zero-copy shared memory broadcaster & reader
-  bindings/               Phase 5: Cross-language bindings (avcs_ipc.h, avcs_client.ts)
-  sdk.py                  High-level HumanEyeClient developer interface
-  demo.py                 Flagship CLI demonstration with live 60 FPS telemetry
-  gui.py                  Native desktop Visual Neural HUD station
-  game_benchmark.py       Dynamic video & game tracking benchmark
-  events.py               VisualEventStreamer & differential event definitions
-  auth/
-    license.py            HMAC-SHA256 license manager & machine fingerprinting
-    server.py             Enterprise licensing server & CLI generator
-  billing/
-    meter.py              UsageMeter, rate cards, and cryptographic receipts
-forge/
-  vision/
-    capture.py            Win32FastCapture, ThreadedScreenCapture, SyntheticScreen
-    cortex/               Neural backbone, ventral/dorsal heads, and motor drivers
-  control/                Capability kernel, PathGuard, and reversible filesystem actions
-tests/
-  test_fast_capture.py    Win32 hardware DIBSection and threaded capture tests
-  test_grounding_fovea.py Phase 2 language grounding and foveal acuity tests
-  test_memory_tree.py     Phase 3 DOM-less scene tree and visual diff tests
-  test_servoing_verification.py Phase 4 neuromuscular servoing & verifier tests
-  test_ipc_daemon.py      Phase 5 shared memory IPC and enterprise licensing tests
-  test_desktop_gui.py     HUD station widget and overlay tests
-  test_sdk_events.py      Developer SDK, events, and billing tests
-  test_vision.py          Perception primitives and scene understanding tests
-```
-
----
+1. Describe the problem and the behavior change.
+2. Add or update focused tests.
+3. Run the relevant tests and report the exact command and result.
+4. Avoid publishing screenshots, captured frames, credentials, or private
+   desktop data.
 
 ## License
 
-Proprietary Commercial Intellectual Property. All rights reserved. See [`avcs/auth/license.py`](avcs/auth/license.py) for licensing terms and machine entitlements.
+AVCS is made available under the Apache License 2.0. See [LICENSE.md](LICENSE.md).
+The `avcs.auth` package contains optional application-level license-token
+utilities; their presence does not change the repository's software license.

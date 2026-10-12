@@ -1,8 +1,19 @@
 __pycache__/
 *.pyc
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 runs/
 .pytest_cache/
 *.pt
+*.pth
+*.safetensors
+*.onnx
 kaggle_logs*/
 build/
 dist/

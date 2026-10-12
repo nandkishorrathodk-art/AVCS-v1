@@ -449,12 +449,14 @@ class HumanEye(nn.Module):
     ) -> GroundingResult:
         """Grounds natural language query onto screen, updates gaze fixation, and inspects fovea (<4ms)."""
         f = frame if frame is not None else self._latest_raw_frame
+        if frame is not None:
+            self._latest_raw_frame = frame
         if f is None:
             f = self.source.grab()
             self._latest_raw_frame = f
 
         # If visual features are not yet cached, extract them
-        if self._last_feat is None:
+        if frame is not None or self._last_feat is None:
             H, W = f.shape[:2]
             sy = max(1, H // self.input_size[0])
             sx = max(1, W // self.input_size[1])

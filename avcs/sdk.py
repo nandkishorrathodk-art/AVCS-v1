@@ -294,6 +294,7 @@ class HumanEyeClient:
             action_type="click",
             target=coords,
             max_recovery_tier=max_recovery_tier,
+            button=button,
         )
 
     def type_and_verify(

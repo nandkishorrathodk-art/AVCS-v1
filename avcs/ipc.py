@@ -58,7 +58,8 @@ class SharedMemoryBroadcaster:
         # On Windows, mmap supports named shared memory via tagname
         # To guarantee cross-platform support across Windows/Linux/macOS, we back it with a file
         temp_dir = tempfile.gettempdir()
-        self._temp_path = os.path.join(temp_dir, f"{self.buffer_name}.bin")
+        clean_name = self.buffer_name.lstrip("/\\")
+        self._temp_path = os.path.join(temp_dir, f"{clean_name}.bin")
         if os.path.exists(self._temp_path):
             try:
                 self._file = open(self._temp_path, "r+b")
@@ -176,20 +177,21 @@ class SharedMemoryReader:
 
     def _initialize_buffer(self) -> None:
         temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, f"{self.buffer_name}.bin")
+        clean_name = self.buffer_name.lstrip("/\\")
+        temp_path = os.path.join(temp_dir, f"{clean_name}.bin")
 
         if not os.path.exists(temp_path):
             # Create placeholder if broadcaster not yet launched
             with open(temp_path, "wb+") as f:
                 f.truncate(self.buffer_size)
 
-        self._file = open(temp_path, "rb")
+        self._file = open(temp_path, "r+b" if os.name == "nt" else "rb")
         if os.name == "nt":
             self._mmap = mmap.mmap(
                 self._file.fileno(),
                 self.buffer_size,
                 tagname=self.buffer_name,
-                access=mmap.ACCESS_READ,
+                access=mmap.ACCESS_WRITE,
             )
         else:
             self._mmap = mmap.mmap(

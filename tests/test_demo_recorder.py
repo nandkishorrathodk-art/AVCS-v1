@@ -15,6 +15,7 @@ from avcs.training.demo_recorder import (
     physical_window_bounds,
     render_click_audit,
 )
+from forge.vision.cortex.motor.win32 import HARDWAREINPUT
 
 
 def test_find_exact_window_title_rejects_partial_and_duplicate_matches():
@@ -289,11 +290,20 @@ def test_recorder_supports_predeclared_targets_for_console_free_capture(tmp_path
 
 
 def test_recorder_rejects_invalid_predeclared_target_labels(tmp_path):
-    with pytest.raises(ValueError, match="Predefined target labels"):
-        WindowsDemoRecorder(
-            window_title="Untitled - Notepad",
-            task="Ground visible controls",
-            output_dir=tmp_path / "session",
-            user32=object(),
-            target_labels=[""],
-        )
+    for label in ("", "é" * 49):
+        with pytest.raises(ValueError, match="Predefined target labels"):
+            WindowsDemoRecorder(
+                window_title="Untitled - Notepad",
+                task="Ground visible controls",
+                output_dir=tmp_path / "session",
+                user32=object(),
+                target_labels=[label],
+            )
+
+
+def test_win32_hardware_input_uses_documented_field_names():
+    assert [name for name, _ in HARDWAREINPUT._fields_] == [
+        "uMsg",
+        "wParamL",
+        "wParamH",
+    ]

@@ -1,16 +1,21 @@
 """Unit tests for AVCS Milestone 8 Phase D Preflight Engine."""
 from __future__ import annotations
 
+import hashlib
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
+
+import avcs_m7_validation.phase_d_preflight as preflight
+from avcs.capture_adapter import Win32GDICaptureAdapter
 from avcs_m7_validation.phase_d_preflight import (
+    CANONICAL_MODEL_PARAMS,
+    CANONICAL_SHAPE_SHA256,
     PhaseDPreflightEngine,
     PreflightStatus,
-    CANONICAL_MODEL_PARAMS,
-    CANONICAL_ARCH_SHA256,
-    CANONICAL_SHAPE_SHA256,
 )
+from forge.vision.cortex.motor.win32 import Win32CursorDriver
 
 
 class PhaseDPreflightTests(unittest.TestCase):
@@ -20,22 +25,51 @@ class PhaseDPreflightTests(unittest.TestCase):
         self.engine = PhaseDPreflightEngine()
 
     def test_candidate_freeze_checks(self) -> None:
-        """Verifies that parameter count and tensor shapes match canonical frozen candidate."""
-        res = self.engine.check_candidate_freeze()
+        """Verifies the frozen-candidate check passes when its architecture pin matches."""
+        arch_path = self.engine.repo_root / "avcs" / "cortex_2m.py"
+        arch_sha = hashlib.sha256(arch_path.read_bytes()).hexdigest()
+        with patch.object(preflight, "CANONICAL_ARCH_SHA256", arch_sha):
+            res = self.engine.check_candidate_freeze()
+
         self.assertEqual(res.status, PreflightStatus.PASSED)
         self.assertEqual(res.details["total_parameters"], CANONICAL_MODEL_PARAMS)
         self.assertEqual(res.details["trainable_parameters"], CANONICAL_MODEL_PARAMS)
         self.assertEqual(res.details["non_trainable_parameters"], 0)
-        self.assertEqual(res.details["arch_sha256"], CANONICAL_ARCH_SHA256)
+        self.assertEqual(res.details["arch_sha256"], arch_sha)
         self.assertEqual(res.details["shape_sha256"], CANONICAL_SHAPE_SHA256)
 
+    def test_candidate_freeze_rejects_architecture_mismatch(self) -> None:
+        """Verifies an architecture hash mismatch blocks candidate certification."""
+        with patch.object(preflight, "CANONICAL_ARCH_SHA256", "0" * 64):
+            res = self.engine.check_candidate_freeze()
+
+        self.assertEqual(res.status, PreflightStatus.FAILED)
+        self.assertEqual(res.details["total_parameters"], CANONICAL_MODEL_PARAMS)
+        self.assertEqual(res.details["shape_sha256"], CANONICAL_SHAPE_SHA256)
+        self.assertNotEqual(res.details["arch_sha256"], "0" * 64)
+        self.assertIn("hash mismatch", res.error_message)
+
     def test_live_provenance_classes(self) -> None:
-        """Verifies physical capture and input driver operations on Windows."""
-        res = self.engine.check_live_provenance_classes()
-        self.assertEqual(res.status, PreflightStatus.PASSED)
+        """Verifies the preflight rejects the configured synthetic fixture adapter."""
+        with (
+            patch.object(Win32GDICaptureAdapter, "__init__", return_value=None),
+            patch.object(Win32GDICaptureAdapter, "open"),
+            patch.object(
+                Win32GDICaptureAdapter,
+                "grab",
+                return_value=np.zeros((1, 1, 3), dtype=np.uint8),
+            ),
+            patch.object(Win32GDICaptureAdapter, "close"),
+            patch.object(Win32CursorDriver, "__init__", return_value=None),
+        ):
+            res = self.engine.check_live_provenance_classes()
+
+        self.assertEqual(res.status, PreflightStatus.FAILED)
         self.assertTrue(res.details["physical_capture_operational"])
         self.assertTrue(res.details["physical_driver_operational"])
-        self.assertTrue(res.details["synthetic_adapters_rejected"])
+        self.assertFalse(res.details["configured_adapter_uses_live_io"])
+        self.assertFalse(res.details["goal_conditioned_reasoner_present"])
+        self.assertIn("not a live visual task worker", res.error_message)
 
     def test_negative_controls(self) -> None:
         """Verifies that synthetic provenance and duplicate trial IDs fail closed."""
@@ -71,4 +105,3 @@ class PhaseDPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -19,6 +19,8 @@ from typing import Any, Iterable, Optional, Sequence, Tuple
 import numpy as np
 from PIL import Image, ImageDraw
 
+from avcs.query_limits import MAX_QUERY_BYTES
+
 
 @dataclass(frozen=True)
 class WindowInfo:
@@ -176,8 +178,14 @@ class WindowsDemoRecorder:
         self._target_labels = deque(target_labels or ())
         self._expected_click_count = len(self._target_labels)
         self.calibration_only = calibration_only
-        if any(not label.strip() or len(label) > 160 for label in self._target_labels):
-            raise ValueError("Predefined target labels must contain 1-160 characters.")
+        if any(
+            not label.strip()
+            or len(label.strip().encode("utf-8")) > MAX_QUERY_BYTES
+            for label in self._target_labels
+        ):
+            raise ValueError(
+                f"Predefined target labels must contain 1-{MAX_QUERY_BYTES} UTF-8 bytes."
+            )
         if calibration_only and self._expected_click_count:
             raise ValueError("Calibration mode does not accept demonstration target labels.")
         self.event_sink = event_sink
@@ -574,7 +582,7 @@ class WindowsDemoRecorder:
             label = self.label_queue.get_nowait().strip()
         except queue.Empty:
             return None
-        if not label or len(label) > 160:
+        if not label or len(label.encode("utf-8")) > MAX_QUERY_BYTES:
             return None
         return label
 
@@ -609,8 +617,11 @@ def _read_target_labels(recorder: WindowsDemoRecorder) -> None:
         if not label:
             print("Label cannot be empty; that click will not be recorded.", file=sys.stderr)
             continue
-        if len(label) > 160:
-            print("Label is longer than 160 characters; try a shorter description.", file=sys.stderr)
+        if len(label.encode("utf-8")) > MAX_QUERY_BYTES:
+            print(
+                f"Label exceeds {MAX_QUERY_BYTES} UTF-8 bytes; try a shorter description.",
+                file=sys.stderr,
+            )
             continue
         recorder.label_queue.put(label)
 
@@ -658,9 +669,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.calibrate_only and not args.target_labels and not sys.stdin.isatty():
         parser.error("Interactive target labels require a terminal; no capture was started.")
     if args.target_labels and any(
-        not label.strip() or len(label) > 160 for label in args.target_labels
+        not label.strip()
+        or len(label.strip().encode("utf-8")) > MAX_QUERY_BYTES
+        for label in args.target_labels
     ):
-        parser.error("Each --target-label must contain 1-160 non-whitespace characters.")
+        parser.error(
+            f"Each --target-label must contain 1-{MAX_QUERY_BYTES} non-whitespace UTF-8 bytes."
+        )
 
     recorder = WindowsDemoRecorder(
         window_title=args.window_title,

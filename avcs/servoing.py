@@ -143,16 +143,26 @@ class NeuromuscularServoingController:
 
     def _get_cursor(self) -> Tuple[float, float]:
         if hasattr(self.driver, "get_position_normalized"):
-            return self.driver.get_position_normalized()
+            position = self.driver.get_position_normalized()
         elif hasattr(self.driver, "get_position"):
-            return self.driver.get_position()
-        return (0.5, 0.5)
+            position = self.driver.get_position()
+        else:
+            raise RuntimeError("Cursor driver does not support position readback.")
+        if (
+            not isinstance(position, (tuple, list))
+            or len(position) != 2
+            or not all(math.isfinite(float(value)) for value in position)
+        ):
+            raise RuntimeError(f"Cursor driver returned an invalid position: {position!r}")
+        return float(position[0]), float(position[1])
 
     def _move_cursor(self, x: float, y: float) -> None:
         if hasattr(self.driver, "move_to_normalized"):
             self.driver.move_to_normalized(x, y)
         elif hasattr(self.driver, "move_to"):
             self.driver.move_to(x, y)
+        else:
+            raise RuntimeError("Cursor driver does not support pointer movement.")
 
     def servo_to(
         self,
@@ -167,6 +177,13 @@ class NeuromuscularServoingController:
             target_width: estimated hitbox width of target [0, 1]
             realtime: if True, sleeps between ticks for real OS cursor animation
         """
+        if (
+            len(target) != 2
+            or not all(math.isfinite(float(value)) for value in target)
+            or not all(0.0 <= float(value) <= 1.0 for value in target)
+        ):
+            raise ValueError(f"Target must be normalized screen coordinates in [0, 1]: {target!r}")
+        target = (float(target[0]), float(target[1]))
         start_x, start_y = self._get_cursor()
         dist = math.hypot(target[0] - start_x, target[1] - start_y)
         w = target_width or self.fovea_width
@@ -188,6 +205,7 @@ class NeuromuscularServoingController:
         self._move_cursor(target[0], target[1])
         final_pos = self._get_cursor()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        reached_target = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1]) <= 0.005
 
         return NeuromuscularServoingResult(
             target=target,
@@ -195,6 +213,6 @@ class NeuromuscularServoingController:
             duration_ms=elapsed_ms,
             total_waypoints=len(waypoints),
             fitts_index_of_difficulty=id_difficulty,
-            success=True,
+            success=reached_target,
             trajectory=waypoints,
         )

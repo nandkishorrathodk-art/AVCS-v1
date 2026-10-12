@@ -11,6 +11,7 @@ Features:
 from __future__ import annotations
 
 import enum
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ class ActionRequest:
     authorized: bool = False                               # Required true for HIGH_RISK actions
     target_window_title: Optional[str] = None
     timeout_ms: float = 1500.0
+    button: str = "left"
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,17 @@ class ActionSafetyController:
     ) -> Tuple[bool, Optional[str]]:
         """Checks target bounds, focus, and security authorizations."""
         tx, ty = request.target_coord
+        if request.action_type not in {"click", "double_click", "type", "press_key"}:
+            return False, f"Unsupported action type: {request.action_type}"
+        if request.button not in {"left", "right", "middle"}:
+            return False, f"Unsupported mouse button: {request.button}"
+        if (
+            isinstance(request.timeout_ms, bool)
+            or not isinstance(request.timeout_ms, (int, float))
+            or not math.isfinite(request.timeout_ms)
+            or request.timeout_ms <= 0
+        ):
+            return False, f"timeout_ms must be a positive finite number: {request.timeout_ms}"
         if not (0.0 <= tx <= 1.0 and 0.0 <= ty <= 1.0):
             return False, f"Target coordinate ({tx:.3f}, {ty:.3f}) out of bounds [0, 1]."
 
@@ -137,6 +150,28 @@ class ActionBroker:
     def execute(self, request: ActionRequest) -> ActionResult:
         """Executes a bounded action request through the state machine."""
         t0 = time.perf_counter()
+        if (
+            isinstance(request.timeout_ms, bool)
+            or not isinstance(request.timeout_ms, (int, float))
+            or not math.isfinite(request.timeout_ms)
+            or request.timeout_ms <= 0
+        ):
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.BLOCKED,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                evidence=(
+                    "timeout_ms must be a positive finite number: "
+                    f"{request.timeout_ms!r}"
+                ),
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="INVALID_TIMEOUT",
+            )
+        deadline = t0 + request.timeout_ms / 1000.0
 
         # 1. Capture Pre-State
         try:
@@ -173,6 +208,21 @@ class ActionBroker:
                 error_category="PRECONDITION_BLOCKED",
             )
 
+        if time.perf_counter() >= deadline:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.FAILED,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence="Action deadline expired before input dispatch.",
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="TIMEOUT_BEFORE_DISPATCH",
+            )
+
         # 3. Dispatch Physical Input to OS
         tx, ty = request.target_coord
         dispatch_error: Optional[Exception] = None
@@ -196,9 +246,27 @@ class ActionBroker:
                 error_category="DISPATCH_FAILED",
             )
 
+        if time.perf_counter() >= deadline:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.AMBIGUOUS,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence=(
+                    "Input dispatch exceeded timeout_ms; the physical action may "
+                    "have occurred and was not replayed."
+                ),
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="TIMEOUT_AFTER_DISPATCH",
+            )
+
         # Allow settlement for UI animation
         if self.settle_delay_s > 0:
-            time.sleep(self.settle_delay_s)
+            time.sleep(min(self.settle_delay_s, max(0.0, deadline - time.perf_counter())))
 
         # 4. Capture Post-State & Verify Outcome
         try:
@@ -216,6 +284,24 @@ class ActionBroker:
                 photometric_delta=0.0,
                 recovery_attempts=0,
                 error_category="CAPTURE_ERROR",
+            )
+
+        if time.perf_counter() >= deadline:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.AMBIGUOUS,
+                action_type=request.action_type,
+                target_coord=request.target_coord,
+                elapsed_ms=elapsed,
+                evidence=(
+                    "Post-action observation completed after timeout_ms; outcome "
+                    "is ambiguous and the action was not replayed."
+                ),
+                optical_ripple_energy=0.0,
+                photometric_delta=0.0,
+                recovery_attempts=0,
+                error_category="TIMEOUT_AFTER_DISPATCH",
             )
 
         ripple_energy = self.verifier.calculate_local_ripple(request.target_coord, post_state.motion_field)
@@ -272,7 +358,10 @@ class ActionBroker:
         recovery_attempts = 1
         can_retry = False
         if status in (ActionStatus.FAILED, ActionStatus.AMBIGUOUS):
-            if request.action_class == ActionClass.IDEMPOTENT:
+            can_retry = request.action_type in {"click", "double_click"}
+            if not can_retry:
+                evidence_msg += " (Non-idempotent input is never replayed.)"
+            elif request.action_class == ActionClass.IDEMPOTENT:
                 can_retry = True
             elif request.action_class == ActionClass.CONDITIONALLY_REPEATABLE:
                 can_retry = (
@@ -281,15 +370,19 @@ class ActionBroker:
                 )
                 if not can_retry:
                     evidence_msg += " (Conditionally repeatable action: precondition validator did not pass on post-state)."
-            elif request.action_class == ActionClass.NON_IDEMPOTENT:
+            elif request.action_class in (ActionClass.NON_IDEMPOTENT, ActionClass.HIGH_RISK):
+                can_retry = False
                 evidence_msg += " (Non-idempotent action: blind replay blocked by safety controller)."
-            elif request.action_class == ActionClass.HIGH_RISK:
-                evidence_msg += " (High-risk action: blind replay blocked by safety controller)."
 
         if can_retry:
             # Interior Micro-Jitter Retry (Offset by 3px within interior hitbox)
             offsets = [(0.003, 0.003), (-0.003, -0.003)]
             for ox, oy in offsets:
+                remaining_s = deadline - time.perf_counter()
+                if remaining_s <= 0:
+                    status = ActionStatus.AMBIGUOUS
+                    evidence_msg = "Action deadline expired; no further input was dispatched."
+                    break
                 recovery_attempts += 1
                 rx = float(np.clip(tx + ox, 0.0, 1.0))
                 ry = float(np.clip(ty + oy, 0.0, 1.0))
@@ -297,8 +390,17 @@ class ActionBroker:
                     pre_retry = self.eye.observe()
                     self._dispatch_input(request, rx, ry)
                     if self.settle_delay_s > 0:
-                        time.sleep(self.settle_delay_s)
+                        time.sleep(
+                            min(self.settle_delay_s, max(0.0, deadline - time.perf_counter()))
+                        )
                     post_retry = self.eye.observe()
+                    if time.perf_counter() >= deadline:
+                        status = ActionStatus.AMBIGUOUS
+                        evidence_msg = (
+                            "Action deadline expired during recovery; outcome is "
+                            "ambiguous and no further inputs were dispatched."
+                        )
+                        break
                     retry_ripple = self.verifier.calculate_local_ripple((rx, ry), post_retry.motion_field)
                 except Exception:
                     break
@@ -340,19 +442,27 @@ class ActionBroker:
             self.driver.move_to_normalized(x, y)
         elif hasattr(self.driver, "move_to"):
             self.driver.move_to(x, y)
+        else:
+            raise RuntimeError("Cursor driver does not support pointer movement.")
 
         if request.action_type == "click":
-            self.driver.click(button="left")
+            self.driver.click(button=request.button)
         elif request.action_type == "double_click":
-            self.driver.double_click(button="left")
+            self.driver.double_click(button=request.button)
         elif request.action_type == "type":
             self.driver.click(button="left")
             time.sleep(0.02)
             if request.text_content and hasattr(self.driver, "type_text"):
                 self.driver.type_text(request.text_content)
+            elif request.text_content:
+                raise RuntimeError("Cursor driver does not support text entry.")
         elif request.action_type == "press_key":
             if request.text_content and hasattr(self.driver, "press_key"):
                 self.driver.press_key(request.text_content)
+            else:
+                raise RuntimeError("press_key action requires text_content and driver support.")
+        else:
+            raise RuntimeError(f"Unsupported action type: {request.action_type}")
 
         # Notify interactive capture source of simulated input event
         cap = getattr(self.eye, "source", None)

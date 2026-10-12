@@ -1,13 +1,16 @@
-"""AVCS 2.0M Scaled Cortical Visual Foundation Model Production Training Script.
+"""Synthetic-data smoke trainer for the experimental Cortex-2M architecture.
 
-Engineered for zero-compromise GPU training on Kaggle, Google Colab, or local workstations:
+This script trains only on procedurally rendered colored blocks. Its metrics are
+not evidence of real desktop grounding and its checkpoints are not production-ready.
+
+The script supports GPU training on Kaggle, Google Colab, or local workstations:
 - Multi-Task Optimization:
     1. Spatial Affordance Segmentation (24-class weighted BCE / Focal)
     2. Desktop Application Domain Classification (32-class Cross-Entropy)
     3. Natural Language Gaze Grounding (Spatial Gaussian MSE / DSNT)
 - Accelerated Mixed Precision (torch.amp) with NVIDIA Tensor Core utilization
 - Automatic Multi-GPU DataParallel scaling across Kaggle dual-T4 GPUs
-- Exports certified production checkpoints directly loadable into AVCS SDK
+- Exports experimental checkpoints with explicit synthetic-data provenance
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -37,7 +41,7 @@ def train_cortex_2m(
     lr: float = 5e-4,
     num_samples: int = 15000,
     val_samples: int = 2000,
-    output_dir: str = "runs/cortex_2m",
+    output_dir: str = "runs/synthetic_cortex_2m",
     use_amp: bool = True,
     device_str: Optional[str] = None,
 ) -> None:
@@ -54,13 +58,13 @@ def train_cortex_2m(
     gpu_name = torch.cuda.get_device_name(0) if num_gpus > 0 else "CPU"
 
     print("=" * 78)
-    print("      AVCS // 2.0M SCALED CORTICAL FOUNDATION PRODUCTION TRAINING       ")
+    print("      AVCS // EXPERIMENTAL SYNTHETIC-DATA SMOKE TRAINING                 ")
     print("=" * 78)
     print(f"Target Compute Device : {device.type.upper()} ({gpu_name})")
     print(f"Detected GPU Count    : {num_gpus}")
     print(f"Training Batch Size   : {batch_size}")
-    print(f"Training Dataset Size : {num_samples:,} screen interaction pairs")
-    print(f"Validation Set Size   : {val_samples:,} screen interaction pairs")
+    print(f"Synthetic Train Samples: {num_samples:,} procedural colored-block scenes")
+    print(f"Synthetic Val Samples  : {val_samples:,} procedural colored-block scenes")
     print(f"Total Epochs          : {epochs}")
     print(f"Mixed Precision (AMP) : {use_amp and device.type == 'cuda'}\n")
 
@@ -207,12 +211,16 @@ def train_cortex_2m(
                 "total_parameters": raw_model.total_parameters,
                 "universal_categories": UNIVERSAL_APP_CATEGORIES,
                 "universal_affordances": UNIVERSAL_AFFORDANCE_CLASSES,
+                "training_data_provenance": "procedural_synthetic_blocks",
+                "is_production_ready": False,
+                "metric_scope": "synthetic_validation_only",
             }, best_ckpt_path)
             print(f"  -> [SAVED BEST CHECKPOINT] Val Loss improved to {best_val_loss:.4f} -> {best_ckpt_path.name}")
 
     total_training_sec = time.perf_counter() - start_train_time
     print("\n" + "=" * 78)
-    print(f"TRAINING COMPLETED in {total_training_sec / 60.0:.2f} minutes!")
+    print(f"SYNTHETIC SMOKE TRAINING COMPLETED in {total_training_sec / 60.0:.2f} minutes.")
+    print("This result does not certify real desktop grounding or GUI task completion.")
     print(f"Best Validation Loss: {best_val_loss:.4f}")
 
     # Export history metadata JSON
@@ -222,6 +230,9 @@ def train_cortex_2m(
             "gpu_name": gpu_name,
             "total_training_seconds": total_training_sec,
             "best_val_loss": best_val_loss,
+            "training_data_provenance": "procedural_synthetic_blocks",
+            "is_production_ready": False,
+            "metric_scope": "synthetic_validation_only",
             "history": history,
         }, f, indent=2)
 
@@ -229,17 +240,38 @@ def train_cortex_2m(
     print("=" * 78)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AVCS 2.0M Production GPU Training Script")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Experimental Cortex-2M synthetic-data smoke trainer"
+    )
+    parser.add_argument(
+        "--synthetic-data-only",
+        action="store_true",
+        help="Acknowledge that this trains on synthetic colored blocks, not desktop demos",
+    )
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size per step")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument("--samples", type=int, default=15000, help="Training dataset sample count")
     parser.add_argument("--val-samples", type=int, default=2000, help="Validation sample count")
-    parser.add_argument("--output-dir", type=str, default="runs/cortex_2m", help="Directory to save checkpoints")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="runs/synthetic_cortex_2m",
+        help="Directory for experimental synthetic-data checkpoints",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU training")
-    args = parser.parse_args()
+    return parser
 
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.synthetic_data_only:
+        parser.error(
+            "this trainer uses synthetic colored blocks only; pass "
+            "--synthetic-data-only to run a smoke experiment"
+        )
     train_cortex_2m(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -250,3 +282,7 @@ if __name__ == "__main__":
         use_amp=True,
         device_str="cpu" if args.cpu else None,
     )
+
+
+if __name__ == "__main__":
+    main()

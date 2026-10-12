@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "avcs-sdk"
 version = "0.2.0"
-description = "Artificial Visual Cortex for Screens (AVCS): Non-generative, real-time biological visual perception foundation engine and SDK for screen AI agents."
+description = "Experimental visual perception and temporal modeling tools for screen-based AI research."
 readme = "README.md"
 authors = [
-    { name = "PARTH LAB", email = "research@praxisneural.ai" },
+    { name = "Parth Labs", email = "contact@parthlabs.in" },
 ]
 license = "Apache-2.0"
 classifiers = [
@@ -66,6 +66,9 @@ avcs-gui = "avcs.gui:launch_gui"
 avcs-pilot = "avcs_pilot.runner:main"
 avcs-m7-validate = "avcs_m7_validation.runner:main"
 avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
+avcs-record-demo = "avcs.training.demo_recorder:main"
+avcs-train-grounder = "avcs.training.train_grounder:main"
+avcs-evaluate-grounder = "avcs.training.evaluate_grounder:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

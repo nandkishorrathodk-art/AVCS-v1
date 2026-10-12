@@ -1,7 +1,7 @@
 # AVCS Milestone 7: Cross-Application Generalization & Release Candidate Validation Report
 
 **Document ID:** `AVCS-REP-M7-001`  
-**Status:** COMPLETE / VERIFIED  
+**Status:** RETRACTED — NOT AN AUTONOMOUS GUI VALIDATION
 **Package:** `avcs-sdk` (v0.2.0), `avcs_m7_validation` (v0.1.0)  
 **Evaluation Target:** [Artificial Visual Cortex for Screens (AVCS)](file:///c:/Users/nandk/Documents/antigravity/splendid-babbage)  
 **Host Architecture:** Windows x64 (Build 10.0.26200), 4 CPU Cores, 0 GPUs (Strict CPU execution)  
@@ -10,6 +10,14 @@
 ---
 
 ## 1. Executive Summary
+
+> **Retraction:** The 360 results below came from a synthetic capture adapter
+> and virtual cursor, not the registered live application harnesses. Each mode
+> selected a fixed action and center coordinate; the task prompt did not drive
+> action selection. The oracle evaluated fixtures independently, but that does
+> not convert fixture success into an AVCS task success. The reported rates,
+> latency, and release-candidate decision are not valid evidence of GUI
+> capability and must not be used as certification claims.
 
 Milestone 7 delivers the **Cross-Application Generalization and Release Candidate Validation Suite** for AVCS. It expands beyond single-application workflows into a diverse 12-scenario matrix covering native Win32/UWP controls, display geometry scaling, canvas applications (no DOM), legacy forms, mixed accessibility, simulated remote desktop, and dynamic UI overlays.
 

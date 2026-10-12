@@ -1,7 +1,7 @@
 # AVCS Milestone 6: Controlled Production Pilot Report
 
 **Document ID:** `AVCS-REP-M6-001`  
-**Status:** COMPLETE / VERIFIED  
+**Status:** RETRACTED — NOT AN AUTONOMOUS GUI VALIDATION
 **Package:** `avcs-sdk` (v0.2.0), `avcs_pilot` (v0.1.0)  
 **Evaluation Target:** [Artificial Visual Cortex for Screens (AVCS)](file:///c:/Users/nandk/Documents/antigravity/splendid-babbage)  
 **Host Architecture:** Windows x64 (Build 10.0.26200), 4 CPU Cores, 0 GPUs (Strict CPU execution)  
@@ -10,6 +10,14 @@
 ---
 
 ## 1. Executive Summary
+
+> **Retraction:** The results below are historical output from a scripted adapter and
+> are not evidence of AVCS operating Notepad or completing a GUI task. The adapter
+> parsed workflow text, issued an unrelated SDK action, then used Python file I/O
+> (`Path.write_text`) to create, append, or replace the evaluated files. Its
+> reported success rates and latency therefore do not measure model reasoning,
+> visible cursor actions, or application postconditions. Do not use this report
+> for release, product, or model-capability claims.
 
 Milestone 6 transitions AVCS from isolated unit/benchmark testing into a **controlled production pilot harness**. It validates low-risk, end-to-end task completion across 300 randomized trials spanning three distinct text-editing workflows under strict zero-oracle isolation.
 

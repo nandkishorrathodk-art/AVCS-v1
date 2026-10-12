@@ -82,7 +82,7 @@ class AVCSDesktopApp:
 
         title_lbl = tk.Label(
             header,
-            text="PRAXIS NEURAL // AVCS DESKTOP CORTEX HUD",
+            text="PARTH LABS // AVCS DESKTOP CORTEX HUD",
             font=("Segoe UI", 12, "bold"),
             fg="#58a6ff",
             bg="#161b22",

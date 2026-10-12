@@ -79,6 +79,32 @@ def test_neuromuscular_servo_execution():
     assert res.fitts_index_of_difficulty > 0.0
 
 
+def test_servoing_does_not_report_success_for_no_op_motion_driver():
+    class NoOpDriver:
+        def __init__(self):
+            self.position = (0.2, 0.2)
+
+        def get_position_normalized(self):
+            return self.position
+
+        def move_to_normalized(self, x, y):
+            pass
+
+    driver = NoOpDriver()
+    result = NeuromuscularServoingController(driver=driver).servo_to((0.8, 0.8))
+    assert result.success is False
+    assert result.final_cursor == (0.2, 0.2)
+
+
+def test_servoing_rejects_drivers_without_position_readback():
+    class MoveOnlyDriver:
+        def move_to_normalized(self, x, y):
+            pass
+
+    with pytest.raises(RuntimeError, match="position readback"):
+        NeuromuscularServoingController(driver=MoveOnlyDriver()).servo_to((0.8, 0.8))
+
+
 def test_local_optical_ripple_energy():
     """Verify VisualRippleVerifier calculates kinetic energy around the target region."""
     eye = HumanEye(source=SyntheticScreen())
@@ -123,6 +149,70 @@ def test_visual_verification_and_self_healing_ladder():
     assert res.elapsed_ms > 0.0
 
 
+def test_verifier_preserves_right_click_button():
+    eye = HumanEye(source=SyntheticScreen())
+    driver = VirtualCursorDriver()
+    clicks = []
+    original_click = driver.click
+
+    def record_click(button="left"):
+        clicks.append(button)
+        return original_click(button=button)
+
+    driver.click = record_click
+    verifier = VisualRippleVerifier(eye=eye, driver=driver)
+    verifier.verify_action = lambda *args, **kwargs: VerificationResult(
+        status=VerificationStatus.RETRY_MICRO_JITTER,
+        action_name="click",
+        target_coord=(0.4, 0.4),
+        optical_ripple_energy=0.0,
+        surprise_pulse=0.0,
+        state_transition_detected=False,
+        causal_summary="no response",
+        recovery_attempt=1,
+        elapsed_ms=0.1,
+    )
+
+    verifier.execute_and_verify(
+        action_type="click",
+        target=(0.4, 0.4),
+        max_recovery_tier=1,
+        button="right",
+    )
+    assert clicks == ["right"]
+
+
+def test_verifier_never_replays_typed_text_or_sends_enter(monkeypatch):
+    eye = HumanEye(source=SyntheticScreen())
+    driver = VirtualCursorDriver()
+    typed = []
+    keys = []
+    driver.type_text = typed.append
+    driver.press_key = keys.append
+    verifier = VisualRippleVerifier(eye=eye, driver=driver)
+    verifier.verify_action = lambda *args, **kwargs: VerificationResult(
+        status=VerificationStatus.RETRY_MICRO_JITTER,
+        action_name="type",
+        target_coord=(0.3, 0.3),
+        optical_ripple_energy=0.0,
+        surprise_pulse=0.0,
+        state_transition_detected=False,
+        causal_summary="no response",
+        recovery_attempt=1,
+        elapsed_ms=0.1,
+    )
+
+    result = verifier.execute_and_verify(
+        action_type="type",
+        target=(0.3, 0.3),
+        text_content="one-time text",
+        max_recovery_tier=5,
+    )
+    assert result.status == VerificationStatus.ESCALATE_BLOCKED
+    assert typed == ["one-time text"]
+    assert keys == []
+
+
 def test_client_closed_loop_motor_and_verification():
     """Verify HumanEyeClient move_to, click_and_verify, and type_and_verify integration."""
     client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
@@ -142,3 +232,29 @@ def test_client_closed_loop_motor_and_verification():
         type_res = client.type_and_verify(target=(0.3, 0.3), text="hello world", clear_first=False)
         assert isinstance(type_res, VerificationResult)
         assert "type" in type_res.action_name
+
+
+def test_sdk_forwards_requested_mouse_button():
+    client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
+    captured = {}
+
+    def capture_action(**kwargs):
+        captured.update(kwargs)
+        return VerificationResult(
+            status=VerificationStatus.VERIFIED,
+            action_name="click",
+            target_coord=(0.4, 0.4),
+            optical_ripple_energy=0.0,
+            surprise_pulse=0.0,
+            state_transition_detected=True,
+            causal_summary="verified",
+            recovery_attempt=1,
+            elapsed_ms=0.1,
+        )
+
+    client.verifier.execute_and_verify = capture_action
+    try:
+        client.click_and_verify(target=(0.4, 0.4), button="right")
+        assert captured["button"] == "right"
+    finally:
+        client.close()

@@ -9,6 +9,8 @@ Validates:
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from avcs.action_broker import (
@@ -164,3 +166,90 @@ def test_action_broker_semantic_postcondition_evaluation():
     assert res_fail.status in (ActionStatus.AMBIGUOUS, ActionStatus.FAILED)
     assert not res_fail.is_confirmed
 
+
+def test_action_broker_preserves_mouse_button_and_never_retries_typing():
+    eye = HumanEye(source=SyntheticScreen())
+    driver = VirtualCursorDriver()
+    clicks = []
+    original_click = driver.click
+
+    def record_click(button="left"):
+        clicks.append(button)
+        return original_click(button=button)
+
+    driver.click = record_click
+    broker = ActionBroker(eye=eye, driver=driver, settle_delay_s=0)
+    result = broker.execute(
+        ActionRequest(
+            action_type="click",
+            target_coord=(0.5, 0.5),
+            button="right",
+            expected_postcondition=lambda before, after: True,
+        )
+    )
+    assert result.status == ActionStatus.CONFIRMED
+    assert clicks == ["right"]
+
+    typed = []
+    driver.type_text = typed.append
+    broker.verifier.calculate_local_ripple = lambda *args: 0.0
+    type_result = broker.execute(
+        ActionRequest(
+            action_type="type",
+            target_coord=(0.5, 0.5),
+            text_content="do not duplicate",
+            action_class=ActionClass.IDEMPOTENT,
+            timeout_ms=2000,
+        )
+    )
+    assert type_result.recovery_attempts == 1
+    assert typed == ["do not duplicate"]
+
+
+def test_action_broker_timeout_before_dispatch_does_not_click():
+    eye = HumanEye(source=SyntheticScreen())
+    driver = VirtualCursorDriver()
+    clicks = []
+    driver.click = lambda button="left": clicks.append(button)
+    broker = ActionBroker(eye=eye, driver=driver, settle_delay_s=0)
+
+    def slow_precondition(_state):
+        time.sleep(0.02)
+        return True
+
+    result = broker.execute(
+        ActionRequest(
+            action_type="click",
+            target_coord=(0.5, 0.5),
+            precondition_validator=slow_precondition,
+            timeout_ms=1,
+        )
+    )
+    assert result.status == ActionStatus.FAILED
+    assert result.error_category == "TIMEOUT_BEFORE_DISPATCH"
+    assert clicks == []
+
+
+def test_action_broker_reports_ambiguous_when_dispatch_exceeds_timeout(monkeypatch):
+    eye = HumanEye(source=SyntheticScreen())
+    state = eye.observe()
+    monkeypatch.setattr(eye, "observe", lambda: state)
+    driver = VirtualCursorDriver()
+    clicks = []
+
+    def slow_click(button="left"):
+        clicks.append(button)
+        time.sleep(0.02)
+
+    driver.click = slow_click
+    broker = ActionBroker(eye=eye, driver=driver, settle_delay_s=0)
+    result = broker.execute(
+        ActionRequest(
+            action_type="click",
+            target_coord=(0.5, 0.5),
+            timeout_ms=1,
+        )
+    )
+    assert result.status == ActionStatus.AMBIGUOUS
+    assert result.error_category == "TIMEOUT_AFTER_DISPATCH"
+    assert clicks == ["left"]
