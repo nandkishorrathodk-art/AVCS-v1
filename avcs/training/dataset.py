@@ -1,8 +1,7 @@
-"""AVCS Universal Desktop Screen Dataset Generator for 2.0M Cortical Training.
+"""Procedural synthetic fixture dataset for Cortex-2M smoke experiments.
 
-Generates realistic procedural desktop application screen pairs across all 32 application
-categories and 24 affordance geometries with ground-truth spatial heatmaps and linguistic queries.
-Designed for high-throughput GPU training on Kaggle / Colab without external data dependencies.
+This dataset renders colored rectangles, not real desktop screenshots, and its
+generated labels do not measure grounding on actual applications.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from avcs.cortex_2m import UNIVERSAL_AFFORDANCE_CLASSES, UNIVERSAL_APP_CATEGORIE
 
 
 class UniversalScreenDataset(Dataset):
-    """Synthetic & procedural multi-task dataset for training the 2.40M Cortical Model."""
+    """Synthetic colored-block dataset; unsuitable as real desktop training data."""
 
     def __init__(
         self,

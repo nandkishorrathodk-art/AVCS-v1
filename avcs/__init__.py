@@ -115,7 +115,7 @@ from avcs.cortex_2m import (
 )
 
 __version__ = "0.2.0"
-__author__ = "Praxis Neural"
+__author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 
 __all__ = [
@@ -228,4 +228,3 @@ def __getattr__(name: str):
         from avcs.gui import AVCSDesktopApp
         return AVCSDesktopApp
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

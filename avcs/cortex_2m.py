@@ -1,24 +1,24 @@
-"""AVCS 2.0 Million Parameter Scaled Visual Cortex Foundation Model (Cortex-2M).
+"""Experimental compact visual backbone and spatial heads for AVCS.
 
-Scales the non-generative biological visual foundation architecture to ~2.40M parameters:
-- Universal Desktop Application Coverage: 32 rich categories (IDE, Terminal, CAD, Canvas, Office, Media, OS)
-- Universal 24-Class Spatial Affordance Geometry (Buttons, Inputs, Code Lines, Cells, Tabs, Handles, Menus)
-- 256-Dimensional Metric Visual Embeddings for Persistent Element Re-ID across scrolling and window switches
-- Zero-Shot Natural Language Gaze Grounding via linguistic cross-attention (<4ms)
-- Maintains strict real-time biological constraints with static-screen early exit (<0.15ms on idle screens)
+The checked-in checkpoint was trained on procedurally generated colored blocks
+and has not demonstrated general desktop grounding. This module does not provide
+a task policy or prove reliable mouse/keyboard operation.
 """
 from __future__ import annotations
 
 import collections
 import math
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
 
 from avcs.human_eye import (
     ConvBNAct,
@@ -28,7 +28,7 @@ from avcs.human_eye import (
     MovingObject,
     SmoothPursuitTracker,
 )
-from avcs.memory import VisualMemoryManager, UIMLTree, VisualDiff
+from avcs.memory import UIMLTree, VisualDiff, VisualMemoryManager
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 
 # Universal 32 Desktop Application Categories (Beyond Web Browsers)
@@ -130,11 +130,18 @@ class CorticalBackbone2M(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, 3, 128, 128) -> (B, 256, 8, 8)."""
+        return self.forward_pyramid(x)[-1]
+
+    def forward_pyramid(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Return multi-scale activations at 1/2, 1/4, 1/8, and 1/16 resolution."""
         x = self.stem(x)
+        stem = x
         x = self.stage1(x)
+        stage1 = x
         x = self.stage2(x)
+        stage2 = x
         x = self.stage3(x)
-        return self.proj(x)
+        return [stem, stage1, stage2, x, self.proj(x)]
 
 
 class AffordanceHead2M(nn.Module):
@@ -241,12 +248,13 @@ class VentralStream2M(nn.Module):
 
 
 class LanguageGrounder2M(nn.Module):
-    """Cross-attention linguistic modulation for zero-shot natural language targeting (~165k parameters)."""
+    """Legacy grounding head for synthetic 128-dimensional hashed text features."""
 
-    def __init__(self, visual_dim: int = 256, text_dim: int = 256) -> None:
+    def __init__(self, visual_dim: int = 256, text_dim: int = 128) -> None:
         super().__init__()
+        self.text_dim = text_dim
         self.text_proj = nn.Sequential(
-            nn.Linear(128, 256),
+            nn.Linear(text_dim, 256),
             nn.GELU(),
             nn.Linear(256, visual_dim),
         )
@@ -254,14 +262,24 @@ class LanguageGrounder2M(nn.Module):
         self.heatmap = nn.Conv2d(visual_dim, 1, kernel_size=1)
 
     def forward(self, feat: torch.Tensor, text_emb: torch.Tensor) -> torch.Tensor:
-        """(B, 256, H, W) x (B, 128) -> (B, 1, H, W) spatial relevance heatmap."""
+        """Map a matching batch of text embeddings to spatial relevance."""
+        if text_emb.ndim != 2 or text_emb.shape[1] != self.text_dim:
+            raise ValueError(
+                f"text_emb must have shape (batch, {self.text_dim}); "
+                f"got {tuple(text_emb.shape)}"
+            )
+        if text_emb.shape[0] != feat.shape[0]:
+            raise ValueError(
+                f"text_emb batch ({text_emb.shape[0]}) must match "
+                f"feature batch ({feat.shape[0]})"
+            )
         t = self.text_proj(text_emb).unsqueeze(-1).unsqueeze(-1)
         modulated = self.cross_attn(feat * t)
         return self.heatmap(modulated)
 
 
 class UnifiedCortex2M(nn.Module):
-    """The Complete 2.40 Million Parameter Scaled Visual Cortex Model with Lateral Cross-Stream Flow."""
+    """Legacy experimental multi-head model; not a complete computer-use model."""
 
     def __init__(self, feature_dim: int = 256) -> None:
         super().__init__()
@@ -269,7 +287,8 @@ class UnifiedCortex2M(nn.Module):
         self.backbone = CorticalBackbone2M(in_channels=3, feature_dim=feature_dim)
         self.affordance = AffordanceHead2M(in_dim=feature_dim)
         self.ventral = VentralStream2M(in_dim=feature_dim, latent_dim=feature_dim)
-        self.grounder = LanguageGrounder2M(visual_dim=feature_dim, text_dim=feature_dim)
+        # The training dataset emits normalized 128-dimensional text features.
+        self.grounder = LanguageGrounder2M(visual_dim=feature_dim, text_dim=128)
 
     @property
     def total_parameters(self) -> int:
@@ -314,6 +333,8 @@ class HumanEye2M:
         device: str = "cpu",
         input_size: Tuple[int, int] = (128, 128),
         threaded_capture: bool = True,
+        weights_path: Optional[str] = None,
+        require_weights: bool = False,
     ) -> None:
         self.device = torch.device(device)
         self.input_size = input_size
@@ -339,12 +360,47 @@ class HumanEye2M:
         if str(self.device) == "cpu":
             self.cortex = self.cortex.to(memory_format=torch.channels_last)
 
+        workspace_root = Path(__file__).resolve().parent.parent
+        configured_path = weights_path or os.environ.get("AVCS_CORTEX_2M_WEIGHTS")
+        candidates = (
+            [Path(configured_path).expanduser()]
+            if configured_path
+            else [workspace_root / "runs" / "cortex_2m" / "cortex_2m_best.pt"]
+        )
+        checkpoint_path = next((path for path in candidates if path.is_file()), None)
+        self.weights_loaded = False
+        self.weights_path: Optional[Path] = None
+        if checkpoint_path is not None:
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                state = (
+                    checkpoint["model_state_dict"]
+                    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
+                    else checkpoint
+                )
+                if not isinstance(state, dict):
+                    raise ValueError("checkpoint must contain a model state dictionary")
+                self.cortex.load_state_dict(state, strict=True)
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                raise RuntimeError(
+                    f"Failed to load complete Cortex-2M checkpoint "
+                    f"'{checkpoint_path}': {exc}"
+                ) from exc
+            self.weights_loaded = True
+            self.weights_path = checkpoint_path.resolve()
+        elif require_weights:
+            requested = configured_path or str(candidates[0])
+            raise FileNotFoundError(
+                f"Cortex-2M weights are required but were not found: {requested}"
+            )
+
         self.pursuit = SmoothPursuitTracker()
         self.memory = VisualMemoryManager()
 
         self.frame_count: int = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=100)
         self._last_state: Optional[Any] = None
+        self._cached_feat: Optional[torch.Tensor] = None
         self._cached_affordances: List[Tuple[float, float, str, float]] = []
         self._cached_cat_name: str = "desktop_canvas"
         self._cached_cat_conf: float = 1.0
@@ -353,9 +409,43 @@ class HumanEye2M:
     def total_parameters(self) -> int:
         return self.cortex.total_parameters
 
-    def perceive(self, *, frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
-        """Runs a continuous visual perception tick on the screen."""
+    def foveal_crop(
+        self,
+        raw_frame: np.ndarray,
+        center_norm: Tuple[float, float],
+        crop_size_px: int = 256,
+        target_size: Tuple[int, int] = (96, 96),
+    ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        """Extracts an unscaled native-resolution patch around gaze fixation for high-acuity foveal inspection.
+
+        Returns:
+            (resized_crop_rgb, (x0, y0, x1, y1) in physical screen coordinates)
+        """
+        H, W = raw_frame.shape[:2]
+        cx = int(center_norm[0] * W)
+        cy = int(center_norm[1] * H)
+        r = crop_size_px // 2
+        x0 = max(0, min(W - crop_size_px, cx - r))
+        y0 = max(0, min(H - crop_size_px, cy - r))
+        x1 = min(W, x0 + crop_size_px)
+        y1 = min(H, y0 + crop_size_px)
+
+        crop = raw_frame[y0:y1, x0:x1]
+        pil_crop = Image.fromarray(crop).resize(target_size, resample=Image.BILINEAR)
+        return np.array(pil_crop), (x0, y0, x1, y1)
+
+    def perceive(
+        self,
+        text_emb: Optional[torch.Tensor] = None,
+        *,
+        frame: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """Perceive the latest frame; semantic outputs require a complete checkpoint."""
         t_start = time.perf_counter()
+        if text_emb is not None:
+            if not isinstance(text_emb, torch.Tensor):
+                raise TypeError("text_emb must be a torch.Tensor.")
+            text_emb = text_emb.to(device=self.device, dtype=torch.float32)
         raw_frame = self.source.grab() if frame is None else frame
         if (
             not isinstance(raw_frame, np.ndarray)
@@ -370,9 +460,18 @@ class HumanEye2M:
             self.motion_engine.process(raw_frame)
         )
 
-        # 2. Static Screen Early Exit (<0.15ms on static screen)
+        # 2. Static Screen Early Exit (<0.15ms on idle screens)
         is_static = (mean_motion < 0.005) and (self.frame_count > 0)
-        if is_static and self._cached_affordances:
+        if is_static:
+            grounding_map = None
+            if text_emb is not None:
+                if not self.weights_loaded or self._cached_feat is None:
+                    raise RuntimeError(
+                        "Cannot produce a grounded prediction without a complete "
+                        "Cortex-2M checkpoint."
+                    )
+                with torch.inference_mode():
+                    grounding_map = self.cortex.grounder(self._cached_feat, text_emb)
             elapsed_ms = (time.perf_counter() - t_start) * 1000.0
             self._latencies.append(elapsed_ms)
             self.frame_count += 1
@@ -387,30 +486,44 @@ class HumanEye2M:
                 "affordances": self._cached_affordances,
                 "moving_objects": moving_objects,
                 "parameters": self.total_parameters,
+                "weights_loaded": self.weights_loaded,
+                "weights_path": str(self.weights_path) if self.weights_path else None,
+                "grounding_map": grounding_map,
             }
 
-        # 3. Neural Forward Pass (2.4M Parameters)
-        # Fast downsample to input_size
-        H, W = raw_frame.shape[:2]
-        sy = max(1, H // self.input_size[0])
-        sx = max(1, W // self.input_size[1])
-        sub = raw_frame[::sy, ::sx][:self.input_size[0], :self.input_size[1]]
-        arr = sub.astype(np.float32).transpose(2, 0, 1) / 255.0
-        tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
-        if str(self.device) == "cpu":
-            tensor = tensor.to(memory_format=torch.channels_last)
-
-        with torch.inference_mode():
-            out = self.cortex(tensor)
-            feat = out["feat"]
-            cat_logits = out["category_logits"][0]
-            cat_idx = int(torch.argmax(cat_logits))
-            cat_conf = float(torch.softmax(cat_logits, dim=0)[cat_idx])
-            cat_name = UNIVERSAL_APP_CATEGORIES[cat_idx]
-
-            affordances = self.cortex.affordance.find_hotspots(
-                feat, top_k=5, logits=out["affordance_logits"]
+        grounding_map = None
+        if self.weights_loaded:
+            # Area resize keeps the entire desktop, including taskbars and edges.
+            pil_frame = Image.fromarray(raw_frame).resize(
+                (self.input_size[1], self.input_size[0]), resample=Image.BILINEAR
             )
+            arr = np.array(pil_frame, dtype=np.float32).transpose(2, 0, 1) / 255.0
+            tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
+            if str(self.device) == "cpu":
+                tensor = tensor.to(memory_format=torch.channels_last)
+
+            with torch.inference_mode():
+                out = self.cortex(tensor, text_emb=text_emb)
+                feat = out["feat"]
+                cat_logits = out["category_logits"][0]
+                cat_idx = int(torch.argmax(cat_logits))
+                cat_conf = float(torch.softmax(cat_logits, dim=0)[cat_idx])
+                cat_name = UNIVERSAL_APP_CATEGORIES[cat_idx]
+                affordances = self.cortex.affordance.find_hotspots(
+                    feat, top_k=5, logits=out["affordance_logits"]
+                )
+                grounding_map = out.get("grounding_map")
+            self._cached_feat = feat
+        else:
+            if text_emb is not None:
+                raise RuntimeError(
+                    "Cannot produce a grounded prediction without a complete "
+                    "Cortex-2M checkpoint."
+                )
+            feat = None
+            cat_name = "unknown_window"
+            cat_conf = 0.0
+            affordances = []
 
         self._cached_affordances = affordances
         self._cached_cat_name = cat_name
@@ -431,6 +544,9 @@ class HumanEye2M:
             "affordances": affordances,
             "moving_objects": moving_objects,
             "parameters": self.total_parameters,
+            "weights_loaded": self.weights_loaded,
+            "weights_path": str(self.weights_path) if self.weights_path else None,
+            "grounding_map": grounding_map,
         }
 
     def close(self) -> None:

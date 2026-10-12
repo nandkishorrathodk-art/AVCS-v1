@@ -1,17 +1,15 @@
 """Tests for the concrete RepositoryPilotAdapter."""
-import asyncio
 from pathlib import Path
 import tempfile
 import pytest
 
-from avcs_pilot.contracts import ActionStatus, PilotScenario, PublicTask
-from avcs_pilot.evaluator import verify_exact_text
-from avcs_pilot.repository_adapter import RepositoryPilotAdapter, create_adapter
+from avcs_pilot.contracts import ActionStatus, PublicTask
+from avcs_pilot.repository_adapter import create_adapter
 from avcs_pilot.runner import load_scenarios, run_pilot
 
 
 @pytest.mark.asyncio
-async def test_repository_adapter_create_save():
+async def test_repository_adapter_refuses_to_claim_create_save():
     adapter = create_adapter()
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
@@ -35,18 +33,15 @@ async def test_repository_adapter_create_save():
         )
         result = await adapter.execute(task)
 
-        assert result.status == ActionStatus.CONFIRMED
-        assert result.action_count <= 30
-        assert out_file.is_file()
-        assert out_file.read_text(encoding="utf-8") == (
-            "AVCS CONTROLLED PILOT\n"
-            "Workflow: create-save\n"
-            "Run marker: AVCS-PILOT-ALPHA\n"
-        )
+        assert result.status == ActionStatus.FAILED
+        assert result.action_count == 0
+        assert result.diagnostics["error_code"] == "AUTONOMOUS_GUI_WORKER_UNAVAILABLE"
+        assert result.diagnostics["certification_eligible"] is False
+        assert not out_file.exists()
 
 
 @pytest.mark.asyncio
-async def test_repository_adapter_append():
+async def test_repository_adapter_refuses_to_claim_append():
     adapter = create_adapter()
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
@@ -69,17 +64,17 @@ async def test_repository_adapter_append():
         )
         result = await adapter.execute(task)
 
-        assert result.status == ActionStatus.CONFIRMED
-        assert result.action_count <= 35
+        assert result.status == ActionStatus.FAILED
+        assert result.action_count == 0
+        assert result.diagnostics["error_code"] == "AUTONOMOUS_GUI_WORKER_UNAVAILABLE"
         assert fixture.read_text(encoding="utf-8") == (
             "AVCS PILOT FIXTURE\n"
             "Keep this first line unchanged.\n"
-            "APPENDED-BY-AVCS-PILOT\n"
         )
 
 
 @pytest.mark.asyncio
-async def test_repository_adapter_find_replace():
+async def test_repository_adapter_refuses_to_claim_find_replace():
     adapter = create_adapter()
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
@@ -108,13 +103,14 @@ async def test_repository_adapter_find_replace():
         )
         result = await adapter.execute(task)
 
-        assert result.status == ActionStatus.CONFIRMED
-        assert result.action_count <= 35
+        assert result.status == ActionStatus.FAILED
+        assert result.action_count == 0
+        assert result.diagnostics["error_code"] == "AUTONOMOUS_GUI_WORKER_UNAVAILABLE"
         assert fixture.read_text(encoding="utf-8") == (
             "AVCS FIND REPLACE FIXTURE\n"
-            "Token=PILOT-NEW-7F31\n"
+            "Token=PILOT-OLD-7F31\n"
             "Do not change this line.\n"
-            "SecondToken=PILOT-NEW-7F31\n"
+            "SecondToken=PILOT-OLD-7F31\n"
         )
 
 
@@ -155,7 +151,7 @@ async def test_repository_adapter_missing_fixture_fails():
         )
         result = await adapter.execute(task)
         assert result.status == ActionStatus.FAILED
-        assert result.diagnostics.get("error_code") == "FIXTURE_MISSING"
+        assert result.diagnostics.get("error_code") == "AUTONOMOUS_GUI_WORKER_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -174,8 +170,7 @@ async def test_repository_adapter_end_to_end_pilot():
         )
 
         assert summary["trials"] == 6
-        assert summary["verified_successes"] == 6
+        assert summary["verified_successes"] == 0
         assert summary["false_confirmations"] == 0
-        assert summary["acceptance_gates"]["verified_task_completion"]["pass"] is True
-        assert summary["computational_go"] is True
-
+        assert summary["acceptance_gates"]["verified_task_completion"]["pass"] is False
+        assert summary["computational_go"] is False

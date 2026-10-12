@@ -1,13 +1,10 @@
 # AVCS Developer SDK Quickstart Guide (`avcs-sdk`)
 
 [![PyPI version](https://img.shields.io/badge/pypi-0.2.0-blue.svg)](https://pypi.org/project/avcs-sdk/)
-[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-green.svg)](https://github.com/Praxis-Neural/AVCS)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-26%20passed-brightgreen.svg)](tests/)
+[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-green.svg)](https://github.com/Parth-labs-in/AVCS)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 
-**AVCS (Artificial Visual Cortex for Screens)** is a real-time, non-generative biological visual perception foundation engine and Developer SDK for screen AI agents, autonomous RPA, and computer-use automation.
-
-Instead of sending 2-megabyte desktop screenshots every few seconds to a remote cloud LLM at \$0.03 per image, AVCS runs locally at **30+ FPS ($\le 12\text{ ms}$ GPU / $\le 45\text{ ms}$ CPU)**, giving AI agents human-like continuous ocular perception.
+**AVCS (Artificial Visual Cortex System)** is an experimental Python research SDK and framework for screen visual perception, temporal visual modeling, and closed-loop motor experiments. It includes modular neural model architectures, in-memory desktop capture, and empirical evaluation harnesses.
 
 ---
 
@@ -232,5 +229,4 @@ class ScreenEye:
 ## 8. License
 
 Distributed under the **Apache-2.0 License**. See [LICENSE](LICENSE) for details.  
-Built with pride by the **Praxis Neural** research team.
-
+Built by **Parth Labs**.

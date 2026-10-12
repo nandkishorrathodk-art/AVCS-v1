@@ -6,13 +6,13 @@ import pytest
 import torch
 
 from avcs.cortex_2m import (
+    UNIVERSAL_AFFORDANCE_CLASSES,
+    UNIVERSAL_APP_CATEGORIES,
     AffordanceHead2M,
     CorticalBackbone2M,
     HumanEye2M,
     LanguageGrounder2M,
     UnifiedCortex2M,
-    UNIVERSAL_AFFORDANCE_CLASSES,
-    UNIVERSAL_APP_CATEGORIES,
     VentralStream2M,
 )
 from forge.vision.capture import SyntheticScreen
@@ -80,6 +80,108 @@ def test_cortex_2m_forward_pass():
     assert out["grounding_map"].shape == (2, 1, 8, 8)
 
 
+def test_language_grounder_uses_training_embedding_dimension():
+    grounder = LanguageGrounder2M(visual_dim=256, text_dim=128)
+    feat = torch.randn(1, 256, 8, 8)
+    assert grounder(feat, torch.randn(1, 128)).shape == (1, 1, 8, 8)
+    with pytest.raises(ValueError, match="text_emb must have shape"):
+        grounder(feat, torch.randn(1, 256))
+
+
+def test_human_eye_2m_requires_complete_weights_for_semantics(tmp_path):
+    class StaticSource:
+        def grab(self):
+            return np.full((64, 96, 3), 80, dtype=np.uint8)
+
+    missing_path = tmp_path / "missing.pt"
+    eye = HumanEye2M(
+        source=StaticSource(),
+        weights_path=str(missing_path),
+    )
+    result = eye.perceive()
+    assert result["weights_loaded"] is False
+    assert result["primary_category"] == "unknown_window"
+    assert result["category_confidence"] == 0.0
+    assert result["affordances"] == []
+    with pytest.raises(RuntimeError, match="complete Cortex-2M checkpoint"):
+        eye.perceive(text_emb=torch.randn(1, 128))
+    eye.close()
+
+    with pytest.raises(FileNotFoundError, match="weights are required"):
+        HumanEye2M(source=StaticSource(), weights_path=str(missing_path), require_weights=True)
+
+
+def test_human_eye_2m_perceives_supplied_live_frame_without_grabbing_source(tmp_path):
+    class NoCaptureSource:
+        def grab(self):
+            raise AssertionError("a supplied live frame must be used directly")
+
+    eye = HumanEye2M(
+        source=NoCaptureSource(),
+        weights_path=str(tmp_path / "missing-cortex-2m-test.pt"),
+    )
+    frame = np.full((48, 64, 3), 90, dtype=np.uint8)
+
+    result = eye.perceive(frame=frame)
+
+    assert result["frame_index"] == 1
+    assert result["weights_loaded"] is False
+    assert result["primary_category"] == "unknown_window"
+    eye.close()
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        np.zeros((10, 10), dtype=np.uint8),
+        np.zeros((10, 10, 4), dtype=np.uint8),
+        np.zeros((10, 10, 3), dtype=np.float32),
+    ],
+)
+def test_human_eye_2m_rejects_invalid_supplied_frame(tmp_path, frame):
+    eye = HumanEye2M(
+        source=SyntheticScreen(),
+        weights_path=str(tmp_path / "missing-cortex-2m-test.pt"),
+    )
+    with pytest.raises(ValueError, match="uint8 RGB"):
+        eye.perceive(frame=frame)
+    eye.close()
+
+
+def test_human_eye_2m_rejects_partial_checkpoint(tmp_path):
+    class StaticSource:
+        def grab(self):
+            return np.zeros((32, 48, 3), dtype=np.uint8)
+
+    checkpoint_path = tmp_path / "partial.pt"
+    torch.save({"model_state_dict": {}}, checkpoint_path)
+    with pytest.raises(RuntimeError, match="Failed to load complete Cortex-2M checkpoint"):
+        HumanEye2M(source=StaticSource(), weights_path=str(checkpoint_path))
+
+
+def test_human_eye_2m_static_frame_still_produces_text_grounding(tmp_path):
+    class StaticSource:
+        def grab(self):
+            frame = np.zeros((96, 128, 3), dtype=np.uint8)
+            frame[20:60, 30:90] = 200
+            return frame
+
+    checkpoint_path = tmp_path / "complete.pt"
+    torch.save(
+        {"model_state_dict": UnifiedCortex2M().state_dict()},
+        checkpoint_path,
+    )
+    eye = HumanEye2M(source=StaticSource(), weights_path=str(checkpoint_path))
+    query = torch.randn(1, 128)
+    first = eye.perceive(text_emb=query)
+    second = eye.perceive(text_emb=query)
+    assert first["weights_loaded"] is True
+    assert first["grounding_map"].shape == (1, 1, 8, 8)
+    assert second["is_static"] is True
+    assert second["grounding_map"].shape == (1, 1, 8, 8)
+    eye.close()
+
+
 def test_cortex_2m_affordance_hotspots():
     """Tests hotspot extraction on synthetic feature map."""
     cortex = UnifiedCortex2M(feature_dim=256)
@@ -96,8 +198,8 @@ def test_cortex_2m_affordance_hotspots():
         assert 0.0 <= conf <= 1.0
 
 
-def test_human_eye_2m_perception():
-    """Tests continuous real-time perception loop of HumanEye2M."""
+def test_human_eye_2m_perception(tmp_path):
+    """Tests honest untrained-state reporting in the perception loop."""
     class StaticSource:
         def __init__(self):
             self.frame = np.full((480, 640, 3), 60, dtype=np.uint8)
@@ -107,15 +209,17 @@ def test_human_eye_2m_perception():
             return self.frame
 
     source = StaticSource()
-    eye = HumanEye2M(source=source)
+    eye = HumanEye2M(source=source, weights_path=str(tmp_path / "missing-cortex-2m-test.pt"))
 
     # Frame 1: Dynamic initial pass (runs full 2.4M forward)
     res1 = eye.perceive()
     assert res1["frame_index"] == 1
     assert not res1["is_static"]
-    assert res1["primary_category"] in UNIVERSAL_APP_CATEGORIES
+    assert res1["primary_category"] == "unknown_window"
+    assert res1["category_confidence"] == 0.0
     assert res1["parameters"] > 2_200_000
-    assert len(res1["affordances"]) > 0
+    assert res1["affordances"] == []
+    assert res1["weights_loaded"] is False
 
     # Frame 2: Trigger static screen early exit (<0.2ms)
     res2 = eye.perceive()
@@ -144,7 +248,7 @@ def test_lateral_cross_stream_flow():
 
 def test_anti_collapse_variance_regularization():
     """Verifies mathematical properties of VICReg variance loss and normalized visual latents."""
-    from avcs.training.vicreg_safeguard import vicreg_variance_loss, normalize_embedding
+    from avcs.training.vicreg_safeguard import normalize_embedding, vicreg_variance_loss
 
     # 1. Collapsed state (small variance batch is penalized)
     low_var_latent = torch.full((16, 256), 0.2) + torch.randn(16, 256) * 1e-3
@@ -168,4 +272,3 @@ def test_anti_collapse_variance_regularization():
     # visual_latent is strictly unit-L2 normalized
     unit_norms = torch.norm(out["visual_latent"], p=2, dim=-1)
     assert torch.allclose(unit_norms, torch.ones_like(unit_norms), atol=1e-5)
-

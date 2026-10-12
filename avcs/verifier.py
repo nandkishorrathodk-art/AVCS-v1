@@ -172,6 +172,8 @@ class VisualRippleVerifier:
             self.driver.move_to_normalized(x, y)
         elif hasattr(self.driver, "move_to"):
             self.driver.move_to(x, y)
+        else:
+            raise RuntimeError("Cursor driver does not support pointer movement.")
 
     def execute_and_verify(
         self,
@@ -179,8 +181,14 @@ class VisualRippleVerifier:
         target: Tuple[float, float],
         text_content: Optional[str] = None,
         max_recovery_tier: int = 3,
+        button: str = "left",
+        keyboard_fallback_key: Optional[str] = None,
     ) -> VerificationResult:
         """Executes an action through the 5-Tier Self-Healing Escalation Ladder."""
+        if action_type not in {"click", "double_click", "type"}:
+            raise ValueError(f"Unsupported verified action type: {action_type}")
+        if button not in {"left", "right", "middle"}:
+            raise ValueError(f"Unsupported mouse button: {button}")
         t_global = time.perf_counter()
         tx, ty = target
 
@@ -189,19 +197,27 @@ class VisualRippleVerifier:
         self._move_cursor(tx, ty)
 
         if action_type == "click":
-            self.driver.click(button="left")
+            self.driver.click(button=button)
         elif action_type == "double_click":
-            self.driver.double_click(button="left")
+            self.driver.double_click(button=button)
         elif action_type == "type":
             self.driver.click(button="left")
             time.sleep(0.04)
             if text_content and hasattr(self.driver, "type_text"):
                 self.driver.type_text(text_content)
-            elif text_content and hasattr(self.driver, "press_key"):
-                self.driver.press_key(text_content)
+            elif text_content:
+                raise RuntimeError("Cursor driver does not support text entry.")
 
         res = self.verify_action(f"{action_type}@{target}", target, pre_state)
         if res.is_successful or max_recovery_tier < 2:
+            return res
+        if action_type == "type":
+            res.status = VerificationStatus.ESCALATE_BLOCKED
+            res.causal_summary = (
+                "Typing was dispatched but visual verification was inconclusive; "
+                "it was not replayed to avoid duplicating text."
+            )
+            res.elapsed_ms = (time.perf_counter() - t_global) * 1000.0
             return res
 
         # Tier 2: Micro-Jitter Retry (Hitbox Border Offset)
@@ -212,17 +228,10 @@ class VisualRippleVerifier:
             pre_retry = self.eye.observe()
             self._move_cursor(jitter_target[0], jitter_target[1])
 
-            if action_type == "type":
-                self.driver.click(button="left")
-                time.sleep(0.04)
-                if text_content and hasattr(self.driver, "type_text"):
-                    self.driver.type_text(text_content)
-                elif text_content and hasattr(self.driver, "press_key"):
-                    self.driver.press_key(text_content)
-            elif action_type == "double_click":
-                self.driver.double_click(button="left")
+            if action_type == "double_click":
+                self.driver.double_click(button=button)
             else:
-                self.driver.click(button="left")
+                self.driver.click(button=button)
 
             res_jitter = self.verify_action(f"retry_{action_type}@{jitter_target}", jitter_target, pre_retry)
             if res_jitter.is_successful:
@@ -235,29 +244,42 @@ class VisualRippleVerifier:
             res.status = VerificationStatus.RETRY_MICRO_JITTER
             return res
 
-        # Tier 3: Keyboard Activation Fallback (Enter / Spacebar)
-        pre_kb = self.eye.observe()
-        if hasattr(self.driver, "press_key"):
-            self.driver.press_key("enter")
-        res_kb = self.verify_action("keyboard_enter", target, pre_kb)
-        if res_kb.is_successful:
-            res_kb.status = VerificationStatus.VERIFIED
-            res_kb.recovery_attempt = 3
-            res_kb.causal_summary = "Recovered via Tier 3 keyboard activation."
-            return res_kb
+        # Keyboard activation is only safe when the caller names the intended key.
+        if keyboard_fallback_key is not None and action_type == "click":
+            pre_kb = self.eye.observe()
+            if hasattr(self.driver, "press_key"):
+                self.driver.press_key(keyboard_fallback_key)
+            res_kb = self.verify_action(
+                f"keyboard_{keyboard_fallback_key}", target, pre_kb
+            )
+            if res_kb.is_successful:
+                res_kb.status = VerificationStatus.VERIFIED
+                res_kb.recovery_attempt = 3
+                res_kb.causal_summary = (
+                    f"Recovered via explicit keyboard activation "
+                    f"({keyboard_fallback_key})."
+                )
+                return res_kb
 
         if max_recovery_tier < 4:
-            res.status = VerificationStatus.KEYBOARD_FALLBACK
+            res.status = (
+                VerificationStatus.KEYBOARD_FALLBACK
+                if keyboard_fallback_key is not None
+                else VerificationStatus.RETRY_MICRO_JITTER
+            )
             return res
 
         # Tier 4: Saccadic Re-grounding (Re-acquire target)
-        if hasattr(self.eye, "look_at") and self.eye._active_query:
+        if action_type == "click" and hasattr(self.eye, "look_at") and self.eye._active_query:
             reground_res = self.eye.look_at(self.eye._active_query)
             if reground_res.target_coord != target:
                 new_target = reground_res.target_coord
+                pre_reground = self.eye.observe()
                 self._move_cursor(new_target[0], new_target[1])
-                self.driver.click(button="left")
-                res_reground = self.verify_action(f"reground_click@{new_target}", new_target, pre_kb)
+                self.driver.click(button=button)
+                res_reground = self.verify_action(
+                    f"reground_click@{new_target}", new_target, pre_reground
+                )
                 if res_reground.is_successful:
                     res_reground.status = VerificationStatus.VERIFIED
                     res_reground.recovery_attempt = 4

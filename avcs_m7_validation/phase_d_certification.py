@@ -120,6 +120,13 @@ class PhaseDCertificationRunner:
 
     def run_certification(self) -> Dict[str, Any]:
         """Executes the full 1,800-trial certification campaign."""
+        if isinstance(self.adapter, RepositoryValidationAdapter):
+            raise RuntimeError(
+                "Phase D certification is blocked: the configured repository adapter "
+                "is a simulation fixture, not a goal-conditioned visual GUI worker. "
+                "No certification trials were run."
+            )
+
         plan_trials = self.build_plan()
         total_trials = len(plan_trials)
         print("=" * 80)
@@ -436,4 +443,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

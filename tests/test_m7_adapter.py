@@ -16,7 +16,7 @@ class M7AdapterAndOracleTests(unittest.TestCase):
         self.adapter = create_adapter()
         self.oracle = create_oracle()
 
-    def test_adapter_execution_visual_only(self):
+    def test_adapter_fails_closed_visual_only(self):
         task = AgentTask(task_prompt="Click the Apply button")
         result = self.adapter.execute(
             run_id="test-run-001",
@@ -25,11 +25,14 @@ class M7AdapterAndOracleTests(unittest.TestCase):
             seed=42,
             timeout_s=10.0,
         )
-        self.assertEqual(result.status, ActionStatus.CONFIRMED)
-        self.assertEqual(result.evidence_method, "visual_ripple_and_foveal_flow")
-        self.assertGreater(result.elapsed_ms, 0)
+        self.assertEqual(result.status, ActionStatus.FAILED)
+        self.assertEqual(result.action_count, 0)
+        self.assertEqual(result.evidence_method, "none")
+        self.assertEqual(result.detail_code, "autonomous_gui_worker_unavailable")
+        self.assertFalse(result.metadata["certification_eligible"])
+        self.assertEqual(result.metadata["provenance"], "simulation_fixture")
 
-    def test_adapter_execution_uia_only(self):
+    def test_adapter_fails_closed_uia_only(self):
         task = AgentTask(task_prompt="Select menu item Rename")
         result = self.adapter.execute(
             run_id="test-run-002",
@@ -38,11 +41,11 @@ class M7AdapterAndOracleTests(unittest.TestCase):
             seed=42,
             timeout_s=10.0,
         )
-        self.assertEqual(result.status, ActionStatus.CONFIRMED)
-        self.assertEqual(result.evidence_method, "ui_automation_state_change")
-        self.assertGreater(result.elapsed_ms, 0)
+        self.assertEqual(result.status, ActionStatus.FAILED)
+        self.assertEqual(result.action_count, 0)
+        self.assertFalse(result.metadata["certification_eligible"])
 
-    def test_adapter_execution_hybrid(self):
+    def test_adapter_fails_closed_hybrid(self):
         task = AgentTask(task_prompt="Activate the custom-drawn control")
         result = self.adapter.execute(
             run_id="test-run-003",
@@ -51,9 +54,18 @@ class M7AdapterAndOracleTests(unittest.TestCase):
             seed=42,
             timeout_s=10.0,
         )
-        self.assertEqual(result.status, ActionStatus.CONFIRMED)
-        self.assertEqual(result.evidence_method, "fused_visual_and_uia_verification")
-        self.assertGreater(result.elapsed_ms, 0)
+        self.assertEqual(result.status, ActionStatus.FAILED)
+        self.assertEqual(result.action_count, 0)
+        self.assertFalse(result.metadata["certification_eligible"])
+
+    def test_phase_d_runner_blocks_fixture_certification(self):
+        from avcs_m7_validation.phase_d_certification import PhaseDCertificationRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = PhaseDCertificationRunner(runs_per_scenario=1, output_dir=tmp)
+            with self.assertRaisesRegex(RuntimeError, "simulation fixture"):
+                runner.run_certification()
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_oracle_evaluates_all_12_scenarios(self):
         for scenario in SCENARIOS:
@@ -111,4 +123,3 @@ class M7AdapterAndOracleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

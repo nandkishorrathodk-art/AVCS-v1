@@ -129,6 +129,19 @@ def test_human_eye_look_at_and_foveation():
     ) < 0.25
 
 
+def test_look_at_with_explicit_frame_refreshes_visual_features():
+    eye = HumanEye(source=SyntheticScreen())
+    eye.observe()
+    previous_features = eye._last_feat.clone()
+    fresh_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    fresh_frame[40:280, 80:550] = 230
+
+    eye.look_at("visible control", frame=fresh_frame)
+
+    assert not torch.equal(eye._last_feat, previous_features)
+    assert eye._latest_raw_frame is fresh_frame
+
+
 def test_sdk_look_at_and_inspect():
     """Verify high-level HumanEyeClient look_at and inspect integration."""
     client = HumanEyeClient(source="synthetic")

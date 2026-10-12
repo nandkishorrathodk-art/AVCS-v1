@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import atexit
 import ctypes
-from ctypes import wintypes
 import time
+from ctypes import wintypes
 from typing import List, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe
@@ -372,20 +372,27 @@ class Win32CursorDriver:
             th.start()
             th.join(timeout=0.5)
 
-    def _resolve_vk(self, vk_or_name: int | str) -> int:
+    def _resolve_vk_with_shift(self, vk_or_name: int | str) -> Tuple[int, bool]:
         if isinstance(vk_or_name, int):
-            return vk_or_name
+            return vk_or_name, False
         name = str(vk_or_name).lower().strip()
         if name in KEY_NAME_TO_VK:
-            return KEY_NAME_TO_VK[name]
+            return KEY_NAME_TO_VK[name], False
         if len(name) == 1:
             if name.isalnum():
-                return ord(name.upper())
+                return ord(name.upper()), False
             # Fallback to VkKeyScanW for symbols and punctuation
             res = self.user32.VkKeyScanW(ord(name))
             if res != -1:
-                return res & 0xFF
+                vk = res & 0xFF
+                shift_state = (res >> 8) & 0xFF
+                needs_shift = bool(shift_state & 0x01)
+                return vk, needs_shift
         raise ValueError(f"Unknown key name: '{vk_or_name}'")
+
+    def _resolve_vk(self, vk_or_name: int | str) -> int:
+        vk, _ = self._resolve_vk_with_shift(vk_or_name)
+        return vk
 
     def key_down(self, vk_or_name: int | str) -> None:
         self.check_hardware_failsafe()
@@ -399,10 +406,22 @@ class Win32CursorDriver:
         self._active_keys.discard(vk)
 
     def press_key(self, vk_or_name: int | str, hold_duration: float = 0.02) -> None:
-        self.key_down(vk_or_name)
-        if hold_duration > 0:
-            time.sleep(hold_duration)
-        self.key_up(vk_or_name)
+        self.check_hardware_failsafe()
+        vk, needs_shift = self._resolve_vk_with_shift(vk_or_name)
+        if needs_shift:
+            self.key_down(VK_SHIFT)
+            time.sleep(0.01)
+        try:
+            self._send_key_input(vk=vk, flags=0)
+            self._active_keys.add(vk)
+            if hold_duration > 0:
+                time.sleep(hold_duration)
+            self._send_key_input(vk=vk, flags=KEYEVENTF_KEYUP)
+            self._active_keys.discard(vk)
+        finally:
+            if needs_shift:
+                time.sleep(0.01)
+                self.key_up(VK_SHIFT)
 
     def press_hotkey(self, *keys: int | str, delay_between: float = 0.02) -> None:
         """Presses multiple keys simultaneously in sequence, then releases in reverse order."""
@@ -424,7 +443,7 @@ class Win32CursorDriver:
                 if delay_between > 0:
                     time.sleep(delay_between)
 
-    def type_char(self, char: str) -> None:
+    def type_char(self, char: str, dwell_ms: float = 5.0) -> None:
         """Sends a single Unicode character (including 32-bit emojis/surrogate pairs) to active window."""
         self.check_hardware_failsafe()
         # Encode to UTF-16-LE to handle BMP characters and surrogate pairs for SMP characters (emojis)
@@ -433,42 +452,116 @@ class Win32CursorDriver:
         for cu in code_units:
             # Unicode KeyDown
             self._send_key_input(vk=0, scan=cu, flags=KEYEVENTF_UNICODE)
+            if dwell_ms > 0:
+                time.sleep(dwell_ms / 1000.0)
             # Unicode KeyUp
             self._send_key_input(vk=0, scan=cu, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
 
     def type_text(
         self,
         text: str,
-        key_delay_ms: int = 10,
+        key_delay_ms: int = 25,
         clear_first: bool = False,
         press_enter: bool = False,
+        literal_mode: bool = False,
     ) -> None:
-        """Types string directly into active focus using SendInput Unicode events."""
+        """Types string directly into active focus using SendInput Unicode events.
+
+        Args:
+            text: Text string to type.
+            key_delay_ms: Inter-character delay in ms (default 25ms to satisfy modern WinUI/TSF event loops).
+            clear_first: Select all (Ctrl+A) and delete before typing.
+            press_enter: Press Enter after finishing typing.
+            literal_mode: When True, prevents interpreting escape characters (e.g. \\n, \\t) as Enter/Tab.
+        """
         self.check_hardware_failsafe()
         if clear_first:
             self.press_hotkey("ctrl", "a")
-            time.sleep(0.03)
+            time.sleep(0.04)
             self.press_key("backspace")
-            time.sleep(0.03)
+            time.sleep(0.04)
 
-        normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
         delay_sec = max(0.0, key_delay_ms / 1000.0)
-        for ch in normalized_text:
-            self.check_hardware_failsafe()
-            if ch == "\n":
-                self.press_key(VK_RETURN)
-            elif ch == "\t":
-                self.press_key(VK_TAB)
-            elif ch == "\b":
-                self.press_key(VK_BACK)
-            else:
+        if literal_mode:
+            for ch in text:
+                self.check_hardware_failsafe()
                 self.type_char(ch)
-            if delay_sec > 0:
-                time.sleep(delay_sec)
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
+        else:
+            normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
+            for ch in normalized_text:
+                self.check_hardware_failsafe()
+                if ch == "\n":
+                    self.press_key(VK_RETURN)
+                elif ch == "\t":
+                    self.press_key(VK_TAB)
+                elif ch == "\b":
+                    self.press_key(VK_BACK)
+                else:
+                    self.type_char(ch)
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
 
         if press_enter:
-            time.sleep(0.02)
+            time.sleep(0.04)
             self.press_key(VK_RETURN)
+
+    def force_foreground_window(self, hwnd: int, timeout: float = 3.0) -> bool:
+        """Robustly brings a window to the foreground on Windows 11, bypassing foreground lock restrictions."""
+        if not hwnd or not self.user32.IsWindow(hwnd):
+            return False
+
+        t_end = time.perf_counter() + timeout
+        while time.perf_counter() < t_end:
+            fg_hwnd = self.user32.GetForegroundWindow()
+            if fg_hwnd == hwnd:
+                return True
+
+            # 1. Un-minimize if iconic
+            if self.user32.IsIconic(hwnd):
+                self.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                time.sleep(0.05)
+
+            # 2. Simulate Alt-key poke to gain foreground rights
+            self.user32.keybd_event(VK_MENU, 0, 0, 0)
+            self.user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+            # 3. AttachThreadInput bypass
+            cur_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            fg_thread = self.user32.GetWindowThreadProcessId(fg_hwnd, None)
+            target_thread = self.user32.GetWindowThreadProcessId(hwnd, None)
+
+            attached_fg = False
+            attached_target = False
+            try:
+                if fg_thread and fg_thread != cur_thread:
+                    attached_fg = bool(self.user32.AttachThreadInput(cur_thread, fg_thread, True))
+                if target_thread and target_thread != cur_thread:
+                    attached_target = bool(self.user32.AttachThreadInput(cur_thread, target_thread, True))
+
+                self.user32.SetForegroundWindow(hwnd)
+                self.user32.BringWindowToTop(hwnd)
+                self.user32.ShowWindow(hwnd, 5)  # SW_SHOW
+            finally:
+                if attached_fg:
+                    self.user32.AttachThreadInput(cur_thread, fg_thread, False)
+                if attached_target:
+                    self.user32.AttachThreadInput(cur_thread, target_thread, False)
+
+            time.sleep(0.1)
+            if self.user32.GetForegroundWindow() == hwnd:
+                return True
+
+        return self.user32.GetForegroundWindow() == hwnd
+
+    def assert_foreground_window(self, hwnd: int) -> None:
+        """Fail-closed assertion: raises RuntimeError if target hwnd does not own foreground focus."""
+        current = self.user32.GetForegroundWindow()
+        if current != hwnd:
+            raise RuntimeError(
+                f"Fail-closed focus guard violation: Target HWND {hwnd} is not foreground (current foreground: {current})."
+            )
 
     def panic_release(self) -> None:
         """Emergency release for all currently held keys and mouse buttons."""
@@ -487,4 +580,3 @@ class Win32CursorDriver:
     def close(self) -> None:
         """Closes driver and safely releases any held hardware inputs."""
         self.panic_release()
-

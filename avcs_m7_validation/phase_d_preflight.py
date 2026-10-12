@@ -36,14 +36,10 @@ from avcs_m7_validation.contracts import (
     TrialResult,
 )
 from avcs_m7_validation.evidence_auditor import TrialEvidenceAuditor, ViolationSeverity
-from avcs.capture_adapter import (
-    InteractiveSyntheticCaptureAdapter,
-    SyntheticCaptureAdapter,
-    Win32GDICaptureAdapter,
-)
+from avcs.capture_adapter import Win32GDICaptureAdapter
 from avcs.cortex_2m import UnifiedCortex2M
-from forge.vision.cortex.motor.driver import VirtualCursorDriver
 from forge.vision.cortex.motor.win32 import Win32CursorDriver
+from avcs_m7_validation.repository_adapter import RepositoryValidationAdapter
 
 
 # Canonical Frozen Target Configuration
@@ -250,24 +246,42 @@ class PhaseDPreflightEngine:
         except Exception as exc:
             driver_err = str(exc)
 
-        # Test synthetic rejection: ensure synthetic classes are explicitly identifiable
-        synthetic_rejected = (
-            issubclass(InteractiveSyntheticCaptureAdapter, SyntheticCaptureAdapter)
-            and issubclass(VirtualCursorDriver, object)
+        # The registered adapter must itself use live I/O and a real task reasoner.
+        adapter = RepositoryValidationAdapter()
+        configured_capture = adapter.capture
+        configured_driver = getattr(adapter.broker, "driver", None)
+        configured_adapter_is_live = (
+            isinstance(configured_capture, Win32GDICaptureAdapter)
+            and isinstance(configured_driver, Win32CursorDriver)
         )
+        goal_conditioned_reasoner = callable(getattr(adapter, "reason", None))
 
         details = {
             "physical_capture_class": "Win32GDICaptureAdapter",
             "physical_capture_operational": gdi_ok,
             "physical_driver_class": "Win32CursorDriver",
             "physical_driver_operational": driver_ok,
-            "synthetic_adapters_rejected": synthetic_rejected,
+            "configured_adapter_capture_class": type(configured_capture).__name__,
+            "configured_adapter_driver_class": type(configured_driver).__name__,
+            "configured_adapter_uses_live_io": configured_adapter_is_live,
+            "goal_conditioned_reasoner_present": goal_conditioned_reasoner,
         }
 
-        passed = gdi_ok and driver_ok and synthetic_rejected
+        passed = (
+            gdi_ok
+            and driver_ok
+            and configured_adapter_is_live
+            and goal_conditioned_reasoner
+        )
         err = None
         if not passed:
-            err = f"Capture or driver failure: cap={gdi_err}, drv={driver_err}"
+            err = (
+                "The certification adapter is not a live visual task worker: "
+                f"capture={type(configured_capture).__name__}, "
+                f"driver={type(configured_driver).__name__}, "
+                f"goal_conditioned_reasoner={goal_conditioned_reasoner}. "
+                f"Physical probe errors: capture={gdi_err}, driver={driver_err}"
+            )
 
         return PreflightCheckResult(
             name="2. Live Capture & Input Driver Provenance",
@@ -510,7 +524,15 @@ class PhaseDPreflightEngine:
         check1 = self.check_candidate_freeze()
         check2 = self.check_live_provenance_classes()
         check3 = self.check_negative_controls()
-        check4 = self.check_live_smoke_trial()
+        if check2.status == PreflightStatus.PASSED:
+            check4 = self.check_live_smoke_trial()
+        else:
+            check4 = PreflightCheckResult(
+                name="4. Physical Windows Application Smoke Execution",
+                status=PreflightStatus.BLOCKED,
+                details={"skipped": True, "reason": "autonomous worker preflight failed"},
+                error_message="Skipped to avoid presenting a manually scripted click as an agent task.",
+            )
         check5 = self.audit_12_scenario_live_readiness()
 
         checks = [check1, check2, check3, check4, check5]
@@ -527,8 +549,7 @@ class PhaseDPreflightEngine:
             blockers.append(f"Live smoke trial failure: {check4.error_message}")
         if check5.status != PreflightStatus.PASSED:
             blockers.append(
-                "Catalog coverage gap: 11 of 12 benchmark scenarios lack automated live desktop process bindings. "
-                "Bulk 1,800 trials cannot run with live provenance without real application targets."
+                "Benchmark scenario harness coverage is incomplete; bulk trials require real application targets."
             )
 
         # Bulk Phase D is authorized ONLY if zero blockers exist

@@ -12,9 +12,9 @@ import urllib.request
 
 import torch
 
-# Standard release checkpoint URL on Praxis-Neural repository
+# Standard release checkpoint URL on Parth-labs-in repository
 DEFAULT_WEIGHTS_URL = (
-    "https://github.com/Praxis-Neural/AVCS/releases/download/v0.2.0/avcs_cortex_weights.pt"
+    "https://github.com/Parth-labs-in/AVCS/releases/download/v0.2.0/avcs_cortex_weights.pt"
 )
 
 # Standard filename
