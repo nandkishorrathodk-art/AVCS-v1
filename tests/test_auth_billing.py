@@ -7,6 +7,7 @@ import pytest
 from avcs.auth import (
     InvalidLicenseError,
     LicenseBindingError,
+    LicenseConfigurationError,
     LicenseExpiredError,
     LicenseManager,
     LicensePayload,
@@ -18,7 +19,7 @@ from avcs.billing import RateCard, SessionUsageReceipt, UsageMeter
 
 
 def test_license_generation_and_verification():
-    mgr = LicenseManager(signing_key="test_signing_key_secret_12345")
+    mgr = LicenseManager(signing_key="test_signing_key_secret_12345_extra")
 
     # 1. Valid pro license
     token = mgr.generate_license(org_id="org_acme_corp", tier=LicenseTier.PRO, duration_days=30)
@@ -50,7 +51,7 @@ def test_license_generation_and_verification():
 
 
 def test_api_key_generation_and_verification():
-    mgr = LicenseManager(signing_key="test_api_key_secret_54321")
+    mgr = LicenseManager(signing_key="test_api_key_secret_54321_extra_long")
 
     # Live key
     live_key = mgr.generate_api_key(org_id="org_enterprise", tier=LicenseTier.ENTERPRISE, is_live=True)
@@ -69,6 +70,22 @@ def test_api_key_generation_and_verification():
     tampered_key = live_key[:-3] + "xyz"
     with pytest.raises((LicenseTamperedError, InvalidLicenseError)):
         mgr.verify_api_key(tampered_key)
+
+
+def test_license_manager_requires_strong_configured_signing_key(monkeypatch):
+    monkeypatch.delenv("AVCS_SIGNING_KEY", raising=False)
+    with pytest.raises(LicenseConfigurationError, match="signing key is required"):
+        LicenseManager()
+    with pytest.raises(LicenseConfigurationError, match="32 UTF-8 bytes"):
+        LicenseManager(signing_key="too_short")
+    assert len(LicenseManager(signing_key="é" * 16).signing_key) == 32
+
+
+def test_license_manager_accepts_signing_key_from_environment(monkeypatch):
+    key = "environment_test_signing_key_32_bytes"
+    monkeypatch.setenv("AVCS_SIGNING_KEY", key)
+    manager = LicenseManager()
+    assert manager.signing_key == key.encode("utf-8")
 
 
 def test_usage_metering_and_savings():
@@ -127,4 +144,3 @@ def test_signed_billing_receipt():
     tampered_dict = receipt.to_dict()
     tampered_dict["motor_actions"] = 999
     assert UsageMeter.verify_receipt(tampered_dict) is False
-

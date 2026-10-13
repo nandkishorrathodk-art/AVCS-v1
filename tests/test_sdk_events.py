@@ -131,11 +131,12 @@ def test_human_eye_client_auth_enforcement():
         avcs.eye(source=screen, enforce_auth=True)
 
     # Generate valid API key
-    mgr = LicenseManager(signing_key="master_key_secret")
+    signing_key = "master_key_secret_for_sdk_event_tests"
+    mgr = LicenseManager(signing_key=signing_key)
     key = mgr.generate_api_key(org_id="org_test_runner", tier=LicenseTier.PRO)
 
     # Initialize with valid key
-    client = avcs.eye(source=screen, api_key=key, signing_key="master_key_secret", enforce_auth=True)
+    client = avcs.eye(source=screen, api_key=key, signing_key=signing_key, enforce_auth=True)
     assert client.is_authenticated is True
     assert client.org_id == "org_test_runner"
     client.close()
@@ -153,3 +154,31 @@ def test_human_eye_client_background_stream():
     # At 60 FPS for 200ms, should process multiple frames
     assert usage["frames_processed"] >= 2
     client.close()
+
+
+def test_human_eye_client_local_mode_does_not_require_signing_key(monkeypatch):
+    monkeypatch.delenv("AVCS_SIGNING_KEY", raising=False)
+    client = avcs.eye(source=SyntheticScreen(), force_virtual_motor=True)
+    try:
+        assert client.auth_manager is None
+        assert client.is_authenticated is False
+    finally:
+        client.close()
+
+
+def test_human_eye_client_desktop_capture_fails_closed(monkeypatch):
+    from avcs import sdk
+    from forge.vision.capture import CaptureError
+
+    def unavailable_capture(**kwargs):
+        assert kwargs["allow_synthetic_fallback"] is False
+        raise CaptureError("no desktop")
+
+    monkeypatch.setattr(sdk, "open_capture", unavailable_capture)
+    with pytest.raises(CaptureError, match="no desktop"):
+        sdk.HumanEyeClient(force_virtual_motor=True)
+
+
+def test_human_eye_client_rejects_unsupported_capture_source():
+    with pytest.raises(ValueError, match="source must be"):
+        avcs.eye(source="unknown")

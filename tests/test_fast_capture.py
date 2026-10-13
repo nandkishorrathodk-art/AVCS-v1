@@ -9,6 +9,7 @@ import pytest
 
 from avcs.capture_adapter import DisplayGeometry, Win32GDICaptureAdapter
 from forge.vision.capture import (
+    CaptureError,
     ScreenCapture,
     SyntheticScreen,
     ThreadedScreenCapture,
@@ -73,6 +74,22 @@ def test_open_capture_threaded_flag():
     with cap:
         frame = cap.grab()
         assert frame.ndim == 3 and frame.shape[2] == 3
+
+
+def test_open_capture_can_fail_closed_without_synthetic_fallback(monkeypatch):
+    import forge.vision.capture as capture_module
+
+    monkeypatch.setattr(capture_module.Win32FastCapture, "available", staticmethod(lambda: False))
+    monkeypatch.setattr(capture_module.ScreenCapture, "available", staticmethod(lambda: True))
+
+    def fail_open(self):
+        raise CaptureError("display unavailable")
+
+    monkeypatch.setattr(capture_module.ScreenCapture, "open", fail_open)
+    with pytest.raises(CaptureError, match="display unavailable"):
+        open_capture(allow_synthetic_fallback=False)
+
+    assert isinstance(open_capture(allow_synthetic_fallback=True), SyntheticScreen)
 
 
 def test_gdi_region_capture_copies_only_requested_pixels():

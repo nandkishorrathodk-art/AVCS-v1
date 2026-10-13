@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from avcs import ScreenEye, CortexState
+from forge.vision.cortex.sdk import UnvalidatedGroundingError
 
 
 @dataclass
@@ -81,9 +82,11 @@ class AVCSOperatorHarness:
             (velocity: (vx, vy), contact_acquired: bool)
         """
         if isinstance(target_label_or_coords, str):
-            target = self.eye.look_at(target_label_or_coords)
-        else:
-            target = target_label_or_coords
-
-        return self.eye.steer_hand(current_cursor=current_cursor, target_gaze=target)
-
+            raise UnvalidatedGroundingError(
+                "Natural-language targets cannot drive servoing: validated trained "
+                "semantic grounding is unavailable."
+            )
+        return self.eye.steer_hand(
+            current_cursor=current_cursor,
+            target_gaze=target_label_or_coords,
+        )

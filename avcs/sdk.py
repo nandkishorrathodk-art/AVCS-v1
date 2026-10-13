@@ -8,7 +8,6 @@ Provides a unified, high-level developer interface for:
 """
 from __future__ import annotations
 
-import math
 import os
 import threading
 import time
@@ -33,7 +32,7 @@ from avcs.verifier import (
 )
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
-from forge.vision.cortex.sdk import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 
 
 class HumanEyeClient:
@@ -56,33 +55,38 @@ class HumanEyeClient:
         self.signing_key = signing_key
 
         # 1. Resolve Screen Capture Source
-        if source is None or source == "desktop":
-            try:
-                self.source = open_capture(prefer_real=True, threaded=True)
-            except Exception:
-                self.source = SyntheticScreen()
+        if source is None or (isinstance(source, str) and source == "desktop"):
+            self.source = open_capture(
+                prefer_real=True,
+                threaded=True,
+                allow_synthetic_fallback=False,
+            )
         elif isinstance(source, str) and source == "synthetic":
             self.source = SyntheticScreen()
         elif hasattr(source, "grab"):
             self.source = source
         else:
-            self.source = SyntheticScreen()
+            raise ValueError("source must be 'desktop', 'synthetic', or a capture source with grab().")
 
         # 2. Authentication Verification
-        self.auth_manager = LicenseManager(signing_key=self.signing_key)
         self.org_id = "org_local"
         self.tier = LicenseTier.PRO.value
         self.is_authenticated = False
 
         resolved_api_key = api_key or os.environ.get("AVCS_API_KEY")
         resolved_lic_key = license_key or os.environ.get("AVCS_LICENSE_KEY")
+        self.auth_manager: Optional[LicenseManager] = None
+        if resolved_api_key or resolved_lic_key:
+            self.auth_manager = LicenseManager(signing_key=self.signing_key)
 
         if resolved_api_key:
+            assert self.auth_manager is not None
             data = self.auth_manager.verify_api_key(resolved_api_key)
             self.org_id = data.get("org_id", self.org_id)
             self.tier = data.get("tier", self.tier)
             self.is_authenticated = True
         elif resolved_lic_key:
+            assert self.auth_manager is not None
             payload = self.auth_manager.verify_license(resolved_lic_key)
             self.org_id = payload.org_id
             self.tier = payload.tier
@@ -186,7 +190,7 @@ class HumanEyeClient:
         return self.events.subscribe(event_type=event_type, callback=callback)
 
     def look_at(self, query_or_coords: str | Tuple[float, float]) -> Tuple[float, float]:
-        """Directs high-acuity gaze and foveation to target using language grounding (<4ms)."""
+        """Updates gaze/foveation; string-query results are experimental, not action-authoritative."""
         self.meter.record_query()
         if isinstance(query_or_coords, tuple):
             coords = query_or_coords
@@ -197,6 +201,22 @@ class HumanEyeClient:
             # Top-down natural language gaze grounding (<4ms)
             res = self.eye.look_at(query=query_or_coords, inspect=True)
             return res.target_coord
+
+    @staticmethod
+    def _require_coordinate_target(
+        target: Optional[str | Tuple[float, float]],
+    ) -> Tuple[float, float]:
+        if isinstance(target, str):
+            raise UnvalidatedGroundingError(
+                "Natural-language targets cannot drive motor actions: validated trained "
+                "semantic grounding is unavailable. Pass an explicit normalized (x, y) coordinate."
+            )
+        if target is None:
+            raise UnvalidatedGroundingError(
+                "Motor actions require an explicit normalized (x, y) coordinate; "
+                "the current gaze fixation is not validated grounding."
+            )
+        return target
 
     def inspect(self, centroid: Optional[Tuple[float, float]] = None) -> FovealInspection:
         """Inspects fine-grained element properties at central fovea (<2ms)."""
@@ -237,14 +257,11 @@ class HumanEyeClient:
         double_click: bool = False,
     ) -> bool:
         """Executes closed-loop biological hand-eye visual steering and clicks."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action(f"click_{button}")
-        if target is not None:
-            tx, ty = self.look_at(target)
-        else:
-            state = self.current_state
-            tx, ty = state.gaze_fixation
+        tx, ty = target
 
-        self.motor_driver.move_to(tx, ty, realtime=False)
+        self.motor_driver.move_to_normalized(tx, ty)
         if double_click:
             self.motor_driver.double_click(button=button)
         else:
@@ -267,6 +284,7 @@ class HumanEyeClient:
         realtime: bool = False,
     ) -> NeuromuscularServoingResult:
         """Executes smooth Fitts' Law neuromuscular motor movement to target."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action("servoing_move")
         if isinstance(target, str):
             coords = self.look_at(target)
@@ -281,14 +299,9 @@ class HumanEyeClient:
         max_recovery_tier: int = 3,
     ) -> VerificationResult:
         """Clicks target and runs closed-loop visual ripple assertion with 5-tier self-healing."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action(f"click_verify_{button}")
-        if target is not None:
-            if isinstance(target, str):
-                coords = self.look_at(target)
-            else:
-                coords = target
-        else:
-            coords = self.current_state.gaze_fixation
+        coords = target
 
         return self.verifier.execute_and_verify(
             action_type="click",
@@ -304,7 +317,8 @@ class HumanEyeClient:
         clear_first: bool = True,
         press_enter: bool = True,
     ) -> VerificationResult:
-        """Foveates onto input field, types text, and visually verifies the change."""
+        """Foveates onto an explicit coordinate, types text, and verifies the change."""
+        self._require_coordinate_target(target)
         self.meter.record_action("type_verify")
         if isinstance(target, str):
             coords = self.look_at(target)
@@ -312,7 +326,7 @@ class HumanEyeClient:
             coords = target
 
         if clear_first:
-            self.motor_driver.move_to(coords[0], coords[1], realtime=False)
+            self.motor_driver.move_to_normalized(coords[0], coords[1])
             self.motor_driver.click(button="left")
             self.motor_driver.press_hotkey("ctrl", "a")
             self.motor_driver.press_key("backspace")
@@ -332,7 +346,8 @@ class HumanEyeClient:
         clear_first: bool = True,
         press_enter: bool = True,
     ) -> bool:
-        """Foveates onto input field, clicks, and types text."""
+        """Clicks an explicit normalized coordinate and types text."""
+        self._require_coordinate_target(target)
         self.click(target=target)
         time.sleep(0.05)
         self.type_text(text=text, clear_first=clear_first, press_enter=press_enter)
@@ -398,6 +413,7 @@ def eye(
 
 __all__ = [
     "HumanEyeClient",
+    "UnvalidatedGroundingError",
     "eye",
     "ScreenEye",
 ]

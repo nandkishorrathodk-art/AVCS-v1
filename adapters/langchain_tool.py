@@ -7,9 +7,10 @@ sensory-first without needing heavy screenshot attachments on every step.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from avcs import ScreenEye
+from forge.vision.cortex.sdk import UnvalidatedGroundingError
 
 
 class AVCSScreenTools:
@@ -31,7 +32,7 @@ class AVCSScreenTools:
         return json.dumps({
             "target_coordinates": [round(x, 4), round(y, 4)],
             "screen_category": state.primary_category,
-            "status": "target_acquired",
+            "status": "experimental_unvalidated_gaze_estimate",
         })
 
     def check_screen_stability(self) -> str:
@@ -62,23 +63,11 @@ class AVCSScreenTools:
         return json.dumps({"clickable_elements": payload})
 
     def steer_and_click(self, element_description: str) -> str:
-        """Physically steers the mouse cursor to the target element and clicks it.
-
-        Uses smooth biological Hand-Eye servoing with emergency breakout fail-safe.
-        """
-        gaze = self.eye.look_at(element_description)
-        result = self.eye.steer_hand_physical(
-            target_gaze=gaze,
-            click_on_arrival=True,
-            force_virtual=False,
+        """Fails closed until semantic grounding is validated for motor actions."""
+        raise UnvalidatedGroundingError(
+            "Natural-language targets cannot drive motor actions: validated trained "
+            "semantic grounding is unavailable."
         )
-        return json.dumps({
-            "action": "click",
-            "element": element_description,
-            "contact_acquired": result.contact_acquired,
-            "elapsed_ms": round(result.elapsed_ms, 1),
-            "final_position": [round(result.final_position[0], 4), round(result.final_position[1], 4)],
-        })
 
     def get_all_tools(self) -> List[Dict[str, Any]]:
         """Returns standard OpenAI Function Calling schema tools."""
@@ -87,7 +76,7 @@ class AVCSScreenTools:
                 "type": "function",
                 "function": {
                     "name": "look_at_element",
-                    "description": "Locate a UI element on the screen using natural language visual gaze.",
+                    "description": "Return an experimental, unvalidated gaze estimate for a natural-language query.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -113,19 +102,4 @@ class AVCSScreenTools:
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "steer_and_click",
-                    "description": "Smoothly move mouse cursor to target element using biological visual servoing and click.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "element_description": {"type": "string", "description": "The element to steer to and click."}
-                        },
-                        "required": ["element_description"],
-                    },
-                },
-            },
         ]
-

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -20,6 +21,28 @@ import numpy as np
 
 from forge.vision.cortex.motor.driver import OSCursorDriver, get_default_driver
 from forge.vision.cortex.motor.failsafe import SafetyBreakoutException
+
+
+if sys.platform == "win32":
+    import ctypes
+
+    def _begin_high_res_timer() -> None:
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
+
+    def _end_high_res_timer() -> None:
+        try:
+            ctypes.windll.winmm.timeEndPeriod(1)
+        except Exception:
+            pass
+else:
+    def _begin_high_res_timer() -> None:
+        pass
+
+    def _end_high_res_timer() -> None:
+        pass
 
 
 @dataclass
@@ -92,7 +115,8 @@ class NeuromuscularServoingController:
 
         prev_x, prev_y = x0, y0
         prev_vx, prev_vy = 0.0, 0.0
-        prev_tremor_x, prev_tremor_y = 0.0, 0.0
+        prev_tx1, prev_tx2 = 0.0, 0.0
+        prev_ty1, prev_ty2 = 0.0, 0.0
 
         for i in range(num_steps + 1):
             tau = float(i) / float(num_steps)  # Normalized time in [0.0, 1.0]
@@ -106,13 +130,18 @@ class NeuromuscularServoingController:
             nom_x = x0 + dx * poly
             nom_y = y0 + dy * poly
 
-            # Physiological 8-12 Hz micro-tremor (autoregressive pink-noise filter)
-            tremor_scale = self.micro_tremor_std * (1.0 - 0.5 * tau)
-            raw_jx = random.gauss(0.0, tremor_scale)
-            raw_jy = random.gauss(0.0, tremor_scale)
-            jx = 0.65 * prev_tremor_x + 0.35 * raw_jx
-            jy = 0.65 * prev_tremor_y + 0.35 * raw_jy
-            prev_tremor_x, prev_tremor_y = jx, jy
+            # Physiological 10.5 Hz micro-tremor resonator (biological AR(2) filter)
+            if i == num_steps:
+                jx, jy = 0.0, 0.0
+            else:
+                tremor_scale = self.micro_tremor_std * (1.0 - 0.5 * tau) * 0.35
+                raw_jx = random.gauss(0.0, tremor_scale)
+                raw_jy = random.gauss(0.0, tremor_scale)
+                # Resonator poles: f0=10.5 Hz, fs=120 Hz, r=0.82 -> a1=1.398, a2=-0.672
+                jx = 1.398 * prev_tx1 - 0.672 * prev_tx2 + raw_jx
+                jy = 1.398 * prev_ty1 - 0.672 * prev_ty2 + raw_jy
+                prev_tx2, prev_tx1 = prev_tx1, jx
+                prev_ty2, prev_ty1 = prev_ty1, jy
 
             cur_x = float(np.clip(nom_x + jx, 0.0, 1.0))
             cur_y = float(np.clip(nom_y + jy, 0.0, 1.0))
@@ -195,17 +224,23 @@ class NeuromuscularServoingController:
         t0 = time.perf_counter()
         dt = 1.0 / self.tick_rate_hz
 
-        for pt in waypoints:
-            # Physical safety check (corner breakout failsafe)
-            self._move_cursor(pt.x, pt.y)
+        if realtime:
+            _begin_high_res_timer()
+        try:
+            for pt in waypoints:
+                # Physical safety check (corner breakout failsafe)
+                self._move_cursor(pt.x, pt.y)
+                if realtime:
+                    time.sleep(dt)
+        finally:
             if realtime:
-                time.sleep(dt)
+                _end_high_res_timer()
 
         # Final precision docking onto target
         self._move_cursor(target[0], target[1])
         final_pos = self._get_cursor()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        reached_target = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1]) <= 0.005
+        reached_target = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1]) <= 0.003
 
         return NeuromuscularServoingResult(
             target=target,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avcs-sdk"
-version = "0.2.0"
+version = "0.0.1"
 description = "Experimental visual perception and temporal modeling tools for screen-based AI research."
 readme = "README.md"
 authors = [
@@ -69,10 +69,11 @@ avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
 avcs-record-demo = "avcs.training.demo_recorder:main"
 avcs-train-grounder = "avcs.training.train_grounder:main"
 avcs-evaluate-grounder = "avcs.training.evaluate_grounder:main"
+avcs-observe = "avcs.observe:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*"]
+include = ["adapters*", "avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]

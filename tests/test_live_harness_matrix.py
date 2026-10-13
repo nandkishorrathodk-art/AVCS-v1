@@ -144,7 +144,7 @@ class LiveHarnessMatrixTests(unittest.TestCase):
             driver = Win32CursorDriver(failsafe=False)
             driver.move_to_pixels(10, 10)
             driver.click(button="left")
-            time.sleep(0.15)
+            time.sleep(0.35)
 
             # Oracle must independently catch that target button was NOT activated
             oracle_res = harness.evaluate_oracle(ws, action_dispatched=True, seed=42)

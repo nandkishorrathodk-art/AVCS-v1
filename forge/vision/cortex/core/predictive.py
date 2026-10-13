@@ -92,11 +92,13 @@ class PredictiveCodingEngine(nn.Module):
         norm_pred = F.normalize(self.predicted_latent, dim=-1)
         surprise_tensor = 1.0 - (norm_obs * norm_pred).sum(dim=-1, keepdim=True)  # (B, 1)
 
-        # 3. Anomaly-Gated Temporal Memory Update
-        # Sudden acute spikes are dampened until confirmed across multiple ticks
+        # 3. Anomaly-Gated Temporal Memory Update with Identity Persistence Prior
+        # For static screens, biological visual persistence maintains the current observation.
+        # Recurrent transition operates as a learned residual rather than unconstrained distortion.
         raw_memory = self.transition(current_latent, self.prev_latent)
-        gate = torch.clamp(1.0 - 0.5 * surprise_tensor, 0.2, 1.0)
-        updated_memory = gate * raw_memory + (1.0 - gate) * self.prev_latent
+        residual = raw_memory - self.prev_latent
+        gate = torch.clamp(surprise_tensor * 2.0, 0.0, 1.0)
+        updated_memory = current_latent + 0.1 * gate * residual
 
         # 4. Predict NEXT frame's latent state (residual around current memory)
         next_predicted = updated_memory + self.predictor(updated_memory)

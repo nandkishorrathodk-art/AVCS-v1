@@ -1,23 +1,17 @@
-"""Playwright Visual Eye Adapter (avcs-playwright).
-
-Enables selector-free, zero-DOM visual test automation in Playwright.
-Executes clicks, text inputs, and visual stability gating directly through
-AVCS biological ocular grounding without relying on fragile CSS/XPath selectors.
-"""
+"""Experimental Playwright perception adapter with fail-closed motor actions."""
 from __future__ import annotations
 
 import io
-import time
 from typing import Any, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
-from avcs import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 
 
 class AVCSPlaywrightEye:
-    """Selector-free visual interaction layer for Playwright browser automation."""
+    """Perception helper; semantic browser input stays disabled until grounding is validated."""
 
     def __init__(
         self,
@@ -61,32 +55,11 @@ class AVCSPlaywrightEye:
         timeout: float = 5.0,
         click_delay: float = 0.05,
     ) -> Tuple[int, int]:
-        """Locates UI element via visual grounding and executes physical click.
-
-        Completely eliminates fragile CSS selectors and dynamic DOM hierarchies.
-        Returns the pixel (x, y) coordinates where the click was executed.
-        """
-        # Ensure page is stabilized
-        self.wait_until_visual_stable(timeout=min(2.0, timeout))
-
-        # Grab page screenshot frame
-        frame = self.grab_page_frame()
-
-        # Foveate on semantic target using browser buffer
-        target_norm = self.eye.look_at(label_or_intent, frame=frame)
-        vw, vh = self.get_viewport_size()
-
-        click_x = int(round(target_norm[0] * vw))
-        click_y = int(round(target_norm[1] * vh))
-
-        # Perform mouse action in Playwright
-        if hasattr(self.page, "mouse") and hasattr(self.page.mouse, "click"):
-            self.page.mouse.move(click_x, click_y)
-            if click_delay > 0:
-                time.sleep(click_delay)
-            self.page.mouse.click(click_x, click_y)
-
-        return (click_x, click_y)
+        """Rejects language-grounded clicks until semantic grounding is validated."""
+        raise UnvalidatedGroundingError(
+            "Natural-language targets cannot drive browser input: validated trained "
+            "semantic grounding is unavailable."
+        )
 
     def visual_type(
         self,
@@ -109,11 +82,11 @@ class AVCSPlaywrightEye:
         return (x, y)
 
     def assert_element_visible(self, label_or_intent: str) -> bool:
-        """Visual assertion: returns True if element is grounded with high confidence."""
-        frame = self.grab_page_frame()
-        norm_x, norm_y = self.eye.look_at(label_or_intent, frame=frame)
-        state = self.eye.current_state or self.eye.perceive_now(frame=frame)
-        return 0.0 <= norm_x <= 1.0 and 0.0 <= norm_y <= 1.0 and state.category_confidence > 0.1
+        """Rejects semantic assertions until grounding is validated."""
+        raise UnvalidatedGroundingError(
+            "Natural-language visibility assertions are unavailable until semantic "
+            "grounding is validated."
+        )
 
     # Aliases for developer convenience
     click_visual = visual_click

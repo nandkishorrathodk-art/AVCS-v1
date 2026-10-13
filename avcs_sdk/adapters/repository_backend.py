@@ -11,8 +11,6 @@ import platform
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
-import numpy as np
-
 from avcs.action_broker import (
     ActionBroker,
     ActionClass as RepoActionClass,
@@ -42,12 +40,10 @@ from avcs_sdk.models import (
     ActionRequest,
     ActionResult,
     ActionStatus,
-    BoundingBox,
     NormalizedPoint,
     Observation,
     RiskLevel,
     Target,
-    TargetProvenance,
     VerificationEvidence,
 )
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
@@ -149,49 +145,13 @@ class RepositoryAVCSBackend:
         return obs
 
     async def find_targets(self, description: str, observation: Observation) -> Sequence[Target]:
-        """Grounds natural language descriptions into verified target hotspots."""
+        """Return no candidates until semantic target grounding is implemented."""
         if not self._connected or self.broker is None:
             raise ClientNotConnectedError("RepositoryAVCSBackend is not connected.")
 
         if self._last_observation is None or observation.observation_id != self._last_observation.observation_id:
             raise StaleTargetError("Observation is not the current frame.")
-
-        # Ground candidate regions based on eye perception and affordance hotspots
-        targets: List[Target] = []
-
-        if self._last_eye_state and self._last_eye_state.affordance_hotspots:
-            # Extract highest affordance hotspot (cx, cy, label, conf)
-            top_affordance = self._last_eye_state.affordance_hotspots[0]
-            cx, cy = top_affordance[0], top_affordance[1]
-            raw_conf = float(top_affordance[3]) if len(top_affordance) > 3 else 0.95
-            conf = min(0.98, max(0.85, 0.65 + raw_conf * 0.35))
-            bw, bh = 0.12, 0.06
-            bx = float(np.clip(cx - bw / 2.0, 0.0, 1.0 - bw))
-            by = float(np.clip(cy - bh / 2.0, 0.0, 1.0 - bh))
-
-            t = Target(
-                target_id=f"target-{abs(hash(description)) % 10000}",
-                observation_id=observation.observation_id,
-                label=description,
-                bounds=BoundingBox(x=bx, y=by, width=bw, height=bh),
-                confidence=conf,
-                provenance=TargetProvenance.VISION,
-            )
-            targets.append(t)
-        else:
-            # Default salient center hotspot
-            targets.append(
-                Target(
-                    target_id=f"target-{abs(hash(description)) % 10000}",
-                    observation_id=observation.observation_id,
-                    label=description,
-                    bounds=BoundingBox(x=0.45, y=0.45, width=0.10, height=0.10),
-                    confidence=0.92,
-                    provenance=TargetProvenance.VISION,
-                )
-            )
-
-        return targets
+        return []
 
     async def execute(self, request: ActionRequest) -> ActionResult:
         """Translates public SDK ActionRequest to ActionBroker lifecycle with postcondition proof."""

@@ -100,7 +100,12 @@ from avcs.events import (
 )
 from avcs.sdk import (
     HumanEyeClient,
+    UnvalidatedGroundingError,
     eye,
+)
+from avcs.observe import (
+    capture_desktop_observation,
+    synthesize_natural_language_report,
 )
 from avcs.mcp import AVCSMCPServer, run_mcp_server
 from avcs.cortex_2m import (
@@ -114,7 +119,7 @@ from avcs.cortex_2m import (
     VentralStream2M,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.0.1"
 __author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 
@@ -123,7 +128,10 @@ __all__ = [
     "HumanEye",
     "HumanEyeState",
     "HumanEyeClient",
+    "UnvalidatedGroundingError",
     "eye",
+    "capture_desktop_observation",
+    "synthesize_natural_language_report",
     "MovingObject",
     "MagnocellularMotionEngine",
     "RealTimeCorticalBackbone",

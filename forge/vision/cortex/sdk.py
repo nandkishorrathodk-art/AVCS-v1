@@ -5,6 +5,7 @@ RPA engineers, and computer-use automation systems.
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -14,6 +15,10 @@ import torch
 from forge.vision.capture import open_capture
 from forge.vision.cortex.inference.engine import AVCSInferenceEngine
 from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
+
+
+class UnvalidatedGroundingError(RuntimeError):
+    """Raised when an unvalidated language-grounding estimate is used for motor input."""
 
 
 class ScreenEye:
@@ -43,7 +48,11 @@ class ScreenEye:
     ) -> None:
         self.fps = fps
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.source = source or open_capture()
+        self.source = (
+            source
+            if source is not None
+            else open_capture(prefer_real=True, allow_synthetic_fallback=False)
+        )
         self.cortex = ArtificialVisualCortex().to(self.device).eval()
 
         self.weights_loaded: bool = False
@@ -75,6 +84,22 @@ class ScreenEye:
             from forge.vision.cortex.motor import get_default_driver
             self._drivers[force_virtual] = get_default_driver(force_virtual=force_virtual)
         return self._drivers[force_virtual]
+
+    @staticmethod
+    def _validate_motor_target(target: Tuple[float, float]) -> Tuple[float, float]:
+        if (
+            not isinstance(target, tuple)
+            or len(target) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 1.0
+                for value in target
+            )
+        ):
+            raise ValueError("Motor target must be a finite normalized (x, y) pair within [0.0, 1.0].")
+        return float(target[0]), float(target[1])
 
     def start(self) -> ScreenEye:
         """Starts real-time background perception stream."""
@@ -110,7 +135,7 @@ class ScreenEye:
         return False
 
     def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
-        """Directs the foveal gaze to lock onto the target element."""
+        """Returns an experimental, unvalidated normalized gaze estimate."""
         import hashlib
         # Deterministic text query embedding via SHA256 seed for reproducible visual attention
         seed = int(hashlib.sha256(query.encode("utf-8")).hexdigest()[:8], 16)
@@ -129,7 +154,7 @@ class ScreenEye:
             return target
 
     def locate(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
-        """Alias for look_at: returns normalized (x, y) target coordinates."""
+        """Alias for look_at: returns an experimental gaze estimate, not a grounded target."""
         return self.look_at(query, frame=frame)
 
     def steer_hand(
@@ -143,7 +168,11 @@ class ScreenEye:
             (motor_velocity: (vx, vy), contact_acquired: bool)
         Steers the hand toward the gaze point without calculating absolute pixel jumps.
         """
-        gaze = target_gaze or self.cortex.retina.current_fixation
+        gaze = (
+            self._validate_motor_target(target_gaze)
+            if target_gaze is not None
+            else self.cortex.retina.current_fixation
+        )
         motor_state = self.cortex.servoing.compute_motor_flow(
             gaze_target=gaze,
             current_cursor=current_cursor,
@@ -169,10 +198,17 @@ class ScreenEye:
         Uses closed-loop Fitts' Law velocity curves with zero coordinate jumping.
         Features emergency corner breakout safety abort.
         """
+        if target_gaze is not None:
+            target_gaze = self._validate_motor_target(target_gaze)
+        if click_on_arrival and target_gaze is None:
+            raise UnvalidatedGroundingError(
+                "A click requires an explicit normalized (x, y) coordinate; "
+                "the current fixation is not validated grounding."
+            )
         from forge.vision.cortex.motor import HandEyeServoingController, get_default_driver
         driver = get_default_driver(force_virtual=force_virtual)
         controller = HandEyeServoingController(driver=driver)
-        gaze = target_gaze or self.cortex.retina.current_fixation
+        gaze = target_gaze if target_gaze is not None else self.cortex.retina.current_fixation
         return controller.servo_to(
             target_gaze=gaze,
             timeout_seconds=timeout_seconds,
@@ -189,16 +225,11 @@ class ScreenEye:
         force_virtual: bool = False,
         realtime: bool = False,
     ) -> bool:
-        """Locates visual target by query and physically steers cursor to click it."""
-        target = self.locate(query)
-        res = self.steer_hand_physical(
-            target_gaze=target,
-            click_on_arrival=True,
-            timeout_seconds=timeout_seconds,
-            force_virtual=force_virtual,
-            realtime=realtime,
+        """Rejects semantic motor actions until a validated grounding model is available."""
+        raise UnvalidatedGroundingError(
+            "Natural-language targets cannot drive motor actions: validated trained "
+            "semantic grounding is unavailable. Use an explicit normalized (x, y) coordinate."
         )
-        return bool(res.contact_acquired)
 
     def type_text(
         self,
@@ -372,5 +403,3 @@ class ScreenEye:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
-
-

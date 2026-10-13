@@ -23,8 +23,8 @@ class EnterpriseLicensingServer:
     """Enterprise licensing engine for issuance and node validation."""
 
     def __init__(self, master_signing_key: Optional[str] = None) -> None:
-        self.master_key = master_signing_key or LicenseManager.DEFAULT_MASTER_KEY
-        self.manager = LicenseManager(signing_key=self.master_key)
+        self.manager = LicenseManager(signing_key=master_signing_key)
+        self.master_key = self.manager.signing_key.decode("utf-8")
 
     def issue_enterprise_license(
         self,
@@ -123,4 +123,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -6,6 +6,7 @@ licensing for commercial AVCS deployments.
 from avcs.auth.license import (
     InvalidLicenseError,
     LicenseBindingError,
+    LicenseConfigurationError,
     LicenseError,
     LicenseExpiredError,
     LicenseManager,
@@ -20,10 +21,10 @@ __all__ = [
     "LicensePayload",
     "LicenseTier",
     "LicenseError",
+    "LicenseConfigurationError",
     "LicenseExpiredError",
     "LicenseTamperedError",
     "LicenseBindingError",
     "InvalidLicenseError",
     "get_machine_fingerprint",
 ]
-

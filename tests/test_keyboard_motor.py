@@ -10,7 +10,7 @@ from forge.vision.cortex.motor import (
     SafetyBreakoutException,
     get_default_driver,
 )
-from forge.vision.cortex.sdk import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 from forge.vision.capture import SyntheticScreen
 
 
@@ -39,9 +39,9 @@ def test_screeneye_keyboard_helpers_virtual():
     eye.press_key("escape", force_virtual=True)
     eye.press_hotkey("ctrl", "c", force_virtual=True)
 
-    # Test type_into with virtual driver
-    ok = eye.type_into("search bar", text="test typing", force_virtual=True)
-    assert ok is True
+    # Natural-language target estimates must not authorize typing.
+    with pytest.raises(UnvalidatedGroundingError, match="validated trained semantic grounding"):
+        eye.type_into("search bar", text="test typing", force_virtual=True)
 
     eye.close()
 
@@ -99,4 +99,3 @@ def test_failsafe_latching_and_reset():
     with pytest.raises(SafetyBreakoutException):
         failsafe.check_override((0.5, 0.5), (0.7, 0.7), threshold_norm=0.08)
     assert failsafe.is_tripped is True
-
