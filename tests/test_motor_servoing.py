@@ -12,7 +12,7 @@ from forge.vision.cortex.motor import (
     HandEyeServoingController,
     get_default_driver,
 )
-from forge.vision.cortex.sdk import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 from forge.vision.capture import SyntheticScreen
 
 
@@ -123,6 +123,73 @@ def test_screen_eye_physical_servoing_integration():
     assert res is not None
     assert res.contact_acquired is True
     assert len(res.trajectory) > 0
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        lambda eye: eye.click_target("Save button", force_virtual=True),
+        lambda eye: eye.type_into("Search field", "query", force_virtual=True),
+        lambda eye: eye.steer_hand_physical(
+            target_gaze=None, click_on_arrival=True, force_virtual=True
+        ),
+    ],
+    ids=["query-click", "query-type", "implicit-fixation-click"],
+)
+def test_screen_eye_blocks_ungrounded_motor_actions_before_driver_creation(monkeypatch, action):
+    import forge.vision.cortex.motor as motor
+
+    def unexpected_driver(*args, **kwargs):
+        pytest.fail("Ungrounded actions must be blocked before constructing a motor driver")
+
+    monkeypatch.setattr(motor, "get_default_driver", unexpected_driver)
+    eye = ScreenEye(source=SyntheticScreen(width=320, height=240), load_pretrained=False)
+
+    with pytest.raises(UnvalidatedGroundingError, match="explicit normalized|Natural-language"):
+        action(eye)
+
+
+def test_screen_eye_explicit_coordinate_click_uses_virtual_driver():
+    eye = ScreenEye(source=SyntheticScreen(width=320, height=240), load_pretrained=False)
+
+    result = eye.steer_hand_physical(
+        target_gaze=(0.4, 0.4),
+        click_on_arrival=True,
+        force_virtual=True,
+        realtime=False,
+    )
+
+    assert result.contact_acquired is True
+
+
+@pytest.mark.parametrize("target", [(0.2,), (True, 0.4), (1.1, 0.4), (float("nan"), 0.4)])
+def test_screen_eye_rejects_invalid_explicit_motor_coordinates_before_driver_creation(
+    monkeypatch, target
+):
+    import forge.vision.cortex.motor as motor
+
+    def unexpected_driver(*args, **kwargs):
+        pytest.fail("Invalid coordinates must be rejected before constructing a motor driver")
+
+    monkeypatch.setattr(motor, "get_default_driver", unexpected_driver)
+    eye = ScreenEye(source=SyntheticScreen(width=320, height=240), load_pretrained=False)
+
+    with pytest.raises(ValueError, match="finite normalized"):
+        eye.steer_hand_physical(target_gaze=target, click_on_arrival=True, force_virtual=True)
+
+
+def test_screen_eye_default_capture_does_not_fall_back_to_synthetic(monkeypatch):
+    import forge.vision.cortex.sdk as screen_eye_sdk
+    from forge.vision.capture import CaptureError
+
+    def unavailable_capture(**kwargs):
+        assert kwargs["allow_synthetic_fallback"] is False
+        raise CaptureError("no desktop")
+
+    monkeypatch.setattr(screen_eye_sdk, "open_capture", unavailable_capture)
+
+    with pytest.raises(CaptureError, match="no desktop"):
+        ScreenEye()
 
 
 def test_win32_driver_read_only_on_windows():

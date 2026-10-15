@@ -60,12 +60,14 @@ class VisualRippleVerifier:
         ripple_radius: float = 0.08,  # ~8% of screen around target
         min_ripple_threshold: float = 0.015,
         min_surprise_threshold: float = 0.12,
+        enforce_focus: bool = False,
     ) -> None:
         self.eye = eye
         self.driver = driver or get_default_driver()
         self.ripple_radius = ripple_radius
         self.min_ripple_threshold = min_ripple_threshold
         self.min_surprise_threshold = min_surprise_threshold
+        self.enforce_focus = enforce_focus
 
     def calculate_local_ripple(
         self,
@@ -97,6 +99,36 @@ class VisualRippleVerifier:
         speeds = np.hypot(patch[..., 0], patch[..., 1])
         return float(np.mean(speeds))
 
+    def calculate_local_photometric_delta(
+        self,
+        target: Tuple[float, float],
+        pre_luma: Optional[np.ndarray],
+        post_luma: Optional[np.ndarray],
+    ) -> float:
+        """Computes local photometric luminance patch difference around target."""
+        if pre_luma is None or post_luma is None:
+            return 0.0
+        if pre_luma.shape != post_luma.shape:
+            return 0.0
+        rows, cols = pre_luma.shape[:2]
+        tx, ty = target
+        center_r = int(ty * rows)
+        center_c = int(tx * cols)
+
+        radius_r = max(1, int(self.ripple_radius * rows))
+        radius_c = max(1, int(self.ripple_radius * cols))
+
+        r_min = max(0, center_r - radius_r)
+        r_max = min(rows, center_r + radius_r + 1)
+        c_min = max(0, center_c - radius_c)
+        c_max = min(cols, center_c + radius_c + 1)
+
+        patch_pre = pre_luma[r_min:r_max, c_min:c_max]
+        patch_post = post_luma[r_min:r_max, c_min:c_max]
+        if patch_pre.size == 0 or patch_post.size == 0:
+            return 0.0
+        return float(np.mean(np.abs(patch_post - patch_pre)))
+
     def verify_action(
         self,
         action_name: str,
@@ -117,35 +149,72 @@ class VisualRippleVerifier:
         # 1. Local Optical Flow Ripple
         ripple_energy = self.calculate_local_ripple(target, post_state.motion_field)
 
-        # 2. Photometric Local Delta against pre_state
+        # 2. Photometric Local Patch Delta using downscaled luminance grids
+        pre_luma = getattr(pre_state, "luminance_grid", None) if pre_state else None
+        patch_delta = self.calculate_local_photometric_delta(
+            target, pre_luma, getattr(post_state, "luminance_grid", None)
+        )
+
+        # Peak-hold settlement window (3-tap peak hold for subtle or fast UI transients)
+        if ripple_energy < self.min_ripple_threshold and patch_delta < 0.035 and settle_ms > 0:
+            for _ in range(2):
+                time.sleep(max(0.015, settle_ms / 3000.0))
+                tap_state = self.eye.observe()
+                tap_ripple = self.calculate_local_ripple(target, tap_state.motion_field)
+                tap_delta = self.calculate_local_photometric_delta(
+                    target, pre_luma, getattr(tap_state, "luminance_grid", None)
+                )
+                if tap_ripple > ripple_energy:
+                    ripple_energy = tap_ripple
+                    post_state = tap_state
+                if tap_delta > patch_delta:
+                    patch_delta = tap_delta
+                    post_state = tap_state
+                if ripple_energy >= self.min_ripple_threshold or patch_delta >= 0.035:
+                    break
+
+        # 3. Photometric Local Delta against pre_state optical flow
         photometric_delta = 0.0
         if pre_state is not None and getattr(pre_state, "motion_field", None) is not None:
             pre_local = self.calculate_local_ripple(target, pre_state.motion_field)
             photometric_delta = abs(ripple_energy - pre_local)
 
-        # 3. Predictive Coding Surprise Pulse
+        # 4. Predictive Coding Surprise Pulse
         surprise_pulse = post_state.surprise_score
 
-        # 4. State Transition Detection (Delta_visual)
+        # 5. Local State Transition Detection (strictly restricted to target vicinity)
         diff = post_state.visual_diff
         structural_change = False
         if diff is not None:
-            structural_change = bool(
-                diff.added_elements or diff.removed_ids or diff.modified_elements
-            )
+            target_radius = self.ripple_radius * 1.5
+            tx, ty = target
+            for elem in getattr(diff, "added_elements", []):
+                ex, ey = getattr(elem, "normalized_center", (0.5, 0.5))
+                if math.hypot(ex - tx, ey - ty) <= target_radius:
+                    structural_change = True
+                    break
+            if not structural_change:
+                for elem in getattr(diff, "modified_elements", []):
+                    ex, ey = getattr(elem, "normalized_center", (0.5, 0.5))
+                    if math.hypot(ex - tx, ey - ty) <= target_radius:
+                        structural_change = True
+                        break
+            if not structural_change and getattr(diff, "removed_ids", None):
+                structural_change = True
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         # Decision Logic: Did the screen react locally to the physical actuation?
-        # Requires local ripple, structural change, local photometric delta, or localized surprise
+        # Requires local ripple, local photometric patch delta, or localized structural change
         local_reaction = (
             ripple_energy >= self.min_ripple_threshold
+            or patch_delta >= 0.035
             or structural_change
             or photometric_delta >= self.min_ripple_threshold
         )
         verified = (
             local_reaction
-            or (surprise_pulse >= self.min_surprise_threshold and (ripple_energy > 0.005 or structural_change))
+            or (surprise_pulse >= self.min_surprise_threshold and (ripple_energy > 0.005 or patch_delta >= 0.02 or structural_change))
         )
 
         status = VerificationStatus.VERIFIED if verified else VerificationStatus.RETRY_MICRO_JITTER
@@ -183,6 +252,7 @@ class VisualRippleVerifier:
         max_recovery_tier: int = 3,
         button: str = "left",
         keyboard_fallback_key: Optional[str] = None,
+        enforce_focus: bool = False,
     ) -> VerificationResult:
         """Executes an action through the 5-Tier Self-Healing Escalation Ladder."""
         if action_type not in {"click", "double_click", "type"}:
@@ -191,6 +261,25 @@ class VisualRippleVerifier:
             raise ValueError(f"Unsupported mouse button: {button}")
         t_global = time.perf_counter()
         tx, ty = target
+
+        # Preventative Fail-Closed Gating: Verify focus before dispatching keystrokes if enforced
+        if action_type == "type" and (enforce_focus or getattr(self, "enforce_focus", False)):
+            focus_state = self.eye.verify_focus(target_point=target)
+            if not focus_state.is_focused:
+                return VerificationResult(
+                    status=VerificationStatus.ESCALATE_BLOCKED,
+                    action_name=f"type@{target}",
+                    target_coord=target,
+                    optical_ripple_energy=0.0,
+                    surprise_pulse=0.0,
+                    state_transition_detected=False,
+                    causal_summary=(
+                        f"Typing blocked: target at {target} has no verified visual focus "
+                        f"(conf={focus_state.confidence:.2f}). Keystrokes not dispatched."
+                    ),
+                    recovery_attempt=0,
+                    elapsed_ms=(time.perf_counter() - t_global) * 1000.0,
+                )
 
         # Tier 1: Primary Action Execution
         pre_state = self.eye.observe()

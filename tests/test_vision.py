@@ -13,11 +13,18 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 import torch
 
-from forge.vision.capture import FrameSource, ScreenCapture, SyntheticScreen, open_capture
+from forge.vision.capture import (
+    FrameSource,
+    ScreenCapture,
+    SyntheticScreen,
+    open_capture,
+)
 from forge.vision.dashboard import render_dashboard
 from forge.vision.describer import HeuristicDescriber
+from forge.vision.desktop_context import DesktopWindow
 from forge.vision.encoder import (
     SCENE_TYPES,
     SceneUnderstandingModel,
@@ -332,6 +339,89 @@ def test_pipeline_step_and_stats():
     # The full tick is measured too, so the budget cannot be quoted from
     # perception alone.
     assert s["tick_p50_ms"] >= s["reflex_p50_ms"] * 0.9
+
+
+def test_screenvision_observe_separates_pixels_from_optional_os_context():
+    class TestDesktopContext:
+        def snapshot(self):
+            return {
+                "source": "test_os",
+                "status": "ok",
+                "count": 2,
+                "windows": [
+                    {"title": "Game - example", "is_foreground": True},
+                    {"title": "Other window", "is_foreground": False},
+                ],
+            }
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        desktop_context=TestDesktopContext(),
+        understanding=None,
+    )
+    observation = vis.observe()
+
+    assert json.loads(json.dumps(observation))["schema_version"] == (
+        "avcs.desktop_observation.v1"
+    )
+    assert observation["schema_version"] == "avcs.desktop_observation.v1"
+    assert observation["frame"]["capture_backend"] == "SyntheticScreen"
+    assert observation["frame"]["freshness"] == "fresh"
+    assert observation["visual_perception"]["source"] == "avcs_pixels"
+    assert observation["visual_perception"]["description"]
+    assert any(
+        "does not identify whether content is a game or a video" in item
+        for item in observation["visual_perception"]["limitations"]
+    )
+    assert observation["desktop_context"]["source"] == "test_os"
+    assert observation["desktop_context"]["count"] == 2
+    assert "windows" not in observation["visual_perception"]
+    assert observation["motor_action_authorized"] is False
+
+
+def test_screenvision_observe_marks_os_context_unconfigured():
+    observation = ScreenVision(capture=SyntheticScreen()).observe()
+
+    assert observation["desktop_context"] == {
+        "status": "not_configured",
+        "source": None,
+    }
+
+
+def test_desktop_window_keeps_os_identity_and_pixel_sources_distinct():
+    window = DesktopWindow(
+        handle=12,
+        title="Example window",
+        process_id=34,
+        process_name="example.exe",
+        process_name_status="ok",
+        bounds=(10, 20, 300, 400),
+        is_foreground=True,
+    )
+
+    assert window.to_dict() == {
+        "handle": 12,
+        "title": "Example window",
+        "process_id": 34,
+        "process_name": "example.exe",
+        "process_name_status": "ok",
+        "bounds": [10, 20, 300, 400],
+        "is_foreground": True,
+    }
+
+
+def test_screenvision_observe_surfaces_os_context_errors():
+    class BrokenDesktopContext:
+        def snapshot(self):
+            raise OSError("window enumeration failed")
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        desktop_context=BrokenDesktopContext(),
+    )
+
+    with pytest.raises(OSError, match="window enumeration failed"):
+        vis.observe()
 
 
 def test_model_describer_uses_model_output_not_fallback():

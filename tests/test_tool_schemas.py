@@ -20,7 +20,7 @@ def test_canonical_tools_structure():
     assert "locate" in names
     assert "click" in names
     assert "type_text" in names
-    assert "type_into" in names
+    assert "type_into" not in names
     assert "wait_stable" in names
     assert "get_affordances" in names
     assert "press_hotkey" in names
@@ -74,4 +74,3 @@ def test_mcp_tools_format():
         assert "inputSchema" in t
         assert t["inputSchema"]["type"] == "object"
         json.dumps(t)
-

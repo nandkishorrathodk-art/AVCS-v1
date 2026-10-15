@@ -2,9 +2,14 @@
 
 ## Overview
 
-**AVCS (Artificial Visual Cortex for Screens)** is a biologically inspired, non-generative, real-time vision-language perception system designed specifically for computer screens.
+**AVCS (Artificial Visual Cortex for Screens)** is an experimental Python
+research project containing screen-perception and temporal-model prototypes.
 
-Unlike standard Vision-Language Models (VLMs) that rely on slow autoregressive token generation (300ms–2000ms), AVCS operates at **true biological visual speeds (sub-40ms on GPU, ~75ms on CPU)** by replacing text generation with dense spatial affordance maps, semantic scene categorization, and top-down cross-attention grounding.
+Its modules explore spatial affordance maps, scene-category prediction, and
+query-conditioned gaze estimates. Their presence does not establish trained
+semantic grounding, biological equivalence, real-time performance, or task
+success. Measure each model and capture backend independently before making
+latency or accuracy claims.
 
 ```
                            +----------------------------------------+
@@ -153,4 +158,3 @@ export_onnx(model, save_path="runs/avcs_cortex.onnx")
 ```bash
 python -m pytest tests/test_cortex.py -v
 ```
-

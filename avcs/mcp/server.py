@@ -13,8 +13,7 @@ import time
 from typing import Any, Dict, List, Optional, TextIO
 
 from adapters.tool_schemas import get_mcp_tools
-from forge.vision.cortex.sdk import ScreenEye
-from forge.vision.capture import SyntheticScreen
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 
 logger = logging.getLogger("avcs.mcp")
 
@@ -37,11 +36,7 @@ class AVCSMCPServer:
 
     def _ensure_eye(self) -> ScreenEye:
         if self.eye is None:
-            # Default to ScreenEye with desktop capture (or synthetic fallback)
-            try:
-                self.eye = ScreenEye()
-            except Exception:
-                self.eye = ScreenEye(source=SyntheticScreen())
+            self.eye = ScreenEye()
         return self.eye
 
     def handle_request(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -199,6 +194,7 @@ class AVCSMCPServer:
                 "x": round(float(x), 4),
                 "y": round(float(y), 4),
                 "normalized": True,
+                "status": "experimental_unvalidated_gaze_estimate",
             }
             return [{"type": "text", "text": json.dumps(res)}]
 
@@ -240,21 +236,9 @@ class AVCSMCPServer:
                 msg = f"Steered to ({x_f:.4f}, {y_f:.4f}) and clicked {button}. Contact: {res.contact_acquired}"
                 return [{"type": "text", "text": msg}]
 
-            # Fallback: click current gaze fixation
-            gaze = eye.cortex.retina.current_fixation
-            res = eye.steer_hand_physical(
-                target_gaze=gaze,
-                click_on_arrival=should_arrival_click,
-                force_virtual=self.force_virtual_motor,
-                realtime=False,
+            raise UnvalidatedGroundingError(
+                "A click requires explicit normalized x and y coordinates."
             )
-            from forge.vision.cortex.motor import get_default_driver
-            driver = get_default_driver(force_virtual=self.force_virtual_motor)
-            if double_click:
-                driver.double_click(button=button)
-            elif button != "left":
-                driver.click(button=button)
-            return [{"type": "text", "text": f"Clicked {button} at gaze fixation ({gaze[0]:.4f}, {gaze[1]:.4f})"}]
 
         elif name == "type_text":
             text = args.get("text", "")
@@ -360,4 +344,3 @@ def run_mcp_server(eye: Optional[ScreenEye] = None, force_virtual: bool = False)
         server.run()
     finally:
         server.close()
-

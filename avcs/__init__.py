@@ -32,6 +32,7 @@ from forge.vision.cortex.core import (
 from forge.vision.capture import open_capture, ScreenCapture, SyntheticScreen
 from avcs.weights import (
     download_weights,
+    get_human_eye_weights_path,
     get_weights_path,
     load_avcs_weights,
 )
@@ -99,8 +100,19 @@ from avcs.events import (
     VisualEventType,
 )
 from avcs.sdk import (
+    AVCS,
     HumanEyeClient,
+    UnfocusedInputElementError,
+    UnvalidatedGroundingError,
     eye,
+)
+from avcs.observe import (
+    capture_desktop_observation,
+    synthesize_natural_language_report,
+)
+from avcs.focus import (
+    VisualFocusDetector,
+    VisualFocusState,
 )
 from avcs.mcp import AVCSMCPServer, run_mcp_server
 from avcs.cortex_2m import (
@@ -114,21 +126,28 @@ from avcs.cortex_2m import (
     VentralStream2M,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.1.1"
 __author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 
 __all__ = [
-    # Biological Real-Time Human Eye Intelligence Model & SDK
+    # Biological Real-Time Human Eye Intelligence Model & SDK (System 1: Eyes + Hands)
+    "AVCS",
     "HumanEye",
     "HumanEyeState",
     "HumanEyeClient",
+    "UnfocusedInputElementError",
+    "UnvalidatedGroundingError",
     "eye",
+    "capture_desktop_observation",
+    "synthesize_natural_language_report",
     "MovingObject",
     "MagnocellularMotionEngine",
     "RealTimeCorticalBackbone",
     "FastAffordanceHead",
     "SmoothPursuitTracker",
+    "VisualFocusDetector",
+    "VisualFocusState",
     # Scaled 2.0M Parameter Cortical Foundation Model
     "UnifiedCortex2M",
     "HumanEye2M",
@@ -195,6 +214,7 @@ __all__ = [
     "SyntheticScreen",
     # Checkpoint & Weights Management
     "get_weights_path",
+    "get_human_eye_weights_path",
     "load_avcs_weights",
     "download_weights",
     # Real-Time Neuro-Streaming & Reflex

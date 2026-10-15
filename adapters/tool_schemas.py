@@ -13,8 +13,8 @@ CANONICAL_TOOLS_REGISTRY: List[Dict[str, Any]] = [
     {
         "name": "locate",
         "description": (
-            "Locate a visual or semantic UI element on the screen using AVCS gaze foveation. "
-            "Returns normalized (x, y) coordinates within the [0.0, 1.0] screen viewport range."
+            "Returns an experimental, unvalidated gaze estimate for a language query. "
+            "The coordinates are not semantic grounding and must not authorize motor actions."
         ),
         "parameters": {
             "type": "object",
@@ -33,23 +33,19 @@ CANONICAL_TOOLS_REGISTRY: List[Dict[str, Any]] = [
     {
         "name": "click",
         "description": (
-            "Steer the mouse cursor to a target coordinate or query using closed-loop "
-            "biological servoing and perform a mouse click."
+            "Steer to an explicit caller-supplied normalized coordinate and click. "
+            "Language queries are not accepted as motor targets."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "x": {
                     "type": "number",
-                    "description": "Normalized horizontal coordinate [0.0 - 1.0]. Optional if query is specified.",
+                    "description": "Explicit normalized horizontal coordinate [0.0 - 1.0].",
                 },
                 "y": {
                     "type": "number",
-                    "description": "Normalized vertical coordinate [0.0 - 1.0]. Optional if query is specified.",
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Optional element description to foveate and click in a single step.",
+                    "description": "Explicit normalized vertical coordinate [0.0 - 1.0].",
                 },
                 "button": {
                     "type": "string",
@@ -63,7 +59,7 @@ CANONICAL_TOOLS_REGISTRY: List[Dict[str, Any]] = [
                     "description": "If True, performs a double-click.",
                 },
             },
-            "required": [],
+            "required": ["x", "y"],
         },
     },
     {
@@ -90,36 +86,6 @@ CANONICAL_TOOLS_REGISTRY: List[Dict[str, Any]] = [
                 },
             },
             "required": ["text"],
-        },
-    },
-    {
-        "name": "type_into",
-        "description": (
-            "Atomic action: locates a target input field by visual query, clicks to focus, and types text."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Visual or semantic description of the input field.",
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Text to type into the field.",
-                },
-                "clear_first": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Whether to clear existing field content before typing.",
-                },
-                "press_enter": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Whether to press Enter after typing.",
-                },
-            },
-            "required": ["query", "text"],
         },
     },
     {
@@ -252,4 +218,3 @@ def get_mcp_tools() -> List[Dict[str, Any]]:
             "inputSchema": copy.deepcopy(tool["parameters"]),
         })
     return tools
-

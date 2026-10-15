@@ -60,9 +60,27 @@ def test_openai_driver_step(eye):
     assert result["role"] == "tool"
     assert result["tool_call_id"] == "call_99"
     parsed = json.loads(result["content"])
-    assert parsed["action"] == "type_into"
-    assert parsed["target"] == "Search input"
+    assert "validated trained semantic grounding" in parsed["error"]
+    assert driver.step_history[-1].success is False
 
+    driver.close()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"query": "Save button"}, {}],
+    ids=["language-query", "implicit-fixation"],
+)
+def test_driver_blocks_click_without_validated_or_explicit_target(eye, arguments):
+    driver = AnthropicAVCSDriver(eye=eye, force_virtual_motor=True)
+    before_clicks = list(driver.reflex.driver.click_history)
+
+    output, success, error = driver.execute_tool("click", arguments)
+
+    assert output is None
+    assert success is False
+    assert "explicit normalized" in error or "validated trained semantic grounding" in error
+    assert driver.reflex.driver.click_history == before_clicks
     driver.close()
 
 
@@ -111,4 +129,3 @@ def test_driver_wait_stable_and_all_tools(eye):
     assert driver.step_history[-1].output["keys"] == ["ctrl", "c"]
 
     driver.close()
-

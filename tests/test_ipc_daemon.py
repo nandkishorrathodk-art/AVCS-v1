@@ -112,7 +112,7 @@ def test_shared_memory_latency_benchmark():
 
 def test_enterprise_licensing_issuance_and_verification():
     """Test air-gapped enterprise license generation, verification, and hardware gating."""
-    server = EnterpriseLicensingServer(master_signing_key="unit_test_secret_key_2026")
+    server = EnterpriseLicensingServer(master_signing_key="unit_test_secret_key_2026_0123456789")
     current_fp = get_machine_fingerprint()
 
     # 1. Portable license (unbound)
@@ -153,4 +153,3 @@ def test_hardware_fingerprint_deterministic():
     fp2 = get_machine_fingerprint()
     assert fp1 == fp2
     assert len(fp1) >= 16
-

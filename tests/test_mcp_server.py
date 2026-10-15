@@ -56,7 +56,7 @@ def test_mcp_tools_list(test_server):
     assert "locate" in tool_names
     assert "click" in tool_names
     assert "type_text" in tool_names
-    assert "type_into" in tool_names
+    assert "type_into" not in tool_names
     assert "wait_stable" in tool_names
     assert "get_affordances" in tool_names
 
@@ -81,10 +81,11 @@ def test_mcp_tools_call_locate(test_server):
     assert parsed["target"] == "Submit button"
     assert 0.0 <= parsed["x"] <= 1.0
     assert 0.0 <= parsed["y"] <= 1.0
+    assert parsed["status"] == "experimental_unvalidated_gaze_estimate"
 
 
 def test_mcp_tools_call_click(test_server):
-    # Click with query
+    # Unvalidated language grounding cannot authorize a motor action.
     req = {
         "jsonrpc": "2.0",
         "id": 5,
@@ -97,7 +98,8 @@ def test_mcp_tools_call_click(test_server):
     resp = test_server.handle_request(req)
     assert resp["id"] == 5
     assert "result" in resp
-    assert "Clicked" in resp["result"]["content"][0]["text"] or "Foveated" in resp["result"]["content"][0]["text"]
+    assert resp["result"]["isError"] is True
+    assert "validated trained semantic grounding" in resp["result"]["content"][0]["text"]
 
     # Click with normalized coords
     req2 = {
@@ -141,7 +143,21 @@ def test_mcp_tools_call_type_into(test_server):
     }
     resp = test_server.handle_request(req)
     assert resp["id"] == 8
-    assert "Typed into 'Username field'" in resp["result"]["content"][0]["text"]
+    assert resp["result"]["isError"] is True
+    assert "validated trained semantic grounding" in resp["result"]["content"][0]["text"]
+
+
+def test_mcp_click_without_target_is_rejected(test_server):
+    req = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "click", "arguments": {}},
+    }
+    resp = test_server.handle_request(req)
+
+    assert resp["result"]["isError"] is True
+    assert "explicit normalized x and y" in resp["result"]["content"][0]["text"]
 
 
 def test_mcp_tools_call_affordances_and_stability(test_server):
@@ -243,4 +259,3 @@ def test_mcp_error_handling_and_notifications(test_server):
     assert resp_wait["id"] == 100
     assert resp_wait["result"]["isError"] is False
     assert "Stability reached: True" in resp_wait["result"]["content"][0]["text"]
-

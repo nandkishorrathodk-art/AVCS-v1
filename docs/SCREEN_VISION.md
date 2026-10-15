@@ -141,3 +141,39 @@ python3 -m forge.vision_demo --vlm                     # try a local VLM caption
 
 Outputs `runs/screen_vision.html` (graphical dashboard, inline SVG, no external
 assets) and `runs/screen_vision.json` (pollable typed state).
+
+## Asking an LLM about the desktop
+
+`ScreenVision.observe()` returns one adapter-neutral observation for a
+downstream LLM or application. It separates pixel-derived AVCS signals from
+optional OS window metadata; it does not call an LLM, expose MCP, or perform
+mouse/keyboard actions.
+
+```python
+from forge.vision.capture import ScreenCapture
+from forge.vision.desktop_context import Win32DesktopContextProvider
+from forge.vision.pipeline import ScreenVision
+
+vision = ScreenVision(
+    capture=ScreenCapture().open(),
+    desktop_context=Win32DesktopContextProvider(),
+)
+try:
+    observation = vision.observe()
+    # Pass this structured evidence to the application's existing LLM call.
+finally:
+    vision.stop()
+```
+
+The Win32 provider is opt-in. Its count means visible, titled, top-level
+windows; titles, process names/IDs, and bounds are labeled as OS context and
+are not AVCS visual recognition. A process name may be unavailable when Windows
+does not permit querying it. Without a provider, `desktop_context.status` is
+`not_configured`. Capture and OS enumeration errors are surfaced to the caller.
+
+The pixel description reports coarse visual structure and change. Motion alone
+cannot tell whether a moving scene is a game or a video, and AVCS does not
+transcribe text. The returned interpretation guidance asks downstream language
+models to preserve those uncertainties. This is an observation input contract,
+not evidence of an integrated LLM provider or reliable desktop activity
+recognition.

@@ -1,0 +1,301 @@
+{
+  "metadata": {
+    "timestamp_iso": "2026-10-15T05:06:57Z",
+    "platform": "Windows 11 (AMD64)",
+    "processor": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "physical_cores": 8,
+    "logical_cores": 10,
+    "pytorch_version": "2.14.0+cpu",
+    "pytorch_threads": 1,
+    "total_ram_gb": 15.54,
+    "iterations": 500,
+    "warmup_iterations": 30
+  },
+  "soak_test_summary": {
+    "total_iterations": 500,
+    "total_wall_time_s": 1.98,
+    "true_sustained_fps": 253.08,
+    "latency_percentiles_ms": {
+      "min": 0.27,
+      "p50": 0.59,
+      "p90": 7.54,
+      "p95": 8.83,
+      "p99": 12.66,
+      "max": 15.57,
+      "mean": 1.69,
+      "std": 2.93
+    },
+    "latency_slope_ms_per_iter": -0.0018,
+    "thermal_drift_detected": false,
+    "epoch_stability": [
+      {
+        "epoch": 1,
+        "iterations": "1-100",
+        "mean_ms": 1.69,
+        "p50_ms": 0.68,
+        "p90_ms": 7.28,
+        "p95_ms": 8.15,
+        "min_ms": 0.29,
+        "max_ms": 15.01,
+        "fps": 1473.5
+      },
+      {
+        "epoch": 2,
+        "iterations": "101-200",
+        "mean_ms": 2.44,
+        "p50_ms": 0.82,
+        "p90_ms": 10.05,
+        "p95_ms": 11.75,
+        "min_ms": 0.28,
+        "max_ms": 15.57,
+        "fps": 1221.4
+      },
+      {
+        "epoch": 3,
+        "iterations": "201-300",
+        "mean_ms": 1.52,
+        "p50_ms": 0.55,
+        "p90_ms": 7.38,
+        "p95_ms": 8.02,
+        "min_ms": 0.27,
+        "max_ms": 13.82,
+        "fps": 1832.2
+      },
+      {
+        "epoch": 4,
+        "iterations": "301-400",
+        "mean_ms": 1.41,
+        "p50_ms": 0.52,
+        "p90_ms": 2.43,
+        "p95_ms": 8.53,
+        "min_ms": 0.28,
+        "max_ms": 11.01,
+        "fps": 1938.5
+      },
+      {
+        "epoch": 5,
+        "iterations": "401-500",
+        "mean_ms": 1.37,
+        "p50_ms": 0.47,
+        "p90_ms": 2.86,
+        "p95_ms": 8.05,
+        "min_ms": 0.28,
+        "max_ms": 11.36,
+        "fps": 2139.7
+      }
+    ]
+  },
+  "memory_leak_audit": {
+    "initial_rss_mb": 228.06,
+    "final_rss_mb_pre_collect": 230.95,
+    "final_rss_mb_post_collect": 230.95,
+    "peak_rss_mb": 230.95,
+    "delta_rss_mb": 2.89,
+    "rss_slope_mb_per_iter": 0.001566,
+    "initial_vms_mb": 500.77,
+    "final_vms_mb": 502.83,
+    "initial_os_handles": 224,
+    "final_os_handles": 224,
+    "delta_os_handles": 0,
+    "initial_gdi_objects": 0,
+    "final_gdi_objects": 0,
+    "initial_user_objects": 0,
+    "final_user_objects": 0,
+    "initial_gc_objects": 201835,
+    "final_gc_objects_pre_collect": 204358,
+    "final_gc_objects_post_collect": 203816,
+    "uncollectable_garbage_cycles": 0,
+    "type_distribution_deltas": {
+      "HumanEyeState": {
+        "initial": 1,
+        "final": 1,
+        "delta": 0
+      },
+      "Tensor": {
+        "initial": 31,
+        "final": 31,
+        "delta": 0
+      },
+      "UIMLElement": {
+        "initial": 18,
+        "final": 205,
+        "delta": 187
+      },
+      "UIMLTree": {
+        "initial": 2,
+        "final": 2,
+        "delta": 0
+      },
+      "VisualDiff": {
+        "initial": 6,
+        "final": 67,
+        "delta": 61
+      },
+      "dict": {
+        "initial": 33428,
+        "final": 33577,
+        "delta": 149
+      },
+      "list": {
+        "initial": 8911,
+        "final": 9112,
+        "delta": 201
+      },
+      "set": {
+        "initial": 1736,
+        "final": 1739,
+        "delta": 3
+      },
+      "tuple": {
+        "initial": 24172,
+        "final": 24439,
+        "delta": 267
+      }
+    },
+    "bounded_collections_audit": {
+      "_latencies_len": 100,
+      "_latencies_maxlen": 100,
+      "memory_diff_history_len": 66,
+      "memory_diff_history_maxlen": 100,
+      "memory_registry_len": 12,
+      "memory_lifecycles_len": 12,
+      "memory_occlusion_ttl_len": 9
+    },
+    "leak_detected": true
+  },
+  "subcomponent_profiling": {
+    "subcomponents": {
+      "preprocessing_1080p": {
+        "name": "Screen Preprocessing (1080p -> 128x128)",
+        "min_ms": 0.216,
+        "p50_ms": 0.231,
+        "p90_ms": 0.525,
+        "p95_ms": 0.596,
+        "p99_ms": 0.935,
+        "max_ms": 1.528,
+        "mean_ms": 0.296,
+        "std_ms": 0.168,
+        "fps": 4323.4
+      },
+      "preprocessing_synthetic": {
+        "name": "Screen Preprocessing (Synthetic 640x360 -> 128x128)",
+        "min_ms": 0.218,
+        "p50_ms": 0.244,
+        "p90_ms": 0.528,
+        "p95_ms": 0.641,
+        "p99_ms": 1.002,
+        "max_ms": 1.11,
+        "mean_ms": 0.327,
+        "std_ms": 0.165,
+        "fps": 4090.8
+      },
+      "motion_optical_flow": {
+        "name": "Magnocellular Motion Flow (16x24 optical grid)",
+        "min_ms": 0.195,
+        "p50_ms": 0.276,
+        "p90_ms": 0.54,
+        "p95_ms": 0.687,
+        "p99_ms": 1.027,
+        "max_ms": 1.039,
+        "mean_ms": 0.34,
+        "std_ms": 0.171,
+        "fps": 3627.8
+      },
+      "backbone_forward": {
+        "name": "Cortical Feature Backbone (ConvBNAct + Inverted Residuals)",
+        "min_ms": 2.494,
+        "p50_ms": 4.144,
+        "p90_ms": 6.025,
+        "p95_ms": 6.215,
+        "p99_ms": 7.843,
+        "max_ms": 8.796,
+        "mean_ms": 4.289,
+        "std_ms": 1.202,
+        "fps": 241.3
+      },
+      "affordance_head": {
+        "name": "Fast Affordance Head (NMS & Hotspot Extraction)",
+        "min_ms": 0.242,
+        "p50_ms": 0.315,
+        "p90_ms": 0.544,
+        "p95_ms": 0.711,
+        "p99_ms": 1.475,
+        "max_ms": 1.582,
+        "mean_ms": 0.375,
+        "std_ms": 0.195,
+        "fps": 3170.1
+      },
+      "foveal_inspection": {
+        "name": "Foveal Acuity Inspection (Unscaled Crop + Acuity Head + BBox)",
+        "min_ms": 2.257,
+        "p50_ms": 3.154,
+        "p90_ms": 4.235,
+        "p95_ms": 5.051,
+        "p99_ms": 16.481,
+        "max_ms": 25.99,
+        "mean_ms": 3.598,
+        "std_ms": 2.273,
+        "fps": 317.1
+      },
+      "ventral_stream": {
+        "name": "Ventral Stream (Scene Category & Visual Latent)",
+        "min_ms": 0.14,
+        "p50_ms": 0.166,
+        "p90_ms": 0.342,
+        "p95_ms": 0.413,
+        "p99_ms": 0.736,
+        "max_ms": 1.053,
+        "mean_ms": 0.216,
+        "std_ms": 0.125,
+        "fps": 6015.0
+      },
+      "memory_diff_step": {
+        "name": "Episodic Memory Diff Step (UIML Tree + Hungarian Re-ID + Diff)",
+        "min_ms": 0.83,
+        "p50_ms": 1.004,
+        "p90_ms": 1.457,
+        "p95_ms": 1.623,
+        "p99_ms": 2.061,
+        "max_ms": 2.15,
+        "mean_ms": 1.106,
+        "std_ms": 0.27,
+        "fps": 995.7
+      },
+      "full_observe_tick": {
+        "name": "Full HumanEye.observe() End-to-End Tick",
+        "min_ms": 0.266,
+        "p50_ms": 0.371,
+        "p90_ms": 0.93,
+        "p95_ms": 9.054,
+        "p99_ms": 10.795,
+        "max_ms": 12.183,
+        "mean_ms": 1.114,
+        "std_ms": 2.429,
+        "fps": 2691.8
+      }
+    },
+    "breakdown_percentages": {
+      "preprocessing_synthetic": 65.8,
+      "motion_optical_flow": 74.4,
+      "backbone_forward": 1117.0,
+      "affordance_head": 84.9,
+      "ventral_stream": 44.7,
+      "memory_diff_step": 270.6
+    },
+    "primary_bottleneck": {
+      "name": "Cortical Backbone Forward",
+      "p50_ms": 4.144,
+      "percentage_of_tick": 1117.0
+    },
+    "secondary_bottleneck": {
+      "name": "Memory Diff Step",
+      "p50_ms": 1.004,
+      "percentage_of_tick": 270.6
+    },
+    "foveal_inspection_standalone": {
+      "p50_ms": 3.154,
+      "p95_ms": 5.051,
+      "fps": 317.1
+    }
+  }
+}

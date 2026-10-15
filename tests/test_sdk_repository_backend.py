@@ -13,12 +13,9 @@ from avcs_sdk import (
     ActionResult,
     ActionStatus,
     AVCSClient,
-    BoundingBox,
     NormalizedPoint,
     RepositoryAVCSBackend,
     RiskLevel,
-    Target,
-    TargetProvenance,
 )
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
 
@@ -40,20 +37,12 @@ async def test_repository_backend_lifecycle_and_observation():
 
 @pytest.mark.asyncio
 async def test_repository_backend_find_targets():
-    """Verify that find_targets returns properly normalized targets."""
+    """Verify that no semantic targets are fabricated from generic saliency."""
     backend = RepositoryAVCSBackend()
     async with AVCSClient(backend) as client:
         obs = await client.observe()
         targets = await client.find_targets("Save Button", observation=obs)
-        assert len(targets) >= 1
-        t = targets[0]
-        assert t.observation_id == obs.observation_id
-        assert 0.0 <= t.bounds.x <= 1.0
-        assert 0.0 <= t.bounds.y <= 1.0
-        assert 0.0 < t.bounds.width <= 1.0
-        assert 0.0 < t.bounds.height <= 1.0
-        assert t.confidence >= 0.70
-        assert t.provenance == TargetProvenance.VISION
+        assert targets == []
 
 
 @pytest.mark.asyncio
@@ -62,11 +51,9 @@ async def test_repository_backend_click_with_verified_evidence():
     backend = RepositoryAVCSBackend()
     async with AVCSClient(backend) as client:
         obs = await client.observe()
-        targets = await client.find_targets("Submit", observation=obs)
-        target = targets[0]
-
         result = await client.click(
-            target=target,
+            point=NormalizedPoint(0.5, 0.5),
+            observation=obs,
             expected_postcondition="Submit state update",
             action_class=ActionClass.IDEMPOTENT,
         )

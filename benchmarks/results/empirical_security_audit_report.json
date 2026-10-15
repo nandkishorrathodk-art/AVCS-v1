@@ -1,0 +1,286 @@
+{
+  "timestamp": "2026-10-15T05:26:48Z",
+  "total_runtime_s": 9.88,
+  "temporal_frequency_analysis": {
+    "biological": {
+      "30fps": {
+        "0.8Hz": {
+          "total_frames": 114,
+          "half_period_frames": 19,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "1.0Hz": {
+          "total_frames": 90,
+          "half_period_frames": 15,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "1.2Hz": {
+          "total_frames": 72,
+          "half_period_frames": 12,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "1.5Hz": {
+          "total_frames": 60,
+          "half_period_frames": 10,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "2.0Hz": {
+          "total_frames": 48,
+          "half_period_frames": 8,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        }
+      },
+      "60fps": {
+        "0.8Hz": {
+          "total_frames": 228,
+          "half_period_frames": 38,
+          "total_focused_pct": 76.75,
+          "on_phase_focused_pct": 61.4,
+          "off_phase_focused_pct": 92.11,
+          "blinking_detected_pct": 76.75,
+          "temporal_blind_duty_cycle_pct": 23.25
+        },
+        "1.0Hz": {
+          "total_frames": 180,
+          "half_period_frames": 30,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "1.2Hz": {
+          "total_frames": 150,
+          "half_period_frames": 25,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "1.5Hz": {
+          "total_frames": 120,
+          "half_period_frames": 20,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "2.0Hz": {
+          "total_frames": 90,
+          "half_period_frames": 15,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        }
+      }
+    },
+    "out_of_spec": {
+      "30fps": {
+        "0.2Hz": {
+          "total_frames": 450,
+          "half_period_frames": 75,
+          "total_focused_pct": 38.89,
+          "on_phase_focused_pct": 31.11,
+          "off_phase_focused_pct": 46.67,
+          "blinking_detected_pct": 38.89,
+          "temporal_blind_duty_cycle_pct": 61.11
+        },
+        "0.5Hz": {
+          "total_frames": 180,
+          "half_period_frames": 30,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "5.0Hz": {
+          "total_frames": 18,
+          "half_period_frames": 3,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "10.0Hz": {
+          "total_frames": 12,
+          "half_period_frames": 2,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "30.0Hz": {
+          "total_frames": 6,
+          "half_period_frames": 1,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        }
+      },
+      "60fps": {
+        "0.2Hz": {
+          "total_frames": 900,
+          "half_period_frames": 150,
+          "total_focused_pct": 19.44,
+          "on_phase_focused_pct": 15.56,
+          "off_phase_focused_pct": 23.33,
+          "blinking_detected_pct": 19.44,
+          "temporal_blind_duty_cycle_pct": 80.56
+        },
+        "0.5Hz": {
+          "total_frames": 360,
+          "half_period_frames": 60,
+          "total_focused_pct": 48.61,
+          "on_phase_focused_pct": 38.89,
+          "off_phase_focused_pct": 58.33,
+          "blinking_detected_pct": 48.61,
+          "temporal_blind_duty_cycle_pct": 51.39
+        },
+        "5.0Hz": {
+          "total_frames": 36,
+          "half_period_frames": 6,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "10.0Hz": {
+          "total_frames": 18,
+          "half_period_frames": 3,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        },
+        "30.0Hz": {
+          "total_frames": 6,
+          "half_period_frames": 1,
+          "total_focused_pct": 83.33,
+          "on_phase_focused_pct": 66.67,
+          "off_phase_focused_pct": 100.0,
+          "blinking_detected_pct": 83.33,
+          "temporal_blind_duty_cycle_pct": 16.67
+        }
+      }
+    }
+  },
+  "adversarial_edge_cases": {
+    "static_vertical_lines": {
+      "trials": 50,
+      "false_positive_count": 0,
+      "correct_rejection_count": 50,
+      "false_positive_rate_pct": 0.0,
+      "mean_confidence": 0.4
+    },
+    "blinking_taskbar_badges": {
+      "trials": 50,
+      "false_positive_count": 50,
+      "correct_rejection_count": 0,
+      "false_positive_rate_pct": 100.0,
+      "mean_confidence": 0.917
+    },
+    "scrolling_text": {
+      "trials": 50,
+      "false_positive_count": 0,
+      "correct_rejection_count": 50,
+      "false_positive_rate_pct": 0.0,
+      "mean_confidence": 0.4
+    },
+    "animated_loading_spinner": {
+      "trials": 50,
+      "false_positive_count": 0,
+      "correct_rejection_count": 50,
+      "false_positive_rate_pct": 0.0,
+      "mean_confidence": 0.0
+    },
+    "video_playback_motion": {
+      "trials": 50,
+      "false_positive_count": 0,
+      "correct_rejection_count": 50,
+      "false_positive_rate_pct": 0.0,
+      "mean_confidence": 0.0
+    }
+  },
+  "fail_closed_contract_audit": {
+    "trials": 50,
+    "contract_breach_count": 0,
+    "contract_breach_rate_pct": 0.0,
+    "min_confidence_with_is_focused_true": 0.0,
+    "max_confidence_with_is_focused_true": 0.729,
+    "code_enforces_0_70_threshold": false
+  },
+  "typing_prevention_audit": {
+    "sdk_methods": {
+      "HumanEyeClient.type_text": {
+        "pre_action_focus_check": false,
+        "dispatches_os_keystrokes_immediately": true,
+        "can_prevent_unfocused_typing": false
+      },
+      "HumanEyeClient.type_into": {
+        "pre_action_focus_check": false,
+        "dispatches_os_keystrokes_immediately": true,
+        "can_prevent_unfocused_typing": false
+      },
+      "HumanEyeClient.type_and_verify": {
+        "pre_action_focus_check": false,
+        "dispatches_os_keystrokes_immediately": true,
+        "can_prevent_unfocused_typing": false,
+        "post_hoc_verification_only": true
+      },
+      "VisualRippleVerifier.execute_and_verify('type')": {
+        "pre_action_focus_check": false,
+        "dispatches_os_keystrokes_immediately": true,
+        "can_prevent_unfocused_typing": false,
+        "documented_behavior": "Dispatches keystrokes unconditionally at line 274 before verify_action at line 278."
+      },
+      "HumanEyeClient.check_focus": {
+        "callable": false,
+        "error": "AttributeError: 'VisualFocusDetector' object has no attribute 'detect_focus'",
+        "can_prevent_unfocused_typing": false
+      }
+    },
+    "empirical_test": {
+      "target": [
+        0.1,
+        0.1
+      ],
+      "keystrokes_dispatched_to_driver": true,
+      "dispatched_text": "UNVERIFIED_KEYSTROKES_TEST",
+      "verifier_returned_success": true,
+      "verifier_status": "verified",
+      "verifier_summary": "2 element(s) dismissed. Appeared: 'Search or Input Field', 'Dynamic Entity'. 3 element state(s) updated.",
+      "conclusion": "Typing is NEVER prevented when focus is absent or unverified."
+    }
+  }
+}

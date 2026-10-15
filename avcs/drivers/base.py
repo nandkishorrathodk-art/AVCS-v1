@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from adapters.tool_schemas import get_canonical_tools
-from forge.vision.cortex.sdk import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 from avcs.stream.reflex_controller import GameReflexController
 
 
@@ -85,20 +85,9 @@ class BaseAVCSDriver(abc.ABC):
                     tool_success = True
 
                 else:
-                    gaze = self.eye.cortex.retina.current_fixation
-                    should_arrival_click = (not double_click and button == "left")
-                    res = self.eye.steer_hand_physical(
-                        target_gaze=gaze,
-                        click_on_arrival=should_arrival_click,
-                        force_virtual=self.force_virtual_motor,
-                        realtime=False,
+                    raise UnvalidatedGroundingError(
+                        "A click requires an explicit normalized (x, y) coordinate."
                     )
-                    if double_click:
-                        self.reflex.driver.double_click(button=button)
-                    elif button != "left":
-                        self.reflex.driver.click(button=button)
-                    tool_output = {"action": "click", "fixation": gaze, "contact": res.contact_acquired}
-                    tool_success = True
 
             elif name == "type_text":
                 text = args.get("text", "")
@@ -191,4 +180,3 @@ class BaseAVCSDriver(abc.ABC):
     def close(self) -> None:
         self.reflex.close()
         self.eye.close()
-

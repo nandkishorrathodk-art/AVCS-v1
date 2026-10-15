@@ -46,3 +46,47 @@ def test_desktop_gui_app_initialization_and_widgets():
     # Clean teardown
     app.on_close()
 
+
+def test_desktop_gui_canvas_and_motor_interactions():
+    """Verify canvas clicks, affordance snapping, and motor servoing trigger correctly."""
+    root = tk.Tk()
+    root.withdraw()
+
+    app = AVCSDesktopApp(root=root, fps=10, source=SyntheticScreen(640, 480))
+
+    assert app.btn_snap_affordance is not None
+    assert app.btn_steer["state"] == "normal"
+    assert app.btn_steer_click["state"] == "normal"
+
+    # Simulate canvas click event
+    class DummyEvent:
+        x = 320
+        y = 240
+
+    app.canvas.winfo_width = lambda: 640
+    app.canvas.winfo_height = lambda: 480
+    app.on_canvas_click(DummyEvent())
+    assert app.current_target_gaze is not None
+    assert abs(app.current_target_gaze[0] - 0.5) < 0.05
+    assert abs(app.current_target_gaze[1] - 0.5) < 0.05
+
+    # Simulate affordance snap
+    from forge.vision.cortex.model import CortexState
+    import numpy as np
+    app.latest_state = CortexState(
+        visual_latent=np.zeros(128, dtype=np.float32),
+        primary_category="desktop",
+        category_confidence=0.95,
+        text_density=0.1,
+        stability_state="stable",
+        surprise_score=0.01,
+        fixation=(0.5, 0.5),
+        action_hotspots=[(0.2, 0.3, "clickable", 0.9)],
+    )
+    app.on_snap_affordance_clicked()
+    assert app.current_target_gaze == (0.2, 0.3)
+
+    # Clean teardown
+    app.on_close()
+
+

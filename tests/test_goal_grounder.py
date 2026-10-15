@@ -297,6 +297,9 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
     assert report["pck_1_percent_diagonal"] == 0
     assert report["pck_2_percent_diagonal"] == 1
     assert report["pck_5_percent_diagonal"] == 1
+    assert report["baselines"]["screen_center"]["mean_normalized_point_distance"] == 0
+    assert report["baselines"]["training_mean_click"]["mean_normalized_point_distance"] == 0
+    assert report["model_beats_training_mean_baseline"] is False
     assert report["target_box_hit_rate"].startswith("not_measurable")
     assert report["llm_or_desktop_actions_used"] is False
 

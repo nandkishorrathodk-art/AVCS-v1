@@ -19,11 +19,47 @@ if _repo_root not in sys.path:
 from avcs.goal_grounder import load_grounding_checkpoint
 from avcs.training.demonstrations import (
     DemonstrationClickDataset,
+    DemoRecord,
     discover_demonstrations,
     fingerprint_sessions,
     split_sessions,
 )
 from avcs.training.train_grounder import _decode_canvas_points
+
+
+def _point_metrics(
+    predictions: list[tuple[float, float]],
+    records: list[DemoRecord],
+) -> dict[str, float]:
+    if len(predictions) != len(records) or not records:
+        raise ValueError("Point metrics require one prediction per demonstration")
+
+    normalized_errors: list[float] = []
+    pixel_errors: list[float] = []
+    diagonal_errors: list[float] = []
+    for prediction, record in zip(predictions, records):
+        dx_norm = prediction[0] - record.point_norm[0]
+        dy_norm = prediction[1] - record.point_norm[1]
+        normalized_errors.append((dx_norm * dx_norm + dy_norm * dy_norm) ** 0.5)
+        with Image.open(record.frame_path) as image:
+            width, height = image.size
+        dx_pixels = dx_norm * width
+        dy_pixels = dy_norm * height
+        pixel_error = (dx_pixels * dx_pixels + dy_pixels * dy_pixels) ** 0.5
+        pixel_errors.append(pixel_error)
+        diagonal_errors.append(pixel_error / (width * width + height * height) ** 0.5)
+
+    sample_count = len(records)
+    return {
+        "mean_normalized_point_distance": sum(normalized_errors) / sample_count,
+        "mean_pixel_point_distance": sum(pixel_errors) / sample_count,
+        "pck_1_percent_diagonal": sum(error <= 0.01 for error in diagonal_errors)
+        / sample_count,
+        "pck_2_percent_diagonal": sum(error <= 0.02 for error in diagonal_errors)
+        / sample_count,
+        "pck_5_percent_diagonal": sum(error <= 0.05 for error in diagonal_errors)
+        / sample_count,
+    }
 
 
 def evaluate_grounder(
@@ -107,6 +143,17 @@ def evaluate_grounder(
 
     if len(errors_norm) != len(test_records) or not errors_norm:
         raise RuntimeError("Held-out test evaluation did not cover all test samples")
+    training_points = [record.point_norm for record in train_records]
+    mean_training_point = (
+        sum(point[0] for point in training_points) / len(training_points),
+        sum(point[1] for point in training_points) / len(training_points),
+    )
+    center_baseline = _point_metrics(
+        [(0.5, 0.5)] * len(test_records), test_records
+    )
+    training_mean_baseline = _point_metrics(
+        [mean_training_point] * len(test_records), test_records
+    )
     report = {
         "dataset_provenance": "recorded_ui_click_demonstrations",
         "checkpoint": str(Path(checkpoint_path).resolve()),
@@ -122,6 +169,14 @@ def evaluate_grounder(
         / len(relative_diagonal_errors),
         "pck_5_percent_diagonal": sum(value <= 0.05 for value in relative_diagonal_errors)
         / len(relative_diagonal_errors),
+        "baselines": {
+            "screen_center": center_baseline,
+            "training_mean_click": training_mean_baseline,
+        },
+        "model_beats_training_mean_baseline": (
+            sum(errors_norm) / len(errors_norm)
+            < training_mean_baseline["mean_normalized_point_distance"]
+        ),
         "target_box_hit_rate": "not_measurable; recorder stores click points, not target boxes",
         "llm_or_desktop_actions_used": False,
     }

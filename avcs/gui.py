@@ -19,11 +19,6 @@ from PIL import Image, ImageTk, ImageDraw
 
 from avcs import ScreenEye, CortexState
 from avcs.human_eye import HumanEye, HumanEyeState
-from forge.vision.cortex.motor import (
-    HandEyeServoingController,
-    get_default_driver,
-    SafetyBreakoutException,
-)
 
 
 class AVCSDesktopApp:
@@ -39,8 +34,6 @@ class AVCSDesktopApp:
         self.fps = fps
         self.eye = ScreenEye(fps=fps, source=source)
         self.human_eye = HumanEye(source=self.eye.source, threaded_capture=True if source is None else False)
-        self.driver = get_default_driver(force_virtual=False if source is None else True)
-        self.servoing_controller = HandEyeServoingController(driver=self.driver)
 
         # State tracking
         self.running = True
@@ -119,6 +112,8 @@ class AVCSDesktopApp:
 
         self.canvas = tk.Canvas(left_frame, bg="#000000", highlightthickness=0)
         self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<Double-Button-1>", self.on_canvas_double_click)
 
         # Right Column: Controls & Telemetry
         right_frame = tk.Frame(main_body, bg="#161b22", width=360, highlightbackground="#30363d", highlightthickness=1, padx=14, pady=14)
@@ -128,7 +123,7 @@ class AVCSDesktopApp:
         # Section 1: Natural Language Gaze Grounding
         sec1 = tk.LabelFrame(
             right_frame,
-            text=" 1. Language Gaze Grounding ",
+            text=" 1. Language & Gaze Grounding ",
             font=("Segoe UI", 10, "bold"),
             fg="#58a6ff",
             bg="#161b22",
@@ -158,6 +153,20 @@ class AVCSDesktopApp:
             pady=4,
         )
         self.btn_look.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        self.btn_snap_affordance = tk.Button(
+            btn_box,
+            text="Snap Affordance",
+            font=("Segoe UI", 9, "bold"),
+            bg="#1f6feb",
+            fg="#ffffff",
+            activebackground="#388bfd",
+            relief=tk.FLAT,
+            command=self.on_snap_affordance_clicked,
+            padx=8,
+            pady=4,
+        )
+        self.btn_snap_affordance.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
         self.gaze_pos_lbl = tk.Label(sec1, text="Gaze Fixation: (0.50, 0.50)", font=("Consolas", 9), fg="#8b949e", bg="#161b22")
         self.gaze_pos_lbl.pack(anchor=tk.W, pady=(4, 0))
@@ -193,6 +202,7 @@ class AVCSDesktopApp:
             fg="#ffffff",
             activebackground="#388bfd",
             relief=tk.FLAT,
+            state=tk.NORMAL,
             command=lambda: self.on_steer_clicked(click=False),
             pady=4,
         )
@@ -206,6 +216,7 @@ class AVCSDesktopApp:
             fg="#ffffff",
             activebackground="#a371f7",
             relief=tk.FLAT,
+            state=tk.NORMAL,
             command=lambda: self.on_steer_clicked(click=True),
             pady=4,
         )
@@ -213,9 +224,9 @@ class AVCSDesktopApp:
 
         self.motor_status_lbl = tk.Label(
             sec2,
-            text="Fail-Safe: Corner Breakout ACTIVE (Move to corner to abort)",
+            text="Biological motor servoing ready. Click stream or target to steer.",
             font=("Segoe UI", 8),
-            fg="#d29922",
+            fg="#3fb950",
             bg="#161b22",
             wraplength=310,
             justify=tk.LEFT,
@@ -331,6 +342,52 @@ class AVCSDesktopApp:
         self.always_on_top = self.var_top.get()
         self.root.attributes("-topmost", self.always_on_top)
 
+    def on_canvas_click(self, event: tk.Event) -> None:
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        nx = float(np.clip(event.x / cw, 0.0, 1.0))
+        ny = float(np.clip(event.y / ch, 0.0, 1.0))
+        self.current_target_gaze = (nx, ny)
+        try:
+            self.human_eye.inspect_fovea(centroid=(nx, ny))
+        except Exception:
+            pass
+        self.btn_steer.config(state=tk.NORMAL)
+        self.btn_steer_click.config(state=tk.NORMAL)
+        self.gaze_pos_lbl.config(text=f"Gaze Fixation: ({nx:.2f}, {ny:.2f}) [TARGET]")
+        self.motor_status_lbl.config(
+            text=f"Target locked at ({nx:.3f}, {ny:.3f}). Hand ready.",
+            fg="#3fb950",
+        )
+
+    def on_canvas_double_click(self, event: tk.Event) -> None:
+        self.on_canvas_click(event)
+        self.on_steer_clicked(click=False)
+
+    def on_snap_affordance_clicked(self) -> None:
+        if self.latest_state and self.latest_state.action_hotspots:
+            best = max(self.latest_state.action_hotspots, key=lambda a: a[3])
+            target = (best[0], best[1])
+            self.current_target_gaze = target
+            try:
+                self.human_eye.inspect_fovea(centroid=target)
+            except Exception:
+                pass
+            self.gaze_pos_lbl.config(
+                text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f}) [{best[2]}]"
+            )
+            self.btn_steer.config(state=tk.NORMAL)
+            self.btn_steer_click.config(state=tk.NORMAL)
+            self.motor_status_lbl.config(
+                text=f"Snapped to affordance '{best[2]}' at ({target[0]:.2f}, {target[1]:.2f}). Ready.",
+                fg="#3fb950",
+            )
+        else:
+            self.motor_status_lbl.config(
+                text="No dorsal affordances currently detected on screen.",
+                fg="#d29922",
+            )
+
     def on_look_at_clicked(self) -> None:
         query = self.query_entry.get().strip()
         if not query:
@@ -345,36 +402,90 @@ class AVCSDesktopApp:
             self.gaze_pos_lbl.config(
                 text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f}){foveal_str}"
             )
+            self.btn_steer.config(state=tk.NORMAL)
+            self.btn_steer_click.config(state=tk.NORMAL)
+            self.motor_status_lbl.config(
+                text=f"Target locked at ({target[0]:.2f}, {target[1]:.2f}). Ready to steer.",
+                fg="#3fb950",
+            )
         except Exception as e:
             try:
                 target = self.eye.look_at(query)
                 self.current_target_gaze = target
                 self.gaze_pos_lbl.config(text=f"Gaze Fixation: ({target[0]:.2f}, {target[1]:.2f})")
+                self.btn_steer.config(state=tk.NORMAL)
+                self.btn_steer_click.config(state=tk.NORMAL)
+                self.motor_status_lbl.config(
+                    text=f"Target locked at ({target[0]:.2f}, {target[1]:.2f}). Ready to steer.",
+                    fg="#3fb950",
+                )
             except Exception:
                 messagebox.showerror("Grounding Error", str(e))
 
     def on_steer_clicked(self, click: bool = False) -> None:
-        target = self.current_target_gaze or self.eye.cortex.retina.current_fixation
+        target = self.current_target_gaze
+        if target is None:
+            if self.latest_state and self.latest_state.action_hotspots:
+                best = max(self.latest_state.action_hotspots, key=lambda a: a[3])
+                target = (best[0], best[1])
+            else:
+                target = (0.5, 0.5)
+            self.current_target_gaze = target
 
-        def _run_motor():
+        action_name = "Steer & Click" if click else "Steer Cursor"
+        if getattr(self, "_servo_active", False):
+            self.motor_status_lbl.config(
+                text="Hand movement already in progress. Please wait...",
+                fg="#d29922",
+            )
+            return
+        self._servo_active = True
+        self.motor_status_lbl.config(
+            text=f"Biological hand servoing to ({target[0]:.2f}, {target[1]:.2f})...",
+            fg="#58a6ff",
+        )
+
+        def _worker():
             try:
-                self.motor_status_lbl.config(text="Steering mouse cursor...", fg="#58a6ff")
-                res = self.servoing_controller.servo_to(
-                    target_gaze=target,
-                    timeout_seconds=2.0,
-                    click_on_arrival=click,
-                    speed_factor=1.6,
-                    realtime=True,
-                )
-                if res.contact_acquired:
-                    status_text = f"Contact Locked! ({res.elapsed_ms:.0f} ms)" + (" Clicked." if click else "")
-                    self.motor_status_lbl.config(text=status_text, fg="#3fb950")
+                from forge.vision.cortex.motor import get_default_driver
+                from forge.vision.capture import SyntheticScreen
+                from avcs.servoing import NeuromuscularServoingController
+                force_virt = False
+                if self.eye.source is not None and isinstance(self.eye.source, SyntheticScreen):
+                    force_virt = True
+                driver = get_default_driver(force_virtual=force_virt)
+                controller = NeuromuscularServoingController(driver=driver)
+                res = controller.servo_to(target=target, realtime=True)
+                if click:
+                    pre_click = self.human_eye.observe()
+                    driver.click(button="left")
+                    try:
+                        from avcs.verifier import VisualRippleVerifier
+                        verifier = VisualRippleVerifier(eye=self.human_eye, driver=driver)
+                        v_res = verifier.verify_action(
+                            action_name="click",
+                            target=target,
+                            pre_state=pre_click,
+                        )
+                        status_str = f"Clicked ({v_res.status.name}, ripple={v_res.optical_ripple_energy:.3f})"
+                    except Exception as exc:
+                        status_str = f"Clicked target (verify notice: {exc})."
                 else:
-                    self.motor_status_lbl.config(text="Servoing timed out near target.", fg="#d29922")
-            except SafetyBreakoutException as exc:
-                self.motor_status_lbl.config(text="SAFETY ABORT: Cursor moved to corner!", fg="#f85149")
+                    status_str = f"Docked at ({res.final_cursor[0]:.2f}, {res.final_cursor[1]:.2f}) in {res.duration_ms:.0f}ms."
 
-        threading.Thread(target=_run_motor, daemon=True).start()
+                self.root.after(0, lambda: self.motor_status_lbl.config(
+                    text=f"Hand complete: {status_str}",
+                    fg="#3fb950",
+                ))
+            except Exception as exc:
+                self.root.after(0, lambda: self.motor_status_lbl.config(
+                    text=f"Motor alert: {exc}",
+                    fg="#f85149",
+                ))
+            finally:
+                self._servo_active = False
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _start_perception_thread(self) -> None:
         def _loop():
@@ -382,13 +493,21 @@ class AVCSDesktopApp:
             while self.running:
                 t0 = time.time()
                 try:
-                    frame = self.eye.source.grab()
-                    state = self.eye.perceive_now(frame=frame)
-                    # Also compute biological human eye perception (magnocellular flow + pursuit)
-                    try:
-                        human_state = self.human_eye.observe(frame=frame)
-                    except Exception:
-                        human_state = None
+                    frame = self.human_eye.source.grab() if hasattr(self.human_eye, "source") and hasattr(self.human_eye.source, "grab") else self.eye.source.grab()
+                    human_state = self.human_eye.observe(frame=frame)
+                    state = CortexState(
+                        visual_latent=np.zeros(64, dtype=np.float32),
+                        primary_category=human_state.primary_category,
+                        category_confidence=human_state.category_confidence,
+                        text_density=0.0,
+                        stability_state=human_state.stability,
+                        surprise_score=human_state.surprise_score,
+                        fixation=human_state.gaze_fixation,
+                        motor_flow=human_state.motor_flow,
+                        contact_acquired=human_state.contact_acquired,
+                        action_hotspots=human_state.affordance_hotspots,
+                        inference_ms=human_state.latency_ms,
+                    )
 
                     self.latest_frame = frame
                     self.latest_state = state

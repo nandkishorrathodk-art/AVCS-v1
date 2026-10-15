@@ -12,7 +12,6 @@ from avcs_sdk import (
     ActionClass,
     ActionStatus,
     AVCSClient,
-    NormalizedPoint,
     RepositoryAVCSBackend,
 )
 
@@ -26,12 +25,16 @@ async def main() -> None:
         obs = await client.observe()
         print(f"[Observe] ID={obs.observation_id} | Resolution={obs.width}x{obs.height} | Space={obs.coordinate_space}")
 
-        # 2. Ground natural language target
+        # 2. The current backend has no semantic target grounding.
         targets = await client.find_targets("Save button", observation=obs)
+        if not targets:
+            print("[Ground] No semantic candidates available; no target-based action dispatched.")
+            return
+
         target = targets[0]
         print(f"[Ground] Target={target.label} | Bounds=({target.bounds.x:.3f}, {target.bounds.y:.3f}, {target.bounds.width:.3f}, {target.bounds.height:.3f}) | Conf={target.confidence:.2f}")
 
-        # 3. Execute bounded click through ActionBroker with verified evidence
+        # 3. Execute bounded click through ActionBroker with verified evidence.
         result = await client.click(
             target=target,
             action_class=ActionClass.IDEMPOTENT,

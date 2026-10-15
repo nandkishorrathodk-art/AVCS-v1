@@ -105,8 +105,11 @@ class SemanticSceneTreeExtractor:
         # 3. Add dynamic moving entities if detected
         if moving_objects:
             for idx, m in enumerate(moving_objects):
-                mx = getattr(m, "x", 0.5)
-                my = getattr(m, "y", 0.5)
+                if hasattr(m, "centroid"):
+                    mx, my = m.centroid
+                else:
+                    mx = getattr(m, "x", 0.5)
+                    my = getattr(m, "y", 0.5)
                 speed = getattr(m, "speed", 0.0)
                 if speed > 0.05:
                     m_bbox = BoundingBox(
@@ -122,6 +125,18 @@ class SemanticSceneTreeExtractor:
                         bbox=m_bbox,
                     )
                     elements_list.append(elem)
+
+        # 4. Fallback root container if active application window is present
+        if not elements_list and (category != "desktop_canvas" or window_title):
+            elem = UIMLElement(
+                element_id="#win_active",
+                role=AffordanceType.CLICKABLE,
+                label=f"Active {category.replace('_', ' ').title()}",
+                bbox=BoundingBox(xmin=0.05, ymin=0.05, xmax=0.95, ymax=0.95),
+                is_primary=True,
+                is_active=True,
+            )
+            elements_list.append(elem)
 
         # Store in tree indexed by ID
         for elem in elements_list:

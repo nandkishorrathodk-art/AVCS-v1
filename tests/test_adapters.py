@@ -11,7 +11,7 @@ from adapters.playwright_eye import AVCSPlaywrightEye
 from adapters.openai_operator import AVCSOperatorHarness
 from adapters.langchain_tool import AVCSScreenTools
 from adapters.cost_benchmark import run_cost_reduction_benchmark
-from avcs import SyntheticScreen, ScreenEye
+from avcs import SyntheticScreen, ScreenEye, UnvalidatedGroundingError
 
 
 def test_claude_stream_filter():
@@ -40,8 +40,8 @@ def test_claude_stream_filter():
     assert len(payload["source"]["data"]) > 100
 
 
-def test_playwright_eye_selector_free_interaction():
-    """Verify Playwright adapter executes clicks and types without DOM selectors."""
+def test_playwright_eye_blocks_unvalidated_language_grounded_interaction():
+    """Verify untrained language grounding cannot authorize browser input."""
     mock_page = MagicMock()
     mock_page.viewport_size = {"width": 1920, "height": 1080}
     mock_page.screenshot.return_value = b"\x89PNG\r\n\x1a\n"  # dummy bytes
@@ -50,19 +50,16 @@ def test_playwright_eye_selector_free_interaction():
     eye = ScreenEye(source=source)
     pw_eye = AVCSPlaywrightEye(page=mock_page, eye=eye, viewport_size=(1920, 1080))
 
-    # Visual click
-    click_x, click_y = pw_eye.visual_click("Submit Button", click_delay=0.0)
-    assert 0 <= click_x <= 1920
-    assert 0 <= click_y <= 1080
-    assert mock_page.mouse.click.called
+    with pytest.raises(UnvalidatedGroundingError, match="validated trained semantic grounding"):
+        pw_eye.visual_click("Submit Button", click_delay=0.0)
+    with pytest.raises(UnvalidatedGroundingError, match="validated trained semantic grounding"):
+        pw_eye.visual_type("Search Input", "AVCS Vision")
 
-    # Visual typing
-    mock_page.reset_mock()
-    type_x, type_y = pw_eye.visual_type("Search Input", "AVCS Vision")
-    assert 0 <= type_x <= 1920
-    assert 0 <= type_y <= 1080
-    assert mock_page.keyboard.type.called
-    mock_page.keyboard.type.assert_called_with("AVCS Vision")
+    mock_page.mouse.click.assert_not_called()
+    mock_page.mouse.move.assert_not_called()
+    mock_page.keyboard.type.assert_not_called()
+    with pytest.raises(UnvalidatedGroundingError, match="grounding is validated"):
+        pw_eye.assert_element_visible("Checkout Button")
 
 
 def test_openai_operator_harness():
@@ -84,7 +81,9 @@ def test_openai_operator_harness():
     assert "clickable_buttons" in obs_dict
 
     # Servoing step
-    velocity, contact = harness.execute_servoing_step((0.1, 0.1), "Search")
+    with pytest.raises(UnvalidatedGroundingError, match="validated trained semantic grounding"):
+        harness.execute_servoing_step((0.1, 0.1), "Search")
+    velocity, contact = harness.execute_servoing_step((0.1, 0.1), (0.5, 0.5))
     assert len(velocity) == 2
     assert isinstance(contact, bool)
 
@@ -99,6 +98,7 @@ def test_langchain_screen_tools():
     res_look = json.loads(tools.look_at_element("Checkout Button"))
     assert "target_coordinates" in res_look
     assert len(res_look["target_coordinates"]) == 2
+    assert res_look["status"] == "experimental_unvalidated_gaze_estimate"
 
     # 2. check_screen_stability
     res_stab = json.loads(tools.check_screen_stability())
@@ -111,11 +111,13 @@ def test_langchain_screen_tools():
 
     # 4. get_all_tools schema
     schemas = tools.get_all_tools()
-    assert len(schemas) == 4
+    assert len(schemas) == 3
     tool_names = [s["function"]["name"] for s in schemas]
     assert "look_at_element" in tool_names
     assert "check_screen_stability" in tool_names
-    assert "steer_and_click" in tool_names
+    assert "steer_and_click" not in tool_names
+    with pytest.raises(UnvalidatedGroundingError, match="validated trained semantic grounding"):
+        tools.steer_and_click("Checkout Button")
 
 
 def test_cost_reduction_benchmark_report():

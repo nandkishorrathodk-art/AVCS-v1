@@ -20,7 +20,7 @@ from avcs import (
 
 def test_avcs_import_and_metadata():
     """Verify top-level package metadata and exports."""
-    assert avcs.__version__ == "0.2.0"
+    assert avcs.__version__ == "0.1.1"
     assert "ScreenEye" in avcs.__all__
     assert "ArtificialVisualCortex" in avcs.__all__
     assert "VisualServoingController" in avcs.__all__
@@ -180,3 +180,38 @@ def test_weights_auto_discovery():
     weights_path = get_weights_path()
     assert weights_path is not None
     assert weights_path.endswith("avcs_cortex_weights.pt")
+
+
+def test_avcs_unified_model_eyes_and_hands():
+    """Verify AVCS exposes both Eyes and Hands on a unified System 1 foundation model."""
+    from avcs import AVCS, HumanEye, NeuromuscularServoingController
+
+    model = AVCS(source="synthetic", force_virtual_motor=True)
+    try:
+        assert isinstance(model.eyes, HumanEye)
+        assert isinstance(model.hands, NeuromuscularServoingController)
+        assert model.weights_loaded is True
+
+        # Test Eyes visual perception
+        state = model.see()
+        assert state is not None
+        assert state.latency_ms >= 0.0
+        assert isinstance(model.eyes.affordances, list)
+
+        # Test Hands motor control
+        servo_res = model.hands.move_to((0.4, 0.6))
+        assert servo_res.success is True
+        assert len(servo_res.trajectory) > 0
+
+        clicked = model.hands.click()
+        assert clicked is True
+
+        # Test typing
+        model.hands.type_text("Hello AVCS", clear_first=True, press_enter=False)
+
+        # Test foveal inspection
+        fovea = model.inspect((0.4, 0.6))
+        assert fovea is not None
+    finally:
+        model.close()
+

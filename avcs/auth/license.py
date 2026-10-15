@@ -47,6 +47,10 @@ class InvalidLicenseError(LicenseError):
     """Raised when token format is malformed or invalid."""
 
 
+class LicenseConfigurationError(LicenseError):
+    """Raised when signing credentials are missing or too weak."""
+
+
 @dataclasses.dataclass(frozen=True)
 class LicensePayload:
     """Decoded cryptographic license properties."""
@@ -85,14 +89,16 @@ def get_machine_fingerprint() -> str:
 class LicenseManager:
     """Cryptographic licensing engine supporting online and air-gapped HMAC signatures."""
 
-    DEFAULT_MASTER_KEY = "praxis_avcs_master_root_2026_enterprise_signing_authority"
-
     def __init__(self, signing_key: Optional[str] = None) -> None:
-        self.signing_key = (
-            signing_key
-            or os.environ.get("AVCS_SIGNING_KEY")
-            or self.DEFAULT_MASTER_KEY
-        ).encode("utf-8")
+        configured_key = signing_key if signing_key is not None else os.environ.get("AVCS_SIGNING_KEY")
+        if configured_key is None:
+            raise LicenseConfigurationError(
+                "A signing key is required; provide signing_key or set AVCS_SIGNING_KEY."
+            )
+        encoded_key = configured_key.encode("utf-8")
+        if len(encoded_key) < 32:
+            raise LicenseConfigurationError("The signing key must be at least 32 UTF-8 bytes.")
+        self.signing_key = encoded_key
 
     def generate_license(
         self,
@@ -235,4 +241,3 @@ class LicenseManager:
             raise LicenseTamperedError("API key signature verification failed.")
 
         return data
-

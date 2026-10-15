@@ -21,3 +21,5 @@ dist/
 pilot-results/
 m7-results/
 m8-live-results/
+.agents/
+.gravitas/

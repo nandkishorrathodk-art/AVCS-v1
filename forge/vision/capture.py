@@ -209,6 +209,19 @@ class Win32FastCapture:
         self._user32 = ctypes.windll.user32
         self._gdi32 = ctypes.windll.gdi32
 
+        # Ensure process is DPI-aware so GetSystemMetrics returns physical display pixels
+        # instead of unscaled virtual screen coordinates (prevents truncation on 125%/150% DPI)
+        try:
+            self._user32.SetProcessDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        except Exception:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            except Exception:
+                try:
+                    self._user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+
         self._h_desk = None
         # Ensure thread desktop access
         try:
@@ -471,29 +484,35 @@ def open_capture(
     monitor: int = 1,
     threaded: bool = False,
     target_size: Optional[Tuple[int, int]] = None,
+    allow_synthetic_fallback: bool = True,
 ) -> object:
-    """Return a real capture if a display exists, else a synthetic one.
+    """Open screen capture, optionally falling back to a synthetic source.
 
     If `threaded=True`, wraps the capture source in a high-speed background
     double-buffered worker so `.grab()` is non-blocking (<0.01ms).
     """
     cap = None
+    failures = []
     if prefer_real:
         if sys.platform == "win32" and Win32FastCapture.available():
             try:
                 cap = Win32FastCapture(monitor=monitor, target_size=target_size).open()
-            except Exception:
-                cap = None
+            except Exception as exc:
+                failures.append(exc)
         if cap is None and ScreenCapture.available():
             try:
                 cap = ScreenCapture(monitor=monitor).open()
-            except Exception:
-                cap = None
+            except Exception as exc:
+                failures.append(exc)
 
     if cap is None:
+        if not allow_synthetic_fallback:
+            reason = str(failures[-1]) if failures else "no real capture backend is available"
+            raise CaptureError(f"Real screen capture unavailable: {reason}") from (
+                failures[-1] if failures else None
+            )
         cap = SyntheticScreen()
 
     if threaded:
         return ThreadedScreenCapture(cap).open()
     return cap
-

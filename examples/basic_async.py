@@ -23,7 +23,8 @@ async def main() -> None:
         observation = await avcs.observe()
         targets = await avcs.find_targets("Save button", observation=observation)
         if not targets:
-            raise RuntimeError("Save button not found")
+            print("No semantic target candidates available; no action dispatched.")
+            return
         result = await avcs.click(
             target=targets[0],
             action_class=ActionClass.CONDITIONAL,

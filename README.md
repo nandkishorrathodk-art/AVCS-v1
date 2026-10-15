@@ -38,12 +38,16 @@ environment, then install the project and development dependencies:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,desktop]"
 ```
 
 PyTorch installation options vary by operating system and accelerator. If the
 default package resolver does not select the PyTorch build you need, install
 the appropriate PyTorch build for your environment before installing AVCS.
+The `desktop` extra installs the optional `mss` dependency used by the
+cross-platform real-screen capture backend. Without a working desktop capture
+backend, live desktop operations may be unavailable; use explicit synthetic
+sources only for tests and demonstrations.
 
 ## Verify
 

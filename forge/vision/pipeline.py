@@ -28,6 +28,7 @@ import numpy as np
 
 from forge.vision.capture import open_capture
 from forge.vision.describer import Describer, HeuristicDescriber
+from forge.vision.desktop_context import DesktopContextProvider
 from forge.vision.encoder import SceneUnderstandingModel, Understanding
 from forge.vision.reflex import ReflexPerception, events_from_states
 from forge.vision.scene import SceneEvent, SceneState
@@ -103,6 +104,7 @@ class ScreenVision:
         describe_on_change: bool = True,
         describe_every_s: float = 2.0,
         target_fps: Optional[float] = None,
+        desktop_context: Optional[DesktopContextProvider] = None,
     ) -> None:
         self.capture = capture if capture is not None else open_capture()
         self.perception = ReflexPerception(rows=rows, cols=cols, downscale=downscale)
@@ -111,6 +113,7 @@ class ScreenVision:
         self.describe_on_change = describe_on_change
         self.describe_every_s = describe_every_s
         self.target_fps = target_fps
+        self.desktop_context = desktop_context
 
         self.stats = PipelineStats()
         self._latest = LatestFrame()
@@ -125,6 +128,11 @@ class ScreenVision:
         self._recent_events: list[SceneEvent] = []
         self.last_state: Optional[SceneState] = None
         self.last_description: str = ""
+        self._analysis_lock = threading.Lock()
+        self._latest_analysis: Optional[
+            tuple[SceneState, Optional[Understanding], list[SceneEvent]]
+        ] = None
+        self._analysis_ready = threading.Event()
 
     # -- callbacks ----------------------------------------------------------
 
@@ -223,6 +231,9 @@ class ScreenVision:
                     self._on_event(ev)
 
             self.last_state = state
+            with self._analysis_lock:
+                self._latest_analysis = (state, und, list(events))
+                self._analysis_ready.set()
             if self._on_state:
                 self._on_state(state)
 
@@ -265,8 +276,97 @@ class ScreenVision:
         state = self.perception.perceive(frame, frame_index=self.stats.frames)
         self.stats.frames += 1
         self.stats.reflex_latencies.append(state.latency_ms)
+        und: Optional[Understanding] = None
         if self.understanding is not None:
-            self.understanding.understand(state)
+            und = self.understanding.understand(state)
         self.stats.tick_latencies.append((time.perf_counter() - tick_start) * 1000.0)
         self.last_state = state
+        self._recent_events = []
+        with self._analysis_lock:
+            self._latest_analysis = (state, und, [])
+            self._analysis_ready.set()
         return state
+
+    def observe(self, wait_timeout_s: float = 1.0, stale_after_s: float = 2.0) -> dict:
+        """Return the latest visual evidence and optional OS context for an LLM.
+
+        This is an observation-only API: it does not dispatch mouse or keyboard
+        input. Window data is included only when a context provider is supplied.
+        """
+        if wait_timeout_s < 0 or stale_after_s < 0:
+            raise ValueError("Observation timeouts must be non-negative.")
+
+        with self._analysis_lock:
+            analysis = self._latest_analysis
+
+        if analysis is None:
+            if any(thread.is_alive() for thread in self._threads):
+                if not self._analysis_ready.wait(wait_timeout_s):
+                    raise TimeoutError(
+                        "ScreenVision did not produce an observation before timeout."
+                    )
+                with self._analysis_lock:
+                    analysis = self._latest_analysis
+            else:
+                self.step()
+                with self._analysis_lock:
+                    analysis = self._latest_analysis
+
+        if analysis is None:
+            raise RuntimeError("ScreenVision has no visual observation to return.")
+
+        state, understanding, events = analysis
+        age_s = max(0.0, time.time() - state.timestamp)
+        description = self.describer.describe(state, understanding, events)
+        desktop = (
+            self.desktop_context.snapshot()
+            if self.desktop_context is not None
+            else {"status": "not_configured", "source": None}
+        )
+
+        return {
+            "schema_version": "avcs.desktop_observation.v1",
+            "frame": {
+                "sequence": state.frame_index,
+                "captured_at_unix_s": state.timestamp,
+                "age_ms": round(age_s * 1000.0, 1),
+                "freshness": "fresh" if age_s <= stale_after_s else "stale",
+                "capture_backend": type(self.capture).__name__,
+            },
+            "visual_perception": {
+                "source": "avcs_pixels",
+                "description": description,
+                "description_kind": (
+                    "learned_scene_prediction"
+                    if understanding is not None
+                    else "pixel_heuristic"
+                ),
+                "signals": {
+                    "frame_size": [state.width, state.height],
+                    "brightness": round(state.brightness, 3),
+                    "contrast": round(state.contrast, 3),
+                    "global_motion": round(state.global_motion, 4),
+                    "peak_motion": round(state.peak_motion, 4),
+                    "changed_area_fraction": round(state.change_fraction, 4),
+                    "overlay_suspected": state.overlay_suspected,
+                    "scene_changed": state.scene_changed,
+                    "regions": [region.to_dict() for region in state.regions],
+                    "understanding": understanding.to_dict() if understanding else None,
+                },
+                "events": [event.to_dict() for event in events],
+                "limitations": [
+                    "AVCS does not transcribe visible text.",
+                    "Motion does not identify whether content is a game or a video.",
+                    "Scene predictions are not verified facts or task-completion "
+                    "evidence.",
+                ],
+            },
+            "desktop_context": desktop,
+            "interpretation_guidance": (
+                "Describe only the supplied evidence. Keep OS window metadata separate "
+                "from pixel-derived estimates. Qualify uncertain activity; motion "
+                "alone "
+                "cannot distinguish a game from a video."
+            ),
+            "motor_action_authorized": False,
+        }

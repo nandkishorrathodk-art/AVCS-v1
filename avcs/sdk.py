@@ -8,7 +8,6 @@ Provides a unified, high-level developer interface for:
 """
 from __future__ import annotations
 
-import math
 import os
 import threading
 import time
@@ -19,6 +18,7 @@ import numpy as np
 from avcs.auth import LicenseManager, LicensePayload, LicenseTier
 from avcs.billing import RateCard, SessionUsageReceipt, UsageMeter
 from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
+from avcs.focus import VisualFocusDetector, VisualFocusState
 from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
 from avcs.memory import UIMLTree, VisualDiff, VisualMemorySnapshot
@@ -33,7 +33,12 @@ from avcs.verifier import (
 )
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
-from forge.vision.cortex.sdk import ScreenEye
+from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
+
+
+class UnfocusedInputElementError(RuntimeError):
+    """Raised when keyboard typing is attempted without verified visual focus."""
+    pass
 
 
 class HumanEyeClient:
@@ -49,40 +54,47 @@ class HumanEyeClient:
         fps: int = 60,
         force_virtual_motor: bool = False,
         enforce_auth: bool = False,
+        allow_synthetic_fallback: bool = False,
     ) -> None:
         self.device = device
         self.target_fps = fps
         self.force_virtual_motor = force_virtual_motor
         self.signing_key = signing_key
+        self.allow_synthetic_fallback = allow_synthetic_fallback
 
         # 1. Resolve Screen Capture Source
-        if source is None or source == "desktop":
-            try:
-                self.source = open_capture(prefer_real=True, threaded=True)
-            except Exception:
-                self.source = SyntheticScreen()
+        if source is None or (isinstance(source, str) and source == "desktop"):
+            self.source = open_capture(
+                prefer_real=True,
+                threaded=True,
+                allow_synthetic_fallback=allow_synthetic_fallback,
+            )
         elif isinstance(source, str) and source == "synthetic":
             self.source = SyntheticScreen()
         elif hasattr(source, "grab"):
             self.source = source
         else:
-            self.source = SyntheticScreen()
+            raise ValueError("source must be 'desktop', 'synthetic', or a capture source with grab().")
 
         # 2. Authentication Verification
-        self.auth_manager = LicenseManager(signing_key=self.signing_key)
         self.org_id = "org_local"
         self.tier = LicenseTier.PRO.value
         self.is_authenticated = False
 
         resolved_api_key = api_key or os.environ.get("AVCS_API_KEY")
         resolved_lic_key = license_key or os.environ.get("AVCS_LICENSE_KEY")
+        self.auth_manager: Optional[LicenseManager] = None
+        if resolved_api_key or resolved_lic_key:
+            self.auth_manager = LicenseManager(signing_key=self.signing_key)
 
         if resolved_api_key:
+            assert self.auth_manager is not None
             data = self.auth_manager.verify_api_key(resolved_api_key)
             self.org_id = data.get("org_id", self.org_id)
             self.tier = data.get("tier", self.tier)
             self.is_authenticated = True
         elif resolved_lic_key:
+            assert self.auth_manager is not None
             payload = self.auth_manager.verify_license(resolved_lic_key)
             self.org_id = payload.org_id
             self.tier = payload.tier
@@ -170,6 +182,25 @@ class HumanEyeClient:
         return state
 
     @property
+    def eyes(self) -> HumanEye:
+        """The visual sensory cortex (Eyes): motion, affordances, fovea, typing focus."""
+        return self.eye
+
+    @property
+    def hands(self) -> NeuromuscularServoingController:
+        """The neuromuscular motor actuation system (Hands): minimum-jerk kinematics, micro-tremor, clicking, typing."""
+        return self.servoing
+
+    @property
+    def weights_loaded(self) -> bool:
+        """Returns True if trained cortical weights are loaded."""
+        return getattr(self.eye, "weights_loaded", False)
+
+    def see(self, frame: Optional[np.ndarray] = None) -> HumanEyeState:
+        """Perceives the visual field immediately through the Eyes."""
+        return self.perceive(frame=frame)
+
+    @property
     def current_state(self) -> HumanEyeState:
         """Returns the most recent perceived visual state."""
         with self._lock:
@@ -186,7 +217,7 @@ class HumanEyeClient:
         return self.events.subscribe(event_type=event_type, callback=callback)
 
     def look_at(self, query_or_coords: str | Tuple[float, float]) -> Tuple[float, float]:
-        """Directs high-acuity gaze and foveation to target using language grounding (<4ms)."""
+        """Updates gaze/foveation; string-query results are experimental, not action-authoritative."""
         self.meter.record_query()
         if isinstance(query_or_coords, tuple):
             coords = query_or_coords
@@ -198,9 +229,45 @@ class HumanEyeClient:
             res = self.eye.look_at(query=query_or_coords, inspect=True)
             return res.target_coord
 
+    @staticmethod
+    def _require_coordinate_target(
+        target: Optional[str | Tuple[float, float]],
+    ) -> Tuple[float, float]:
+        if isinstance(target, str):
+            raise UnvalidatedGroundingError(
+                "Natural-language targets cannot drive motor actions: validated trained "
+                "semantic grounding is unavailable. Pass an explicit normalized (x, y) coordinate."
+            )
+        if target is None:
+            raise UnvalidatedGroundingError(
+                "Motor actions require an explicit normalized (x, y) coordinate; "
+                "the current gaze fixation is not validated grounding."
+            )
+        return target
+
     def inspect(self, centroid: Optional[Tuple[float, float]] = None) -> FovealInspection:
         """Inspects fine-grained element properties at central fovea (<2ms)."""
         return self.eye.inspect_fovea(centroid=centroid)
+
+    def check_focus(
+        self,
+        frames: List[np.ndarray],
+        timestamps: Optional[List[float]] = None,
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> VisualFocusState:
+        """Detects typing focus and 0.8-2.0 Hz cursor blink across frames without OCR."""
+        self.meter.record_query()
+        return self.eye.check_focus(frames=frames, timestamps=timestamps, crop_box=crop_box)
+
+    def verify_focus(
+        self,
+        target_point: Tuple[float, float],
+        frame: Optional[np.ndarray] = None,
+        reference_frame: Optional[np.ndarray] = None,
+    ) -> VisualFocusState:
+        """Evaluates whether target input element visually possesses keyboard focus."""
+        self.meter.record_query()
+        return self.eye.verify_focus(target_point=target_point, frame=frame, reference_frame=reference_frame)
 
     def get_scene_tree(self) -> UIMLTree:
         """Returns the current DOM-less UIML scene tree (<1ms, <150 tokens)."""
@@ -237,22 +304,33 @@ class HumanEyeClient:
         double_click: bool = False,
     ) -> bool:
         """Executes closed-loop biological hand-eye visual steering and clicks."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action(f"click_{button}")
-        if target is not None:
-            tx, ty = self.look_at(target)
-        else:
-            state = self.current_state
-            tx, ty = state.gaze_fixation
+        tx, ty = target
 
-        self.motor_driver.move_to(tx, ty, realtime=False)
+        self.motor_driver.move_to_normalized(tx, ty)
         if double_click:
             self.motor_driver.double_click(button=button)
         else:
             self.motor_driver.click(button=button)
         return True
 
-    def type_text(self, text: str, clear_first: bool = False, press_enter: bool = False) -> None:
-        """Types text using native OS keystrokes."""
+    def type_text(
+        self,
+        text: str,
+        clear_first: bool = False,
+        press_enter: bool = False,
+        enforce_focus: bool = False,
+        target: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """Types text using native OS keystrokes with optional visual focus verification."""
+        if enforce_focus:
+            check_tgt = target or self.eye.pursuit.current_gaze
+            st = self.eye.verify_focus(target_point=check_tgt)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {check_tgt}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
         self.meter.record_action("type_text")
         if clear_first:
             self.motor_driver.press_hotkey("ctrl", "a")
@@ -267,6 +345,7 @@ class HumanEyeClient:
         realtime: bool = False,
     ) -> NeuromuscularServoingResult:
         """Executes smooth Fitts' Law neuromuscular motor movement to target."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action("servoing_move")
         if isinstance(target, str):
             coords = self.look_at(target)
@@ -281,14 +360,9 @@ class HumanEyeClient:
         max_recovery_tier: int = 3,
     ) -> VerificationResult:
         """Clicks target and runs closed-loop visual ripple assertion with 5-tier self-healing."""
+        target = self._require_coordinate_target(target)
         self.meter.record_action(f"click_verify_{button}")
-        if target is not None:
-            if isinstance(target, str):
-                coords = self.look_at(target)
-            else:
-                coords = target
-        else:
-            coords = self.current_state.gaze_fixation
+        coords = target
 
         return self.verifier.execute_and_verify(
             action_type="click",
@@ -303,16 +377,21 @@ class HumanEyeClient:
         text: str,
         clear_first: bool = True,
         press_enter: bool = True,
+        enforce_focus: bool = False,
     ) -> VerificationResult:
-        """Foveates onto input field, types text, and visually verifies the change."""
+        """Foveates onto an explicit coordinate, types text, and verifies the change."""
+        coords = self._require_coordinate_target(target)
         self.meter.record_action("type_verify")
-        if isinstance(target, str):
-            coords = self.look_at(target)
-        else:
-            coords = target
+
+        if enforce_focus:
+            st = self.eye.verify_focus(target_point=coords)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {coords}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
 
         if clear_first:
-            self.motor_driver.move_to(coords[0], coords[1], realtime=False)
+            self.motor_driver.move_to_normalized(coords[0], coords[1])
             self.motor_driver.click(button="left")
             self.motor_driver.press_hotkey("ctrl", "a")
             self.motor_driver.press_key("backspace")
@@ -323,6 +402,7 @@ class HumanEyeClient:
             target=coords,
             text_content=content,
             max_recovery_tier=3,
+            enforce_focus=enforce_focus,
         )
 
     def type_into(
@@ -331,10 +411,18 @@ class HumanEyeClient:
         text: str,
         clear_first: bool = True,
         press_enter: bool = True,
+        enforce_focus: bool = False,
     ) -> bool:
-        """Foveates onto input field, clicks, and types text."""
-        self.click(target=target)
+        """Clicks an explicit normalized coordinate and types text."""
+        coords = self._require_coordinate_target(target)
+        self.click(target=coords)
         time.sleep(0.05)
+        if enforce_focus:
+            st = self.eye.verify_focus(target_point=coords)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {coords}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
         self.type_text(text=text, clear_first=clear_first, press_enter=press_enter)
         return True
 
@@ -381,6 +469,7 @@ def eye(
     fps: int = 60,
     force_virtual_motor: bool = False,
     enforce_auth: bool = False,
+    allow_synthetic_fallback: bool = False,
 ) -> HumanEyeClient:
     """Canonical entry point to initialize the Real-Time Human Eye Client."""
     client = HumanEyeClient(
@@ -392,12 +481,18 @@ def eye(
         fps=fps,
         force_virtual_motor=force_virtual_motor,
         enforce_auth=enforce_auth,
+        allow_synthetic_fallback=allow_synthetic_fallback,
     )
     return client
 
 
+AVCS = HumanEyeClient
+
+
 __all__ = [
+    "AVCS",
     "HumanEyeClient",
+    "UnvalidatedGroundingError",
     "eye",
     "ScreenEye",
 ]

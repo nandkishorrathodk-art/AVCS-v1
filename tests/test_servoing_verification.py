@@ -16,7 +16,7 @@ from avcs.verifier import (
     VisualRippleVerifier,
 )
 from avcs.human_eye import HumanEye
-from avcs.sdk import HumanEyeClient
+from avcs.sdk import HumanEyeClient, UnvalidatedGroundingError
 from forge.vision.capture import SyntheticScreen
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
 
@@ -232,6 +232,89 @@ def test_client_closed_loop_motor_and_verification():
         type_res = client.type_and_verify(target=(0.3, 0.3), text="hello world", clear_first=False)
         assert isinstance(type_res, VerificationResult)
         assert "type" in type_res.action_name
+
+
+def test_client_click_and_clear_first_use_declared_normalized_motor_api(monkeypatch):
+    """SDK direct motor actions use OSCursorDriver's normalized-coordinate method."""
+    client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
+    driver = client.motor_driver
+    assert not hasattr(driver, "move_to")
+    monkeypatch.setattr(client, "look_at", lambda target: target)
+
+    assert client.click(target=(0.25, 0.75))
+    assert driver.get_position_normalized() == pytest.approx((0.25, 0.75))
+
+    monkeypatch.setattr(
+        client.verifier,
+        "execute_and_verify",
+        lambda **kwargs: VerificationResult(
+            status=VerificationStatus.VERIFIED,
+            action_name="type",
+            target_coord=kwargs["target"],
+            optical_ripple_energy=0.0,
+            surprise_pulse=0.0,
+            state_transition_detected=True,
+            causal_summary="verified",
+            recovery_attempt=1,
+            elapsed_ms=0.1,
+        ),
+    )
+    result = client.type_and_verify(
+        target=(0.6, 0.4),
+        text="content",
+        clear_first=True,
+        press_enter=False,
+    )
+    assert result.status == VerificationStatus.VERIFIED
+    assert driver.get_position_normalized() == pytest.approx((0.6, 0.4))
+    assert driver.click_history[-1][2] == "left"
+    assert driver.key_history[-2:] == ["ctrl+a", "backspace"]
+    client.close()
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        lambda client: client.click(target="Save button"),
+        lambda client: client.click(),
+        lambda client: client.click_and_verify(target="Save button"),
+        lambda client: client.click_and_verify(),
+        lambda client: client.type_into(target="Search field", text="query"),
+        lambda client: client.type_and_verify(target="Search field", text="query"),
+        lambda client: client.move_to("Save button"),
+    ],
+    ids=[
+        "click-string",
+        "click-implicit-fixation",
+        "click-and-verify-string",
+        "click-and-verify-implicit-fixation",
+        "type-into",
+        "type-and-verify",
+        "move-to",
+    ],
+)
+def test_unvalidated_string_target_actions_fail_before_motor_input(action):
+    client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
+    driver = client.motor_driver
+    before_position = driver.get_position_normalized()
+    before_clicks = list(driver.click_history)
+    before_trajectory = list(driver.trajectory_history)
+    before_typed = list(driver.typed_history)
+    before_keys = list(driver.key_history)
+
+    try:
+        with pytest.raises(
+            UnvalidatedGroundingError,
+            match="validated trained semantic grounding|not validated grounding",
+        ):
+            action(client)
+        assert driver.get_position_normalized() == before_position
+        assert driver.click_history == before_clicks
+        assert driver.trajectory_history == before_trajectory
+        assert driver.typed_history == before_typed
+        assert driver.key_history == before_keys
+    finally:
+        client.close()
 
 
 def test_sdk_forwards_requested_mouse_button():
