@@ -102,6 +102,7 @@ from avcs.events import (
 from avcs.sdk import (
     AVCS,
     HumanEyeClient,
+    UnfocusedInputElementError,
     UnvalidatedGroundingError,
     eye,
 )
@@ -135,6 +136,7 @@ __all__ = [
     "HumanEye",
     "HumanEyeState",
     "HumanEyeClient",
+    "UnfocusedInputElementError",
     "UnvalidatedGroundingError",
     "eye",
     "capture_desktop_observation",

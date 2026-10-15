@@ -226,8 +226,8 @@ class FovealAcuityEngine:
         px = int(cx * W)
         py = int(cy * H)
 
-        rw = int(max(24, W * self.radius_frac))
-        rh = int(max(24, H * self.radius_frac))
+        rw = int(min(96, max(24, int(W * self.radius_frac))))
+        rh = int(min(96, max(24, int(H * self.radius_frac))))
 
         x1 = max(0, px - rw)
         y1 = max(0, py - rh)
@@ -264,11 +264,12 @@ class FovealAcuityEngine:
                 latency_ms=(time.perf_counter() - t0) * 1000.0,
             )
 
-        # 1. Compute visual edge sharpness / contrast score
+        # 1. Compute visual edge sharpness / contrast score using 98th percentile combined with mean
+        # to avoid spatial dilution paradox on compact UI elements (12x12 icons/tabs/links)
         gray = np.mean(crop, axis=-1)
-        # Approximate gradient magnitude
         gy, gx = np.gradient(gray)
-        contrast = float(np.mean(np.hypot(gx, gy)) / 255.0)
+        grad_mag = np.hypot(gx, gy)
+        contrast = float(max(float(np.mean(grad_mag)), float(np.percentile(grad_mag, 98))) / 255.0)
 
         # 2. Resize foveal crop to tensor input
         t_crop = torch.from_numpy(crop).float() / 255.0

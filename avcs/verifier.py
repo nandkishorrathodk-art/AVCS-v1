@@ -60,12 +60,14 @@ class VisualRippleVerifier:
         ripple_radius: float = 0.08,  # ~8% of screen around target
         min_ripple_threshold: float = 0.015,
         min_surprise_threshold: float = 0.12,
+        enforce_focus: bool = False,
     ) -> None:
         self.eye = eye
         self.driver = driver or get_default_driver()
         self.ripple_radius = ripple_radius
         self.min_ripple_threshold = min_ripple_threshold
         self.min_surprise_threshold = min_surprise_threshold
+        self.enforce_focus = enforce_focus
 
     def calculate_local_ripple(
         self,
@@ -250,6 +252,7 @@ class VisualRippleVerifier:
         max_recovery_tier: int = 3,
         button: str = "left",
         keyboard_fallback_key: Optional[str] = None,
+        enforce_focus: bool = False,
     ) -> VerificationResult:
         """Executes an action through the 5-Tier Self-Healing Escalation Ladder."""
         if action_type not in {"click", "double_click", "type"}:
@@ -258,6 +261,25 @@ class VisualRippleVerifier:
             raise ValueError(f"Unsupported mouse button: {button}")
         t_global = time.perf_counter()
         tx, ty = target
+
+        # Preventative Fail-Closed Gating: Verify focus before dispatching keystrokes if enforced
+        if action_type == "type" and (enforce_focus or getattr(self, "enforce_focus", False)):
+            focus_state = self.eye.verify_focus(target_point=target)
+            if not focus_state.is_focused:
+                return VerificationResult(
+                    status=VerificationStatus.ESCALATE_BLOCKED,
+                    action_name=f"type@{target}",
+                    target_coord=target,
+                    optical_ripple_energy=0.0,
+                    surprise_pulse=0.0,
+                    state_transition_detected=False,
+                    causal_summary=(
+                        f"Typing blocked: target at {target} has no verified visual focus "
+                        f"(conf={focus_state.confidence:.2f}). Keystrokes not dispatched."
+                    ),
+                    recovery_attempt=0,
+                    elapsed_ms=(time.perf_counter() - t_global) * 1000.0,
+                )
 
         # Tier 1: Primary Action Execution
         pre_state = self.eye.observe()

@@ -209,6 +209,19 @@ class Win32FastCapture:
         self._user32 = ctypes.windll.user32
         self._gdi32 = ctypes.windll.gdi32
 
+        # Ensure process is DPI-aware so GetSystemMetrics returns physical display pixels
+        # instead of unscaled virtual screen coordinates (prevents truncation on 125%/150% DPI)
+        try:
+            self._user32.SetProcessDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        except Exception:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            except Exception:
+                try:
+                    self._user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+
         self._h_desk = None
         # Ensure thread desktop access
         try:

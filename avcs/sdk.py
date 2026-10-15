@@ -36,6 +36,11 @@ from forge.vision.cortex.motor import get_default_driver
 from forge.vision.cortex.sdk import ScreenEye, UnvalidatedGroundingError
 
 
+class UnfocusedInputElementError(RuntimeError):
+    """Raised when keyboard typing is attempted without verified visual focus."""
+    pass
+
+
 class HumanEyeClient:
     """The Universal Real-Time Human Eye Client for Screen AI Agents."""
 
@@ -253,6 +258,26 @@ class HumanEyeClient:
         """Inspects fine-grained element properties at central fovea (<2ms)."""
         return self.eye.inspect_fovea(centroid=centroid)
 
+    def check_focus(
+        self,
+        frames: List[np.ndarray],
+        timestamps: Optional[List[float]] = None,
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> VisualFocusState:
+        """Detects typing focus and 0.8-2.0 Hz cursor blink across frames without OCR."""
+        self.meter.record_query()
+        return self.eye.check_focus(frames=frames, timestamps=timestamps, crop_box=crop_box)
+
+    def verify_focus(
+        self,
+        target_point: Tuple[float, float],
+        frame: Optional[np.ndarray] = None,
+        reference_frame: Optional[np.ndarray] = None,
+    ) -> VisualFocusState:
+        """Evaluates whether target input element visually possesses keyboard focus."""
+        self.meter.record_query()
+        return self.eye.verify_focus(target_point=target_point, frame=frame, reference_frame=reference_frame)
+
     def get_scene_tree(self) -> UIMLTree:
         """Returns the current DOM-less UIML scene tree (<1ms, <150 tokens)."""
         return self.eye.get_scene_tree()
@@ -299,8 +324,22 @@ class HumanEyeClient:
             self.motor_driver.click(button=button)
         return True
 
-    def type_text(self, text: str, clear_first: bool = False, press_enter: bool = False) -> None:
-        """Types text using native OS keystrokes."""
+    def type_text(
+        self,
+        text: str,
+        clear_first: bool = False,
+        press_enter: bool = False,
+        enforce_focus: bool = False,
+        target: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """Types text using native OS keystrokes with optional visual focus verification."""
+        if enforce_focus:
+            check_tgt = target or self.eye.pursuit.current_gaze
+            st = self.eye.verify_focus(target_point=check_tgt)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {check_tgt}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
         self.meter.record_action("type_text")
         if clear_first:
             self.motor_driver.press_hotkey("ctrl", "a")
@@ -347,14 +386,18 @@ class HumanEyeClient:
         text: str,
         clear_first: bool = True,
         press_enter: bool = True,
+        enforce_focus: bool = False,
     ) -> VerificationResult:
         """Foveates onto an explicit coordinate, types text, and verifies the change."""
-        self._require_coordinate_target(target)
+        coords = self._require_coordinate_target(target)
         self.meter.record_action("type_verify")
-        if isinstance(target, str):
-            coords = self.look_at(target)
-        else:
-            coords = target
+
+        if enforce_focus:
+            st = self.eye.verify_focus(target_point=coords)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {coords}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
 
         if clear_first:
             self.motor_driver.move_to_normalized(coords[0], coords[1])
@@ -368,6 +411,7 @@ class HumanEyeClient:
             target=coords,
             text_content=content,
             max_recovery_tier=3,
+            enforce_focus=enforce_focus,
         )
 
     def type_into(
@@ -376,11 +420,18 @@ class HumanEyeClient:
         text: str,
         clear_first: bool = True,
         press_enter: bool = True,
+        enforce_focus: bool = False,
     ) -> bool:
         """Clicks an explicit normalized coordinate and types text."""
-        self._require_coordinate_target(target)
-        self.click(target=target)
+        coords = self._require_coordinate_target(target)
+        self.click(target=coords)
         time.sleep(0.05)
+        if enforce_focus:
+            st = self.eye.verify_focus(target_point=coords)
+            if not st.is_focused:
+                raise UnfocusedInputElementError(
+                    f"Cannot type into unfocused target at {coords}: visual focus verification failed closed (conf={st.confidence:.2f})."
+                )
         self.type_text(text=text, clear_first=clear_first, press_enter=press_enter)
         return True
 

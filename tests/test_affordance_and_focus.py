@@ -14,12 +14,16 @@ import pytest
 import torch
 
 from avcs.focus import VisualFocusDetector, VisualFocusState
+from avcs.grounding import FovealAcuityEngine
 from avcs.human_eye import (
     FastAffordanceHead,
     HumanEye,
     HumanEyeState,
     RealTimeCorticalBackbone,
 )
+from avcs.sdk import HumanEyeClient, UnfocusedInputElementError
+from avcs.verifier import VerificationStatus, VisualRippleVerifier
+from forge.vision.cortex.motor import VirtualCursorDriver
 
 
 def test_fast_affordance_head_wallpaper_rejection():
@@ -145,4 +149,93 @@ def test_human_eye_verify_focus_integration():
     assert isinstance(focus_state, VisualFocusState)
     assert focus_state.is_focused is True
     assert focus_state.caret_blinking is True
+
+
+def test_visual_focus_detector_rejects_static_pipe():
+    """SEC-FOC-02 Regression: static '|' line without temporal blink or active ring MUST be rejected."""
+    detector = VisualFocusDetector()
+    H, W = 360, 640
+    target = (0.5, 0.5)
+    tx, ty = int(target[0] * W), int(target[1] * H)
+
+    # Frame with static vertical line (pipe in code editor)
+    f = np.full((H, W, 3), 250, dtype=np.uint8)
+    f[ty - 10 : ty + 10, tx - 1 : tx + 1] = 0
+
+    # Two identical frames: no temporal blink
+    st1 = detector.verify_focus(f, target)
+    st2 = detector.verify_focus(f, target)
+
+    assert st2.is_focused is False, "Static pipe line must fail-closed (is_focused=False)"
+    assert st2.caret_blinking is False
+    assert st2.confidence < 0.70
+
+
+def test_visual_focus_detector_detect_focus_temporal_sequence():
+    """SEC-FOC-05 Regression: detect_focus analyzes multi-frame temporal sequences."""
+    detector = VisualFocusDetector()
+    H, W = 360, 640
+    target = (0.5, 0.5)
+    tx, ty = int(target[0] * W), int(target[1] * H)
+
+    # Create 1 Hz blinking caret sequence at 30 FPS: 15 frames ON, 15 frames OFF
+    frames = []
+    timestamps = []
+    for i in range(30):
+        t = i * (1.0 / 30.0)
+        timestamps.append(t)
+        f = np.full((H, W, 3), 255, dtype=np.uint8)
+        if i < 15:
+            # Caret ON
+            f[ty - 10 : ty + 10, tx - 1 : tx + 1] = 0
+        frames.append(f)
+
+    st = detector.detect_focus(frames=frames, timestamps=timestamps, target_point=target)
+    assert st.is_focused is True
+    assert st.caret_blinking is True
+    assert st.confidence >= 0.70
+
+    # Also test all-static sequence fails closed
+    static_frames = [np.full((H, W, 3), 255, dtype=np.uint8) for _ in range(10)]
+    st_static = detector.detect_focus(frames=static_frames, target_point=target)
+    assert st_static.is_focused is False
+
+
+def test_foveal_engine_spatial_dilution_fix():
+    """Spatial Dilution Paradox fix: 95th percentile gradient ensures small icons are not rejected."""
+    engine = FovealAcuityEngine(device="cpu")
+    # 128x128 white patch with a small 12x12 dark icon at the center
+    crop = np.full((128, 128, 3), 255, dtype=np.uint8)
+    crop[58:70, 58:70] = 20
+
+    inspection = engine.inspect_crop(crop)
+    # With 95th percentile, contrast score is high (> 0.05) rather than diluted to ~0.005
+    assert inspection.contrast_score > 0.020, (
+        f"Expected contrast_score > 0.020, got {inspection.contrast_score}"
+    )
+
+
+def test_typing_focus_enforcement_prevents_unfocused_keystrokes():
+    """SEC-FOC-01 Regression: typing into an unfocused target with enforce_focus=True fails closed."""
+    driver = VirtualCursorDriver()
+    eye = HumanEye(source="synthetic", device="cpu")
+    verifier = VisualRippleVerifier(eye=eye, driver=driver)
+
+    # 1. Verifier execution on unfocused blank area
+    res = verifier.execute_and_verify(
+        action_type="type",
+        target=(0.1, 0.1),
+        text_content="UNFOCUSED_TEST",
+        enforce_focus=True,
+    )
+    assert res.is_successful is False
+    assert res.status == VerificationStatus.ESCALATE_BLOCKED
+    assert "no verified visual focus" in res.causal_summary
+    assert len(driver.typed_history) == 0, "No keystrokes must be dispatched when focus is unverified"
+
+    # 2. SDK client execution with enforce_focus=True raises UnfocusedInputElementError
+    client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
+    with pytest.raises(UnfocusedInputElementError):
+        client.type_into((0.1, 0.1), "BLOCKED_KEYSTROKES", enforce_focus=True)
+
 

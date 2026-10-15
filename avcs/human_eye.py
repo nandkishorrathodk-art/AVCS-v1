@@ -305,10 +305,16 @@ class FastAffordanceHead(nn.Module):
             if len(peak_indices) == 0:
                 continue
 
+            vals = heat[peak_indices[:, 0], peak_indices[:, 1]]
+            if len(vals) > top_k:
+                top_order = torch.argsort(vals, descending=True)[:top_k]
+                peak_indices = peak_indices[top_order]
+                vals = vals[top_order]
+
             for idx in range(len(peak_indices)):
                 py = int(peak_indices[idx, 0].item())
                 px = int(peak_indices[idx, 1].item())
-                val = float(heat[py, px].item())
+                val = float(vals[idx].item())
                 norm_x = (px + 0.5) / float(W)
                 norm_y = (py + 0.5) / float(H)
                 item = (float(norm_x), float(norm_y), act_name, round(val, 3))
