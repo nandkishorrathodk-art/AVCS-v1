@@ -39,6 +39,7 @@ from avcs.memory import (
     VisualDiff,
     VisualMemoryManager,
 )
+from avcs.focus import VisualFocusDetector, VisualFocusState
 
 
 @dataclasses.dataclass(frozen=True)
@@ -204,6 +205,9 @@ class MagnocellularMotionEngine:
         self.latest_luminance = grid
         return motion_field, mean_motion, moving_objects, surprise
 
+    # Alias for pipeline compatibility
+    process_frame = process
+
 
 class RealTimeCorticalBackbone(nn.Module):
     """Optimized high-speed neural feature extractor (>70 FPS, <14ms on CPU)."""
@@ -230,11 +234,27 @@ class RealTimeCorticalBackbone(nn.Module):
 
 
 class FastAffordanceHead(nn.Module):
-    """Ultra-fast zero-delay affordance extractor directly on the conscious feature map (<1ms)."""
+    """Ultra-fast zero-delay affordance extractor directly on the conscious feature map (<1ms).
+
+    Employs:
+    1. Biological background prior initialization (Focal Loss / RetinaNet principle: class 0 static prior).
+    2. 2D Spatial Non-Maximum Suppression (3x3 MaxPool) to eliminate cluster collapsing.
+    3. Competitive Background Margin Gating ((heat - static_heat) >= margin) to reject static wallpapers.
+    4. Calibrated thresholding ensuring interactive confidence significantly exceeds random chance.
+    5. Fail-closed contract: returns empty list if no peak strictly passes gating criteria.
+    """
 
     def __init__(self, in_dim: int = 128, num_classes: int = 3) -> None:
         super().__init__()
+        self.num_classes = num_classes
         self.head = nn.Conv2d(in_dim, num_classes, kernel_size=1)
+        # Background prior: class 0 (static) initialized with positive bias,
+        # interactive classes (clickable, typeable) with negative bias.
+        with torch.no_grad():
+            if self.head.bias is not None:
+                self.head.bias[0].fill_(1.0)
+                for c in range(1, num_classes):
+                    self.head.bias[c].fill_(-0.5)
 
     def forward(self, feat: torch.Tensor) -> torch.Tensor:
         """(B, in_dim, 16, 16) -> (B, num_classes, 16, 16)."""
@@ -246,32 +266,59 @@ class FastAffordanceHead(nn.Module):
         feat: torch.Tensor,
         action_type: str = "clickable",
         top_k: int = 3,
-        threshold: float = 0.25,
+        threshold: float = 0.35,
+        margin: float = 0.05,
     ) -> List[Tuple[float, float, str, float]]:
-        """Extracts top interactive hotspots in <0.5ms using direct topk."""
+        """Extracts top interactive hotspots in <0.5ms using 2D spatial NMS and margin gating."""
         logits = self.forward(feat)[0]  # (num_classes, H, W)
         probs = torch.softmax(logits, dim=0)
 
-        cls_idx = 1 if action_type == "clickable" else (2 if action_type == "typeable" else 0)
-        heat = probs[cls_idx]  # (16, 16)
-        H, W = heat.shape
+        H, W = probs.shape[1], probs.shape[2]
+        static_heat = probs[0]  # (H, W) - class 0 is non-interactive static background
 
-        flat_heat = heat.view(-1)
-        k = min(top_k, flat_heat.size(0))
-        vals, indices = torch.topk(flat_heat, k=k)
+        targets: List[Tuple[int, str]] = []
+        if action_type == "all":
+            targets = [(1, "clickable"), (2, "typeable")]
+        elif action_type == "typeable":
+            targets = [(2, "typeable")]
+        else:
+            targets = [(1, "clickable")]
 
-        hotspots = []
-        for i in range(k):
-            val = float(vals[i].item())
-            if val >= threshold:
-                idx = int(indices[i].item())
-                y_idx = idx // W
-                x_idx = idx % W
-                norm_x = (x_idx + 0.5) / W
-                norm_y = (y_idx + 0.5) / H
-                hotspots.append((float(norm_x), float(norm_y), action_type, round(val, 3)))
+        best_at_cell: Dict[Tuple[int, int], Tuple[float, float, str, float]] = {}
 
-        return hotspots
+        for cls_idx, act_name in targets:
+            heat = probs[cls_idx]  # (H, W)
+
+            # 1. 2D Spatial Non-Maximum Suppression (3x3 MaxPool)
+            heat_4d = heat.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+            max_pool = F.max_pool2d(heat_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
+
+            # 2. Strict Peak Identification:
+            # - Must be a local maximum within its 3x3 spatial neighborhood
+            # - Must exceed minimum confidence threshold
+            # - Must beat static background by at least competitive margin
+            is_peak = (heat == max_pool) & (heat >= threshold)
+            if margin > 0.0:
+                is_peak = is_peak & ((heat - static_heat) >= margin)
+
+            peak_indices = torch.nonzero(is_peak, as_tuple=False)
+            if len(peak_indices) == 0:
+                continue
+
+            for idx in range(len(peak_indices)):
+                py = int(peak_indices[idx, 0].item())
+                px = int(peak_indices[idx, 1].item())
+                val = float(heat[py, px].item())
+                norm_x = (px + 0.5) / float(W)
+                norm_y = (py + 0.5) / float(H)
+                item = (float(norm_x), float(norm_y), act_name, round(val, 3))
+                if (py, px) not in best_at_cell or val > best_at_cell[(py, px)][3]:
+                    best_at_cell[(py, px)] = item
+
+        candidate_peaks = list(best_at_cell.values())
+        # Sort candidate peaks by confidence descending
+        candidate_peaks.sort(key=lambda x: x[3], reverse=True)
+        return candidate_peaks[:top_k]
 
 
 class SmoothPursuitTracker:
@@ -379,10 +426,16 @@ class HumanEye(nn.Module):
         feature_dim: int = 128,
         input_size: Tuple[int, int] = (128, 128),
         threaded_capture: bool = True,
+        load_weights: bool = True,
+        weights_path: Optional[str] = None,
+        affordance_action_type: str = "all",
+        affordance_top_k: int = 5,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
         self.input_size = input_size
+        self.affordance_action_type = affordance_action_type
+        self.affordance_top_k = affordance_top_k
 
         # Optimize CPU threads for real-time biological visual cortex throughput
         # Empirical measurement: 1 thread avoids OpenMP barrier synchronization thrashing
@@ -426,7 +479,8 @@ class HumanEye(nn.Module):
 
         # 6. Natural Language Gaze Grounding & Dual-Fovea Acuity Engine (Phase 2)
         self.grounder = LanguageGazeGrounder(visual_dim=feature_dim, text_dim=feature_dim).to(self.device)
-        self.fovea_engine = FovealAcuityEngine(device=str(self.device))
+        self.fovea_engine = FovealAcuityEngine(device=str(self.device), load_weights=False)
+        self.fovea_head = self.fovea_engine.head
         self._active_query: Optional[str] = None
         self._last_grounding: Optional[GroundingResult] = None
         self._last_foveal_inspection: Optional[FovealInspection] = None
@@ -442,6 +496,9 @@ class HumanEye(nn.Module):
         # 7. Semantic DOM-less Scene Tree & Episodic Memory (Phase 3)
         self.memory = VisualMemoryManager()
 
+        # 8. Visual Typing-Focus Detector
+        self.focus_detector = VisualFocusDetector()
+
         # Telemetry & Callbacks
         self.frame_count: int = 0
         self._latencies: collections.deque[float] = collections.deque(maxlen=100)
@@ -450,6 +507,17 @@ class HumanEye(nn.Module):
 
         self.to(self.device)
         self.eval()
+
+        # Pre-Trained Weights Discovery & Auto-Loading
+        self.weights_loaded: bool = False
+        if load_weights:
+            from avcs.weights import load_avcs_weights
+            self.weights_loaded = load_avcs_weights(
+                self,
+                path=weights_path,
+                device=str(self.device),
+                strict=False,
+            )
 
     def on_surprise(self, threshold: float = 0.85) -> Callable:
         """Decorator to bind an instantaneous zero-latency reflex callback."""
@@ -540,6 +608,44 @@ class HumanEye(nn.Module):
             inspection = self.fovea_engine.inspect(f, target)
             self._last_foveal_inspection = inspection
             return inspection
+
+    def refine_affordance_with_fovea(
+        self,
+        hotspot: Tuple[float, float, str, float],
+        frame: Optional[np.ndarray] = None,
+        min_contrast: float = 0.010,
+    ) -> Optional[FovealInspection]:
+        """Refines a coarse affordance hotspot using high-resolution un-downsampled fovea inspection (<2ms).
+
+        Returns None if the foveal crop has insufficient visual edge contrast (e.g. flat background),
+        enforcing strict fail-closed rejection.
+        """
+        with self._lock:
+            f = frame if frame is not None else self._latest_raw_frame
+            if f is None:
+                return None
+            if len(hotspot) < 2:
+                return None
+            norm_x, norm_y = float(hotspot[0]), float(hotspot[1])
+            inspection = self.fovea_engine.inspect(f, (norm_x, norm_y))
+            if inspection.contrast_score < min_contrast:
+                return None
+            return inspection
+
+    def verify_focus(
+        self,
+        target_point: Optional[Tuple[float, float]] = None,
+        frame: Optional[np.ndarray] = None,
+        reference_frame: Optional[np.ndarray] = None,
+    ) -> VisualFocusState:
+        """Evaluates whether target input element visually possesses keyboard focus (<2ms)."""
+        with self._lock:
+            target = target_point or self.pursuit.gaze
+            f = frame if frame is not None else self._latest_raw_frame
+            if f is None:
+                f = self.source.grab()
+                self._latest_raw_frame = f
+            return self.focus_detector.verify_focus(f, target, reference_frame=reference_frame)
 
     def get_scene_tree(self) -> UIMLTree:
         """Returns the active DOM-less UIML scene tree (<1ms)."""
@@ -641,7 +747,7 @@ class HumanEye(nn.Module):
             else:
                 frame_rgb = frame_sub
 
-            t_in = torch.from_numpy(frame_rgb).float() / 255.0
+            t_in = torch.from_numpy(np.ascontiguousarray(frame_rgb)).float() / 255.0
             t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
             if t_in.shape[-2:] != self.input_size:
                 t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)
@@ -660,8 +766,14 @@ class HumanEye(nn.Module):
             self._last_category_name = cat_name
             self._last_category_conf = cat_conf
 
-            # Fast Dorsal interactive affordances (<0.5ms)
-            affordances = self.affordance_head.find_hotspots(feat, action_type="clickable", top_k=3, threshold=0.25)
+            # Fast Dorsal interactive affordances (<0.5ms) with 2D spatial NMS and margin gating
+            affordances = self.affordance_head.find_hotspots(
+                feat,
+                action_type=self.affordance_action_type,
+                top_k=self.affordance_top_k,
+                threshold=0.35,
+                margin=0.05,
+            )
             self._last_affordances = affordances
 
         # 5. Closed-Loop Hand-Eye Motor Flow
@@ -791,6 +903,32 @@ class HumanEye(nn.Module):
         """Returns 95th percentile latency in milliseconds."""
         return float(np.percentile(self._latencies, 95)) if self._latencies else 0.0
 
+    def see(self, frame: Optional[np.ndarray] = None) -> HumanEyeState:
+        """Biological visual perception alias for observe()."""
+        return self.observe(frame=frame)
+
+    def inspect(
+        self,
+        centroid: Optional[Tuple[float, float]] = None,
+        frame: Optional[np.ndarray] = None,
+    ) -> FovealInspection:
+        """High-acuity central fovea inspection alias for inspect_fovea()."""
+        return self.inspect_fovea(frame=frame, centroid=centroid)
+
+    def check_focus(
+        self,
+        frames: List[np.ndarray],
+        timestamps: Optional[List[float]] = None,
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> VisualFocusState:
+        """Detects typing focus and 0.8-2.0 Hz cursor blink without OCR or accessibility trees."""
+        return self.focus_detector.detect_focus(frames=frames, timestamps=timestamps, crop_box=crop_box)
+
+    @property
+    def affordances(self) -> List[Tuple[float, float, str, float]]:
+        """Returns the most recent affordance hotspots."""
+        return list(self._last_affordances)
+
     def close(self) -> None:
         """Releases underlying capture workers and motor resources."""
         if hasattr(self, "source") and self.source is not None:
@@ -805,3 +943,4 @@ class HumanEye(nn.Module):
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+

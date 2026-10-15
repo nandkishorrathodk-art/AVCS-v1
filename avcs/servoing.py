@@ -251,3 +251,46 @@ class NeuromuscularServoingController:
             success=reached_target,
             trajectory=waypoints,
         )
+
+    def move_to(
+        self,
+        target: Tuple[float, float],
+        realtime: bool = False,
+        target_width: Optional[float] = None,
+    ) -> NeuromuscularServoingResult:
+        """Moves cursor to target coordinates using minimum-jerk neuromuscular trajectory."""
+        return self.servo_to(target=target, target_width=target_width, realtime=realtime)
+
+    def click(
+        self,
+        target: Optional[Tuple[float, float]] = None,
+        button: str = "left",
+        double_click: bool = False,
+        realtime: bool = False,
+    ) -> bool:
+        """Clicks at current cursor or moves to target and clicks."""
+        if target is not None:
+            self.move_to(target, realtime=realtime)
+        if double_click:
+            self.driver.double_click(button=button)
+        else:
+            self.driver.click(button=button)
+        return True
+
+    def type_text(
+        self,
+        text: str,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        """Dispatches native keystrokes for typing."""
+        if clear_first:
+            self.driver.press_hotkey("ctrl", "a")
+            self.driver.press_key("backspace")
+        self.driver.type_text(text)
+        if press_enter:
+            self.driver.press_key("enter")
+
+    def press_hotkey(self, *keys: str) -> None:
+        """Dispatches keyboard hotkeys (e.g. 'ctrl', 'c')."""
+        self.driver.press_hotkey(*keys)

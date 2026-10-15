@@ -1,13 +1,14 @@
 """AVCS Pre-Trained Weights Management.
 
 Handles automatic discovery, local caching, and loading of pre-trained
-Artificial Visual Cortex neural network checkpoints.
+Artificial Visual Cortex neural network checkpoints for both ScreenEye (ArtificialVisualCortex)
+and HumanEye (RealTimeCorticalBackbone + FastAffordanceHead + FovealAcuityEngine).
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import urllib.request
 
 import torch
@@ -17,8 +18,9 @@ DEFAULT_WEIGHTS_URL = (
     "https://github.com/Parth-labs-in/AVCS/releases/download/v0.2.0/avcs_cortex_weights.pt"
 )
 
-# Standard filename
+# Standard filenames
 WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
+HUMAN_EYE_WEIGHTS_FILENAME = "human_eye_weights.pt"
 
 
 def get_default_cache_dir() -> Path:
@@ -32,44 +34,52 @@ def get_default_cache_dir() -> Path:
     return cache_dir
 
 
-def get_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+def get_weights_path(custom_path: Optional[str] = None, filename: Optional[str] = None) -> Optional[str]:
     """Finds the path to pre-trained AVCS weights.
 
     Search priority:
     1. Explicit custom_path argument
     2. AVCS_WEIGHTS_PATH environment variable
-    3. Local workspace runs directory: `runs/weights/avcs_cortex_weights.pt`
+    3. Local workspace runs directory: `runs/weights/{filename}`
     4. Bundled package directory (if installed)
-    5. User cache directory: `~/.cache/avcs/weights/avcs_cortex_weights.pt`
+    5. User cache directory: `~/.cache/avcs/weights/{filename}`
     """
+    target_filename = filename or WEIGHTS_FILENAME
+
     if custom_path and os.path.isfile(custom_path):
         return custom_path
 
-    env_path = os.environ.get("AVCS_WEIGHTS_PATH")
+    env_var = "AVCS_HUMAN_EYE_WEIGHTS_PATH" if target_filename == HUMAN_EYE_WEIGHTS_FILENAME else "AVCS_WEIGHTS_PATH"
+    env_path = os.environ.get(env_var) or (os.environ.get("AVCS_WEIGHTS_PATH") if target_filename == WEIGHTS_FILENAME else None)
     if env_path and os.path.isfile(env_path):
         return env_path
 
     # Workspace runs/ directory
-    workspace_path = Path(__file__).resolve().parent.parent / "runs" / "weights" / WEIGHTS_FILENAME
+    workspace_path = Path(__file__).resolve().parent.parent / "runs" / "weights" / target_filename
     if workspace_path.is_file():
         return str(workspace_path)
 
     # Relative to current working directory
-    cwd_path = Path.cwd() / "runs" / "weights" / WEIGHTS_FILENAME
+    cwd_path = Path.cwd() / "runs" / "weights" / target_filename
     if cwd_path.is_file():
         return str(cwd_path)
 
     # Bundled within avcs package
-    bundled_path = Path(__file__).resolve().parent / WEIGHTS_FILENAME
+    bundled_path = Path(__file__).resolve().parent / target_filename
     if bundled_path.is_file():
         return str(bundled_path)
 
     # User cache directory
-    cached_path = get_default_cache_dir() / WEIGHTS_FILENAME
+    cached_path = get_default_cache_dir() / target_filename
     if cached_path.is_file():
         return str(cached_path)
 
     return None
+
+
+def get_human_eye_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+    """Finds the path to pre-trained HumanEye cortical affordance & foveal weights."""
+    return get_weights_path(custom_path=custom_path, filename=HUMAN_EYE_WEIGHTS_FILENAME)
 
 
 def download_weights(
@@ -92,19 +102,55 @@ def download_weights(
     return str(target)
 
 
+def _is_human_eye_model(cortex: Any) -> bool:
+    """Detects whether model is a HumanEye instance or contains/is HumanEye submodules."""
+    cls_name = cortex.__class__.__name__
+    if cls_name in (
+        "HumanEye",
+        "RealTimeCorticalBackbone",
+        "FastAffordanceHead",
+        "FovealAcuityHead",
+        "FovealAcuityEngine",
+    ):
+        return True
+    if hasattr(cortex, "backbone") and cortex.backbone.__class__.__name__ == "RealTimeCorticalBackbone":
+        return True
+    if hasattr(cortex, "affordance_head") and cortex.affordance_head.__class__.__name__ == "FastAffordanceHead":
+        return True
+    if hasattr(cortex, "fovea_head") and cortex.fovea_head.__class__.__name__ == "FovealAcuityHead":
+        return True
+    if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
+        return True
+    return False
+
+
 def load_avcs_weights(
-    cortex: torch.nn.Module,
+    cortex: Any,
     path: Optional[str] = None,
     device: str = "cpu",
     strict: bool = False,
     auto_download: bool = False,
 ) -> bool:
-    """Loads pre-trained weights into the cortex model if available.
+    """Loads pre-trained weights into the cortex model, HumanEye model, or its submodules.
 
     Returns True if weights were loaded, False otherwise.
     """
-    resolved_path = get_weights_path(path)
-    if resolved_path is None and auto_download:
+    is_human_eye = _is_human_eye_model(cortex)
+    resolved_path = None
+
+    if path:
+        if os.path.isfile(path):
+            resolved_path = path
+        else:
+            resolved_path = None
+    elif is_human_eye:
+        resolved_path = get_human_eye_weights_path()
+        if resolved_path is None:
+            resolved_path = get_weights_path()
+    else:
+        resolved_path = get_weights_path()
+
+    if resolved_path is None and auto_download and not is_human_eye:
         try:
             resolved_path = download_weights()
         except Exception as exc:
@@ -113,12 +159,69 @@ def load_avcs_weights(
 
     if resolved_path and os.path.isfile(resolved_path):
         try:
-            state = torch.load(resolved_path, map_location=device)
-            cortex.load_state_dict(state, strict=strict)
-            return True
+            try:
+                state = torch.load(resolved_path, map_location=device, weights_only=False)
+            except TypeError:
+                state = torch.load(resolved_path, map_location=device)
+
+            if not isinstance(state, dict):
+                return False
+
+            # Determine actual target module (forward FovealAcuityEngine to its head)
+            target_module = (
+                cortex.head
+                if (hasattr(cortex, "head") and isinstance(cortex.head, torch.nn.Module))
+                else cortex
+            )
+
+            target_cls = target_module.__class__.__name__
+            loaded = False
+
+            # Direct submodule state dictionary extraction
+            if target_cls == "FovealAcuityHead" and "fovea_head" in state and isinstance(state["fovea_head"], dict):
+                target_module.load_state_dict(state["fovea_head"], strict=strict)
+                return True
+            elif target_cls == "FastAffordanceHead" and "affordance_head" in state and isinstance(state["affordance_head"], dict):
+                target_module.load_state_dict(state["affordance_head"], strict=strict)
+                return True
+            elif target_cls == "RealTimeCorticalBackbone" and "backbone" in state and isinstance(state["backbone"], dict):
+                target_module.load_state_dict(state["backbone"], strict=strict)
+                return True
+
+            # If full model match works directly
+            try:
+                target_module.load_state_dict(state, strict=strict)
+                loaded = True
+            except Exception:
+                pass
+
+            if not loaded and hasattr(target_module, "state_dict"):
+                # Robust partial key matching with shape validation
+                model_dict = target_module.state_dict()
+                matched_keys = {}
+                for k, v in state.items():
+                    if k in model_dict and hasattr(v, "shape") and v.shape == model_dict[k].shape:
+                        matched_keys[k] = v
+
+                if matched_keys:
+                    model_dict.update(matched_keys)
+                    target_module.load_state_dict(model_dict)
+                    loaded = True
+
+            # If cortex is HumanEye, also ensure fovea_engine.head is populated
+            if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
+                fov_head = cortex.fovea_engine.head
+                fov_dict = state.get("fovea_head")
+                if isinstance(fov_dict, dict):
+                    try:
+                        fov_head.load_state_dict(fov_dict, strict=False)
+                        cortex.fovea_engine.weights_loaded = True
+                    except Exception:
+                        pass
+
+            return loaded
         except Exception as exc:
             print(f"[AVCS] Warning: Failed to load weights from {resolved_path}: {exc}")
             return False
 
     return False
-

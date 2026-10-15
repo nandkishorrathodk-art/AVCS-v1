@@ -18,6 +18,7 @@ import numpy as np
 from avcs.auth import LicenseManager, LicensePayload, LicenseTier
 from avcs.billing import RateCard, SessionUsageReceipt, UsageMeter
 from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
+from avcs.focus import VisualFocusDetector, VisualFocusState
 from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
 from avcs.memory import UIMLTree, VisualDiff, VisualMemorySnapshot
@@ -48,18 +49,20 @@ class HumanEyeClient:
         fps: int = 60,
         force_virtual_motor: bool = False,
         enforce_auth: bool = False,
+        allow_synthetic_fallback: bool = False,
     ) -> None:
         self.device = device
         self.target_fps = fps
         self.force_virtual_motor = force_virtual_motor
         self.signing_key = signing_key
+        self.allow_synthetic_fallback = allow_synthetic_fallback
 
         # 1. Resolve Screen Capture Source
         if source is None or (isinstance(source, str) and source == "desktop"):
             self.source = open_capture(
                 prefer_real=True,
                 threaded=True,
-                allow_synthetic_fallback=False,
+                allow_synthetic_fallback=allow_synthetic_fallback,
             )
         elif isinstance(source, str) and source == "synthetic":
             self.source = SyntheticScreen()
@@ -172,6 +175,34 @@ class HumanEyeClient:
         # Process differential visual events
         self.events.process_state(state)
         return state
+
+    @property
+    def eyes(self) -> HumanEye:
+        """The visual sensory cortex (Eyes): motion, affordances, fovea, typing focus."""
+        return self.eye
+
+    @property
+    def hands(self) -> NeuromuscularServoingController:
+        """The neuromuscular motor actuation system (Hands): minimum-jerk kinematics, micro-tremor, clicking, typing."""
+        return self.servoing
+
+    @property
+    def weights_loaded(self) -> bool:
+        """Returns True if trained cortical weights are loaded."""
+        return getattr(self.eye, "weights_loaded", False)
+
+    def see(self, frame: Optional[np.ndarray] = None) -> HumanEyeState:
+        """Perceives the visual field immediately through the Eyes."""
+        return self.perceive(frame=frame)
+
+    def check_focus(
+        self,
+        frames: List[np.ndarray],
+        timestamps: Optional[List[float]] = None,
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> VisualFocusState:
+        """Detects typing focus and 0.8-2.0 Hz cursor blink without OCR or accessibility trees."""
+        return self.eye.check_focus(frames=frames, timestamps=timestamps, crop_box=crop_box)
 
     @property
     def current_state(self) -> HumanEyeState:
@@ -396,6 +427,7 @@ def eye(
     fps: int = 60,
     force_virtual_motor: bool = False,
     enforce_auth: bool = False,
+    allow_synthetic_fallback: bool = False,
 ) -> HumanEyeClient:
     """Canonical entry point to initialize the Real-Time Human Eye Client."""
     client = HumanEyeClient(
@@ -407,11 +439,16 @@ def eye(
         fps=fps,
         force_virtual_motor=force_virtual_motor,
         enforce_auth=enforce_auth,
+        allow_synthetic_fallback=allow_synthetic_fallback,
     )
     return client
 
 
+AVCS = HumanEyeClient
+
+
 __all__ = [
+    "AVCS",
     "HumanEyeClient",
     "UnvalidatedGroundingError",
     "eye",

@@ -194,11 +194,22 @@ class FovealAcuityEngine:
         device: str = "cpu",
         fovea_radius_frac: float = 0.08,
         input_size: Tuple[int, int] = (96, 96),
+        load_weights: bool = True,
+        weights_path: Optional[str] = None,
     ) -> None:
         self.device = torch.device(device)
         self.radius_frac = fovea_radius_frac
         self.input_size = input_size
         self.head = FovealAcuityHead().to(self.device).eval()
+        self.weights_loaded: bool = False
+        if load_weights:
+            from avcs.weights import load_avcs_weights
+            self.weights_loaded = load_avcs_weights(
+                self.head,
+                path=weights_path,
+                device=str(self.device),
+                strict=False,
+            )
 
     def crop_fovea(
         self,
@@ -207,6 +218,10 @@ class FovealAcuityEngine:
     ) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
         """Extracts high-resolution un-downsampled foveal crop around fixation point."""
         H, W = frame.shape[:2]
+        # Fast path if frame is already a foveal element crop centered at (0.5, 0.5)
+        if (H, W) == self.input_size and abs(centroid[0] - 0.5) < 1e-4 and abs(centroid[1] - 0.5) < 1e-4:
+            return frame, (0.0, 0.0, 1.0, 1.0)
+
         cx, cy = centroid
         px = int(cx * W)
         py = int(cy * H)
@@ -222,6 +237,11 @@ class FovealAcuityEngine:
         crop = frame[y1:y2, x1:x2]
         norm_crop_box = (x1 / W, y1 / H, x2 / W, y2 / H)
         return crop, norm_crop_box
+
+    @torch.inference_mode()
+    def inspect_crop(self, crop: np.ndarray) -> FovealInspection:
+        """Inspects a pre-cropped foveal element patch directly without re-cropping."""
+        return self.inspect(frame=crop, centroid=(0.5, 0.5))
 
     @torch.inference_mode()
     def inspect(
@@ -272,11 +292,12 @@ class FovealAcuityEngine:
         conf = float(probs[cat_idx].item())
 
         # 4. Map local crop bounding box back to global normalized screen coordinates
-        rel_x1, rel_y1, rel_x2, rel_y2 = reg_bbox[0].tolist()
-        bx1 = min(rel_x1, rel_x2)
-        bx2 = max(rel_x1, rel_x2)
-        by1 = min(rel_y1, rel_y2)
-        by2 = max(rel_y1, rel_y2)
+        # reg_bbox outputs normalized [ymin, xmin, ymax, xmax] relative to crop
+        pred_ymin, pred_xmin, pred_ymax, pred_xmax = reg_bbox[0].tolist()
+        by1 = min(pred_ymin, pred_ymax)
+        by2 = max(pred_ymin, pred_ymax)
+        bx1 = min(pred_xmin, pred_xmax)
+        bx2 = max(pred_xmin, pred_xmax)
 
         cb_x1, cb_y1, cb_x2, cb_y2 = crop_box
         cb_w = cb_x2 - cb_x1
