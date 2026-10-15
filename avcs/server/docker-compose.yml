@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  avcs-cloud:
+    build:
+      context: ../..
+      dockerfile: avcs/server/Dockerfile
+    container_name: avcs-cloud-engine
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - AVCS_API_KEY=sk_live_replace_with_your_secure_secret_key
+      - OMP_NUM_THREADS=1
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+

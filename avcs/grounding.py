@@ -272,7 +272,7 @@ class FovealAcuityEngine:
         contrast = float(max(float(np.mean(grad_mag)), float(np.percentile(grad_mag, 98))) / 255.0)
 
         # 2. Resize foveal crop to tensor input
-        t_crop = torch.from_numpy(crop).float() / 255.0
+        t_crop = torch.from_numpy(crop.copy()).float() / 255.0
         if t_crop.ndim == 2:
             t_crop = torch.stack([t_crop] * 3, dim=-1)
         elif t_crop.shape[-1] > 3:
