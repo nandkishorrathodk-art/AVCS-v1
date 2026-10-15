@@ -200,15 +200,6 @@ class HumanEyeClient:
         """Perceives the visual field immediately through the Eyes."""
         return self.perceive(frame=frame)
 
-    def check_focus(
-        self,
-        frames: List[np.ndarray],
-        timestamps: Optional[List[float]] = None,
-        crop_box: Optional[Tuple[int, int, int, int]] = None,
-    ) -> VisualFocusState:
-        """Detects typing focus and 0.8-2.0 Hz cursor blink without OCR or accessibility trees."""
-        return self.eye.check_focus(frames=frames, timestamps=timestamps, crop_box=crop_box)
-
     @property
     def current_state(self) -> HumanEyeState:
         """Returns the most recent perceived visual state."""

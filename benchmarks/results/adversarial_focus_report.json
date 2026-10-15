@@ -1,0 +1,348 @@
+{
+  "test1_frequencies": {
+    "frequency_sweep": [
+      {
+        "fps": 30,
+        "hz": 0.2,
+        "half_period_frames": 75,
+        "total_frames": 300,
+        "total_focused_pct": 35.0,
+        "on_phase_focused_pct": 23.333333333333332,
+        "off_phase_focused_pct": 46.666666666666664,
+        "blinking_detected_pct": 35.0
+      },
+      {
+        "fps": 30,
+        "hz": 0.5,
+        "half_period_frames": 30,
+        "total_frames": 120,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 0.8,
+        "half_period_frames": 19,
+        "total_frames": 76,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 1.0,
+        "half_period_frames": 15,
+        "total_frames": 60,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 1.2,
+        "half_period_frames": 12,
+        "total_frames": 48,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 1.5,
+        "half_period_frames": 10,
+        "total_frames": 40,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 1.8,
+        "half_period_frames": 8,
+        "total_frames": 32,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 2.0,
+        "half_period_frames": 8,
+        "total_frames": 32,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 5.0,
+        "half_period_frames": 3,
+        "total_frames": 12,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 10.0,
+        "half_period_frames": 2,
+        "total_frames": 8,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 30,
+        "hz": 30.0,
+        "half_period_frames": 1,
+        "total_frames": 4,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 0.2,
+        "half_period_frames": 150,
+        "total_frames": 600,
+        "total_focused_pct": 17.5,
+        "on_phase_focused_pct": 11.666666666666666,
+        "off_phase_focused_pct": 23.333333333333332,
+        "blinking_detected_pct": 17.5
+      },
+      {
+        "fps": 60,
+        "hz": 0.5,
+        "half_period_frames": 60,
+        "total_frames": 240,
+        "total_focused_pct": 43.75,
+        "on_phase_focused_pct": 29.166666666666668,
+        "off_phase_focused_pct": 58.333333333333336,
+        "blinking_detected_pct": 43.75
+      },
+      {
+        "fps": 60,
+        "hz": 0.8,
+        "half_period_frames": 38,
+        "total_frames": 152,
+        "total_focused_pct": 69.07894736842105,
+        "on_phase_focused_pct": 46.05263157894737,
+        "off_phase_focused_pct": 92.10526315789474,
+        "blinking_detected_pct": 69.07894736842105
+      },
+      {
+        "fps": 60,
+        "hz": 1.0,
+        "half_period_frames": 30,
+        "total_frames": 120,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 1.2,
+        "half_period_frames": 25,
+        "total_frames": 100,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 1.5,
+        "half_period_frames": 20,
+        "total_frames": 80,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 1.8,
+        "half_period_frames": 17,
+        "total_frames": 68,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 2.0,
+        "half_period_frames": 15,
+        "total_frames": 60,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 5.0,
+        "half_period_frames": 6,
+        "total_frames": 24,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 10.0,
+        "half_period_frames": 3,
+        "total_frames": 12,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      },
+      {
+        "fps": 60,
+        "hz": 30.0,
+        "half_period_frames": 1,
+        "total_frames": 4,
+        "total_focused_pct": 75.0,
+        "on_phase_focused_pct": 50.0,
+        "off_phase_focused_pct": 100.0,
+        "blinking_detected_pct": 75.0
+      }
+    ],
+    "direct_2frame_blink": {
+      "is_focused": true,
+      "caret_blinking": true,
+      "confidence": 1.0,
+      "notes": "Direct 2-frame diff has no timestamp validation; accepts any arbitrary frequency delta."
+    }
+  },
+  "test2_adversarial_cases": {
+    "static_vertical_lines": {
+      "pipe_char_1px": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      },
+      "pipe_char_2px": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      },
+      "pipe_char_3px": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      },
+      "letter_l_monospaced": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      },
+      "table_column_border": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      },
+      "tree_view_guide": {
+        "single_frame_focused": false,
+        "single_conf": 0.0,
+        "single_spatial": false,
+        "consecutive_frame_focused": false,
+        "ref_frame_focused": false
+      }
+    },
+    "blinking_taskbar_badge": {
+      "blinking_taskbar_badge": {
+        "on_focused": false,
+        "off_focused": true,
+        "ref_focused": true,
+        "caret_blinking": true,
+        "confidence": 0.965
+      }
+    },
+    "scrolling_text": {
+      "scrolling_text": {
+        "single_frame_focused": false,
+        "sequential_focused": false,
+        "ref_frame_focused": false,
+        "caret_blinking": false,
+        "spatial_detected": true
+      }
+    },
+    "animated_spinner": {
+      "radial_spinner": {
+        "vertical_spoke_focused": false,
+        "rotated_spoke_focused": false,
+        "ref_frame_focused": false,
+        "caret_blinking": false,
+        "confidence": 0.0
+      }
+    },
+    "video_playback": {
+      "video_panning": {
+        "frame1_focused": false,
+        "frame2_focused": false,
+        "panning_diff_focused": false,
+        "spatial_detected": false
+      }
+    }
+  },
+  "test3_fail_closed_contract": {
+    "silver_standard_breach": {
+      "is_focused": false,
+      "confidence": 0.0,
+      "caret_detected": false,
+      "focus_ring_detected": false,
+      "contract_violation": false
+    },
+    "ambiguous_evidence": {
+      "faint_stroke": {
+        "is_focused": false,
+        "conf": 0.0
+      },
+      "diagonal_line": {
+        "is_focused": false,
+        "conf": 0.0
+      },
+      "wide_blob": {
+        "is_focused": false,
+        "conf": 0.0
+      }
+    },
+    "confidence_threshold_enforced_in_code": false
+  },
+  "test4_typing_gating": {
+    "sdk_type_text_checks_focus": true,
+    "sdk_type_into_checks_focus": true,
+    "verifier_executes_type_before_verify": true,
+    "verifier_has_pre_type_focus_check": true,
+    "detector_has_detect_focus_method": true,
+    "keystrokes_dispatched_without_focus": true,
+    "verifier_returned_status": "verified",
+    "verifier_is_successful": true,
+    "verifier_summary": "2 element(s) dismissed. Appeared: 'Search or Input Field', 'Dynamic Entity'. 3 element state(s) updated."
+  }
+}
