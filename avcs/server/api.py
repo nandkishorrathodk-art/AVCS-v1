@@ -9,6 +9,7 @@ affordances, and foveal acuity, returning structured JSON action coordinates.
 from __future__ import annotations
 
 import base64
+import hmac
 import io
 import os
 import sys
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 from avcs.human_eye import HumanEye, HumanEyeState
 from avcs.grounding import FovealAcuityEngine
 from avcs.focus import VisualFocusDetector
+from avcs.goal_grounder import GoalConditionedGrounder, load_grounding_checkpoint
 from avcs.servoing import NeuromuscularServoingController
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
 
@@ -37,6 +39,9 @@ _eye: Optional[HumanEye] = None
 _fovea: Optional[FovealAcuityEngine] = None
 _focus_detector: Optional[VisualFocusDetector] = None
 _servoing: Optional[NeuromuscularServoingController] = None
+_grounder: Optional[GoalConditionedGrounder] = None
+_grounder_loaded = False
+_grounder_load_attempted = False
 
 
 def get_engine() -> Tuple[HumanEye, FovealAcuityEngine, VisualFocusDetector, NeuromuscularServoingController]:
@@ -49,15 +54,28 @@ def get_engine() -> Tuple[HumanEye, FovealAcuityEngine, VisualFocusDetector, Neu
     return _eye, _fovea, _focus_detector, _servoing
 
 
+def _grounding_checkpoint_path() -> str:
+    configured = os.environ.get("AVCS_GROUNDING_WEIGHTS")
+    if configured:
+        return configured
+    return os.path.join(os.path.dirname(__file__), "..", "..", "runs", "weights", "goal_grounder_best.pt")
+
+
 def verify_api_key(x_api_key: Optional[str] = Header(None)) -> str:
-    master_key = os.environ.get("AVCS_API_KEY")
-    if master_key:
-        if not x_api_key or x_api_key != master_key:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing X-API-Key header",
-            )
-    return x_api_key or "anon"
+    master_key = (
+        os.environ.get("AVCS_INFERENCE_API_KEY") or os.environ.get("AVCS_API_KEY") or ""
+    ).strip()
+    if not master_key or len(master_key) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Inference service authentication is not configured.",
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, master_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header",
+        )
+    return "authenticated"
 
 
 def decode_image(b64_str: str) -> np.ndarray:
@@ -67,6 +85,23 @@ def decode_image(b64_str: str) -> np.ndarray:
         return np.asarray(pil_img, dtype=np.uint8)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {exc}")
+
+
+def get_grounder() -> Optional[GoalConditionedGrounder]:
+    global _grounder, _grounder_loaded, _grounder_load_attempted
+    if _grounder_load_attempted:
+        return _grounder
+
+    _grounder_load_attempted = True
+    checkpoint = _grounding_checkpoint_path()
+    try:
+        _grounder = load_grounding_checkpoint(checkpoint, device="cpu")
+        _grounder_loaded = _grounder.is_trained
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[AVCS] Goal-grounding checkpoint unavailable: {exc}", file=sys.stderr)
+        _grounder = None
+        _grounder_loaded = False
+    return _grounder
 
 
 # Pydantic Schemas
@@ -83,6 +118,7 @@ class PerceiveResponse(BaseModel):
     surprise_score: float
     latency_ms: float
     affordances: List[Tuple[float, float, str, float]]
+    weights_loaded: bool
 
 
 class FoveateRequest(BaseModel):
@@ -95,6 +131,23 @@ class FoveateResponse(BaseModel):
     confidence: float
     contrast_score: float
     bbox: Tuple[float, float, float, float]
+    latency_ms: float
+
+
+class GroundRequest(BaseModel):
+    image_b64: str = Field(..., description="Base64 encoded JPEG or PNG screen frame")
+    query: str = Field(..., min_length=1, max_length=256, description="Natural-language target")
+
+
+class GroundResponse(BaseModel):
+    query: str
+    target_coord: Optional[Tuple[float, float]] = Field(
+        ..., description="Candidate normalized (x, y) coordinates; null when outside the frame"
+    )
+    confidence: float
+    frame_width: int
+    frame_height: int
+    checkpoint: str
     latency_ms: float
 
 
@@ -124,13 +177,15 @@ class PlanTrajectoryResponse(BaseModel):
 
 
 @app.get("/v1/health")
-def health_check():
+def health_check(api_key: str = Depends(verify_api_key)):
     eye, fovea, _, _ = get_engine()
+    grounder = get_grounder()
     return {
-        "status": "healthy",
+        "status": "healthy" if eye.weights_loaded or grounder is not None else "degraded",
         "service": "AVCS Cloud Neural Inference",
         "weights_loaded": eye.weights_loaded,
         "fovea_weights_loaded": fovea.weights_loaded,
+        "grounder_weights_loaded": bool(grounder and _grounder_loaded),
         "device": "cpu",
     }
 
@@ -140,6 +195,11 @@ def perceive_screen(req: PerceiveRequest, api_key: str = Depends(verify_api_key)
     t0 = time.perf_counter()
     frame = decode_image(req.image_b64)
     eye, _, _, _ = get_engine()
+    if not eye.weights_loaded:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A trained visual-perception checkpoint is not loaded.",
+        )
 
     state: HumanEyeState = eye.observe(frame=frame)
 
@@ -155,6 +215,33 @@ def perceive_screen(req: PerceiveRequest, api_key: str = Depends(verify_api_key)
         surprise_score=round(state.surprise_score, 4),
         latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
         affordances=affordances,
+        weights_loaded=eye.weights_loaded,
+    )
+
+
+@app.post("/v1/ground", response_model=GroundResponse)
+def ground_target(req: GroundRequest, api_key: str = Depends(verify_api_key)):
+    t0 = time.perf_counter()
+    frame = decode_image(req.image_b64)
+    grounder = get_grounder()
+    if grounder is None or not grounder.is_trained:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A demonstration-trained grounding checkpoint is not loaded.",
+        )
+    try:
+        prediction = grounder.predict(frame, req.query.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return GroundResponse(
+        query=req.query.strip(),
+        target_coord=prediction.candidate_point_norm,
+        confidence=round(prediction.peak_probability, 4),
+        frame_width=int(frame.shape[1]),
+        frame_height=int(frame.shape[0]),
+        checkpoint="demonstration_trained",
+        latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
     )
 
 
@@ -218,4 +305,3 @@ def plan_trajectory(req: PlanTrajectoryRequest, api_key: str = Depends(verify_ap
         waypoints_count=len(pts),
         waypoints=waypoints_json,
     )
-

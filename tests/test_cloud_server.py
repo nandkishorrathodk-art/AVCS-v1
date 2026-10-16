@@ -9,15 +9,19 @@ import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 
+import avcs.server.api as server_api
 from avcs.server.api import app, decode_image
 from avcs.server.client import AVCSCloudClient
 from forge.vision.capture import SyntheticScreen
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
 
+TEST_INFERENCE_KEY = "avcs-inference-test-key-0123456789abcdef"
+
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(monkeypatch):
+    monkeypatch.setenv("AVCS_INFERENCE_API_KEY", TEST_INFERENCE_KEY)
+    return TestClient(app, headers={"X-API-Key": TEST_INFERENCE_KEY})
 
 
 def test_decode_image():
@@ -63,6 +67,61 @@ def test_perceive_endpoint(client):
     assert "affordances" in data
     assert isinstance(data["affordances"], list)
     assert data["latency_ms"] > 0
+    assert data["weights_loaded"] is True
+
+
+def test_ground_endpoint_uses_loaded_demonstration_grounder(client, monkeypatch):
+    from types import SimpleNamespace
+
+    class StubGrounder:
+        is_trained = True
+
+        def predict(self, frame, query):
+            assert frame.shape == (64, 96, 3)
+            assert query == "Find the submit button"
+            return SimpleNamespace(
+                candidate_point_norm=(0.63, 0.42),
+                peak_probability=0.81,
+            )
+
+    monkeypatch.setattr(server_api, "_grounder", StubGrounder())
+    monkeypatch.setattr(server_api, "_grounder_loaded", True)
+    monkeypatch.setattr(server_api, "_grounder_load_attempted", True)
+
+    arr = np.zeros((64, 96, 3), dtype=np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    response = client.post(
+        "/v1/ground",
+        json={"image_b64": encoded, "query": "Find the submit button"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["target_coord"] == [0.63, 0.42]
+    assert data["confidence"] == 0.81
+    assert data["frame_width"] == 96
+    assert data["frame_height"] == 64
+    assert data["checkpoint"] == "demonstration_trained"
+
+
+def test_ground_endpoint_fails_closed_without_trained_checkpoint(client, monkeypatch):
+    monkeypatch.setattr(server_api, "_grounder", None)
+    monkeypatch.setattr(server_api, "_grounder_loaded", False)
+    monkeypatch.setattr(server_api, "_grounder_load_attempted", True)
+
+    arr = np.zeros((32, 32, 3), dtype=np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    response = client.post(
+        "/v1/ground",
+        json={"image_b64": encoded, "query": "Find the submit button"},
+    )
+    assert response.status_code == 503
+    assert "checkpoint" in response.json()["detail"]
 
 
 def test_foveate_endpoint(client):
@@ -122,25 +181,49 @@ def test_plan_trajectory_endpoint(client):
 
 
 def test_api_key_auth(client, monkeypatch):
-    monkeypatch.setenv("AVCS_API_KEY", "super_secret_test_key")
+    monkeypatch.setenv("AVCS_INFERENCE_API_KEY", TEST_INFERENCE_KEY)
+    unauthenticated_client = TestClient(app)
     # Request without header should fail 401
-    resp = client.post(
+    resp = unauthenticated_client.post(
         "/v1/plan_trajectory",
         json={"start": [0.1, 0.1], "target": [0.2, 0.2]},
     )
     assert resp.status_code == 401
 
     # Request with valid key should succeed
-    resp_authed = client.post(
+    resp_authed = unauthenticated_client.post(
         "/v1/plan_trajectory",
-        headers={"X-API-Key": "super_secret_test_key"},
+        headers={"X-API-Key": TEST_INFERENCE_KEY},
         json={"start": [0.1, 0.1], "target": [0.2, 0.2]},
     )
     assert resp_authed.status_code == 200
+    resp_wrong_key = unauthenticated_client.post(
+        "/v1/plan_trajectory",
+        headers={"X-API-Key": "x" * len(TEST_INFERENCE_KEY)},
+        json={"start": [0.1, 0.1], "target": [0.2, 0.2]},
+    )
+    assert resp_wrong_key.status_code == 401
+
+
+def test_service_refuses_requests_when_secret_is_unconfigured(monkeypatch):
+    monkeypatch.delenv("AVCS_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("AVCS_API_KEY", raising=False)
+    response = TestClient(app).get("/v1/health")
+    assert response.status_code == 503
+
+
+def test_service_rejects_short_configured_secret(monkeypatch):
+    monkeypatch.setenv("AVCS_INFERENCE_API_KEY", "too-short")
+    response = TestClient(app).get(
+        "/v1/health",
+        headers={"X-API-Key": "too-short"},
+    )
+    assert response.status_code == 503
 
 
 def test_cloud_client_local_workflow(monkeypatch):
     """Verifies that AVCSCloudClient operates cleanly without local neural weights."""
+    monkeypatch.setenv("AVCS_INFERENCE_API_KEY", TEST_INFERENCE_KEY)
     test_client = TestClient(app)
 
     # Monkeypatch requests calls to route through TestClient
@@ -158,6 +241,7 @@ def test_cloud_client_local_workflow(monkeypatch):
     source = SyntheticScreen()
     c = AVCSCloudClient(
         endpoint_url="http://avcs.test",
+        api_key=TEST_INFERENCE_KEY,
         source=source,
         force_virtual_motor=True,
     )

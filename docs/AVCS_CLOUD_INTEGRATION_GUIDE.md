@@ -72,11 +72,12 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
    cd forge
    ```
 
-2. **Configure your API Key**:
-   Edit `avcs/server/docker-compose.yml` or set the environment variable:
+2. **Configure your private service credential**:
    ```bash
-   export AVCS_API_KEY="sk_live_prod_99f823a07b4e12c"
+   export AVCS_INFERENCE_API_KEY="$(openssl rand -hex 32)"
    ```
+   Keep this value server-side only; the AVCS platform's Next.js server must use
+   the same value in `AVCS_INFERENCE_API_KEY`.
 
 3. **Build and launch the container**:
    ```bash
@@ -85,7 +86,7 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
 
 4. **Verify Health**:
    ```bash
-   curl -H "X-API-Key: sk_live_prod_99f823a07b4e12c" http://localhost:8000/v1/health
+   curl -H "X-API-Key: ${AVCS_INFERENCE_API_KEY}" http://127.0.0.1:8000/v1/health
    ```
    *Expected Response:*
    ```json
@@ -111,9 +112,9 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
 
 2. **Start the AVCS Cloud Service**:
    ```bash
-   export AVCS_API_KEY="sk_live_prod_99f823a07b4e12c"
+   export AVCS_INFERENCE_API_KEY="$(openssl rand -hex 32)"
    export OMP_NUM_THREADS=1
-   python3 -m uvicorn avcs.server.api:app --host 0.0.0.0 --port 8000 --workers 2
+   python3 -m uvicorn avcs.server.api:app --host 127.0.0.1 --port 8000 --workers 2
    ```
 
 3. **Nginx Reverse Proxy with HTTPS (Production)**:
@@ -156,12 +157,13 @@ Copy `avcs/server/client.py` into your project directory (e.g. `project_x/avcs_c
 ```python
 """example_project_x.py - Using AVCS Cloud from an external app."""
 import time
+import os
 from avcs.server.client import AVCSCloudClient
 
 # 1. Initialize the Cloud Client
 client = AVCSCloudClient(
     endpoint_url="https://avcs-api.yourdomain.com",  # Or http://127.0.0.1:8000 for local dev
-    api_key="sk_live_prod_99f823a07b4e12c",
+    api_key=os.environ["AVCS_INFERENCE_API_KEY"],
     force_virtual_motor=False,                       # Set True to simulate without real mouse clicks
 )
 
@@ -340,4 +342,3 @@ client.close()
 | **Unauthorized Usage** | Mandatory `X-API-Key` validation on all inference endpoints. |
 | **Accidental Keystroke Spills** | `/v1/verify_focus` requires visual caret blink (0.8-2.0 Hz) before `type_into()` proceeds. |
 | **Runaway Bot Movements** | OS cursor breakout failsafe halts execution if the user bumps the mouse to screen corner `(0, 0)`. |
-
