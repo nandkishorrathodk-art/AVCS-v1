@@ -21,6 +21,7 @@ if _repo_root not in sys.path:
 from avcs.goal_grounder import (
     DEFAULT_INPUT_SIZE,
     GROUNDING_CHECKPOINT_SCHEMA,
+    GROUNDING_DATASET_PROVENANCE,
     GROUNDING_MODEL_TYPE,
     GoalConditionedGrounder,
 )
@@ -53,18 +54,85 @@ def _decode_canvas_points(logits: torch.Tensor) -> torch.Tensor:
 
 def _batch_metrics(
     logits: torch.Tensor,
+    presence_logits: torch.Tensor,
     targets: torch.Tensor,
     original_points: torch.Tensor,
     letterbox: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    log_probabilities = logits[:, 0].flatten(1).log_softmax(dim=1)
-    loss = -(targets.flatten(1) * log_probabilities).sum(dim=1).mean()
-    canvas_points = _decode_canvas_points(logits)
-    original_x = (canvas_points[:, 0] - letterbox[:, 0]) / letterbox[:, 2]
-    original_y = (canvas_points[:, 1] - letterbox[:, 1]) / letterbox[:, 3]
-    decoded = torch.stack((original_x, original_y), dim=1)
-    normalized_error = torch.linalg.vector_norm(decoded - original_points, dim=1).mean()
-    return loss, normalized_error
+    target_present: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    present_mask = target_present.bool()
+    presence_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        presence_logits, target_present
+    )
+    if present_mask.any():
+        log_probabilities = logits[present_mask, 0].flatten(1).log_softmax(dim=1)
+        localization_loss = -(
+            targets[present_mask].flatten(1) * log_probabilities
+        ).sum(dim=1).mean()
+        canvas_points = _decode_canvas_points(logits[present_mask])
+    else:
+        localization_loss = logits.sum() * 0.0
+        canvas_points = torch.empty((0, 2), device=logits.device)
+    loss = presence_loss + localization_loss
+    positive_letterbox = letterbox[present_mask]
+    original_x = (canvas_points[:, 0] - positive_letterbox[:, 0]) / positive_letterbox[:, 2]
+    original_y = (canvas_points[:, 1] - positive_letterbox[:, 1]) / positive_letterbox[:, 3]
+    decoded = torch.stack((original_x, original_y), dim=1) if present_mask.any() else canvas_points
+    normalized_error = (
+        torch.linalg.vector_norm(decoded - original_points[present_mask], dim=1).mean()
+        if present_mask.any()
+        else loss.detach() * 0.0
+    )
+    return loss, normalized_error, int(present_mask.sum())
+
+
+def _presence_scores(
+    model: GoalConditionedGrounder,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[list[float], list[bool]]:
+    scores: list[float] = []
+    labels: list[bool] = []
+    model.eval()
+    with torch.inference_mode():
+        for batch in loader:
+            _, logits = model.forward_with_presence(
+                batch["image"].to(device), batch["query_tokens"].to(device)
+            )
+            scores.extend(logits.sigmoid().cpu().tolist())
+            labels.extend(bool(value) for value in batch["target_present"].tolist())
+    return scores, labels
+
+
+def _calibrate_presence_threshold(
+    model: GoalConditionedGrounder,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, dict[str, float]]:
+    scores, labels = _presence_scores(model, loader, device)
+    negative_scores = [score for score, present in zip(scores, labels) if not present]
+    positive_scores = [score for score, present in zip(scores, labels) if present]
+    if not negative_scores or not positive_scores:
+        raise ValueError(
+            "Calibration split must contain both target-present and target-absent examples."
+        )
+    maximum_negative = max(negative_scores)
+    if maximum_negative >= 1.0:
+        raise RuntimeError("Cannot calibrate a zero-false-activation threshold from saturated scores.")
+    threshold = math.nextafter(maximum_negative, 1.0)
+    accepted = [score >= threshold for score in scores]
+    false_activations = sum(
+        prediction for prediction, present in zip(accepted, labels) if not present
+    )
+    true_activations = sum(
+        prediction for prediction, present in zip(accepted, labels) if present
+    )
+    return threshold, {
+        "validation_absent_samples": float(len(negative_scores)),
+        "validation_present_samples": float(len(positive_scores)),
+        "validation_false_activations": float(false_activations),
+        "validation_target_recall": true_activations / len(positive_scores),
+    }
 
 
 def _run_epoch(
@@ -77,6 +145,8 @@ def _run_epoch(
     model.train(training)
     total_loss = 0.0
     total_error = 0.0
+    total_positive_samples = 0
+    correct_presence = 0
     total_samples = 0
     grad_context = torch.enable_grad if training else torch.no_grad
     with grad_context():
@@ -86,10 +156,13 @@ def _run_epoch(
             target = batch["target_heatmap"].to(device)
             points = batch["point_norm"].to(device)
             letterbox = batch["letterbox"].to(device)
+            target_present = batch["target_present"].to(device)
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
-            logits = model(image, queries)
-            loss, error = _batch_metrics(logits, target, points, letterbox)
+            logits, presence_logits = model.forward_with_presence(image, queries)
+            loss, error, positive_count = _batch_metrics(
+                logits, presence_logits, target, points, letterbox, target_present
+            )
             if not torch.isfinite(loss) or not torch.isfinite(error):
                 raise RuntimeError("Grounding epoch produced non-finite metrics")
             if optimizer is not None:
@@ -98,13 +171,21 @@ def _run_epoch(
                 optimizer.step()
             batch_size = image.shape[0]
             total_loss += float(loss.detach()) * batch_size
-            total_error += float(error.detach()) * batch_size
+            total_error += float(error.detach()) * positive_count
+            total_positive_samples += positive_count
+            predicted_present = presence_logits.detach() >= 0
+            correct_presence += int(
+                (predicted_present == target_present.bool()).sum()
+            )
             total_samples += batch_size
     if total_samples == 0:
         raise RuntimeError("A training or validation split contained no samples")
     return {
         "loss": total_loss / total_samples,
-        "mean_normalized_click_distance": total_error / total_samples,
+        "mean_normalized_click_distance": (
+            total_error / total_positive_samples if total_positive_samples else 0.0
+        ),
+        "presence_accuracy": correct_presence / total_samples,
         "samples": float(total_samples),
     }
 
@@ -128,6 +209,18 @@ def train_grounder(
 
     sessions = discover_demonstrations(data_dir)
     train_records, validation_records, test_records = split_sessions(sessions, seed=seed)
+    for split_name, records in (
+        ("training", train_records),
+        ("validation", validation_records),
+        ("held-out test", test_records),
+    ):
+        if not any(record.target_present for record in records) or all(
+            record.target_present for record in records
+        ):
+            raise ValueError(
+                f"The {split_name} session split must contain both target-present "
+                "and target-absent examples."
+            )
     split_fingerprints = {
         "training_session_fingerprint": fingerprint_sessions(data_dir, train_records),
         "validation_session_fingerprint": fingerprint_sessions(data_dir, validation_records),
@@ -180,27 +273,35 @@ def train_grounder(
                 "train_mean_normalized_click_distance": train_metrics[
                     "mean_normalized_click_distance"
                 ],
+                "train_presence_accuracy": train_metrics["presence_accuracy"],
                 "validation_loss": validation_metrics["loss"],
                 "validation_mean_normalized_click_distance": validation_metrics[
                     "mean_normalized_click_distance"
                 ],
+                "validation_presence_accuracy": validation_metrics["presence_accuracy"],
             }
         )
         print(
             f"epoch {epoch:03d}/{epochs}: "
             f"train_loss={train_metrics['loss']:.5f} "
             f"val_loss={validation_metrics['loss']:.5f} "
+            f"val_presence_accuracy={validation_metrics['presence_accuracy']:.3f} "
             "val_mean_normalized_click_distance="
             f"{validation_metrics['mean_normalized_click_distance']:.5f}"
         )
         if math.isfinite(validation_metrics["loss"]) and (
             validation_metrics["loss"] < best_validation_loss
         ):
+            presence_threshold, presence_calibration = _calibrate_presence_threshold(
+                model, validation_loader, device
+            )
             best_validation_loss = validation_metrics["loss"]
             checkpoint = {
                 "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
                 "model_type": GROUNDING_MODEL_TYPE,
-                "dataset_provenance": "recorded_ui_click_demonstrations",
+                "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
+                "target_presence_threshold": presence_threshold,
+                "target_presence_calibration": presence_calibration,
                 "training_samples": len(train_records),
                 "validation_samples": len(validation_records),
                 "held_out_test_samples": len(test_records),
@@ -219,7 +320,7 @@ def train_grounder(
     report = {
         "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
         "model_type": GROUNDING_MODEL_TYPE,
-        "dataset_provenance": "recorded_ui_click_demonstrations",
+        "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
         "session_split": "recording_session_disjoint",
         **split_fingerprints,
         "recording_sessions": len(sessions),
@@ -232,7 +333,10 @@ def train_grounder(
         "device": str(device),
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "best_validation_loss": best_validation_loss,
-        "validation_metric": "mean normalized Euclidean click-point distance",
+        "validation_metric": "presence BCE plus positive-click localization loss",
+        "target_presence_threshold": checkpoint.get("target_presence_threshold"),
+        "target_presence_calibration": checkpoint.get("target_presence_calibration"),
+        "abstention_action_authorized": False,
         "target_hit_rate": "not_measured; recorder has click points, not target bounds",
         "history": history,
     }
@@ -242,7 +346,10 @@ def train_grounder(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train the AVCS pixel-and-goal grounder from recorded UI clicks."
+        description=(
+            "Train the AVCS pixel-and-goal grounder from recorded target clicks "
+            "and target-absent examples."
+        )
     )
     parser.add_argument("--data-dir", required=True, help="Root containing recorder sessions.")
     parser.add_argument("--output-dir", default="runs/real_ui_grounder")
@@ -274,8 +381,8 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: UP045
         f"{Path(args.output_dir) / 'goal_grounder_best.pt'}"
     )
     print(
-        f"Held-out sessions: {report['held_out_test_samples']} samples; "
-        "test metrics were not evaluated."
+        f"Held-out test split: {report['held_out_test_samples']} samples; "
+        "held-out metrics are not evaluated until the separate evaluator is run."
     )
     return 0
 

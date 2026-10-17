@@ -1,7 +1,7 @@
-"""Real-Time Biological Neuro-Streaming Engine.
+"""Real-time local neuro-streaming telemetry.
 
-Ultra-low-latency 60-120 FPS sensory-motor telemetry broadcasting for AI models,
-real-time gaming controllers, and continuous video tracking agents.
+The packet schema carries visual and sensorimotor telemetry; achievable rate
+depends on the capture source, perception workload, and subscribers.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from forge.vision.cortex.sdk import ScreenEye
 
 @dataclasses.dataclass(frozen=True)
 class NeuroPacket:
-    """High-frequency (60-120 Hz) biological sensory-motor telemetry packet."""
+    """Visual and sensorimotor telemetry packet with optional capture provenance."""
     timestamp: float
     seq: int
     fixation: Tuple[float, float]
@@ -32,9 +32,10 @@ class NeuroPacket:
     inference_ms: float
     action_hotspots: List[Tuple[float, float, str, float]] = dataclasses.field(default_factory=list)
     visual_latent: Optional[np.ndarray] = None
+    source_frame_sequence: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        packet = {
             "timestamp": self.timestamp,
             "seq": self.seq,
             "fixation": [round(self.fixation[0], 4), round(self.fixation[1], 4)],
@@ -49,6 +50,9 @@ class NeuroPacket:
                 for x, y, act, conf in self.action_hotspots
             ],
         }
+        if self.source_frame_sequence is not None:
+            packet["source_frame_sequence"] = self.source_frame_sequence
+        return packet
 
     COMPACT_FMT_40 = "<dI5fB7x"
     COMPACT_FMT_33 = "<dI5fB"
@@ -86,7 +90,7 @@ class NeuroPacket:
 
 
 class NeuroStreamBus:
-    """Thread-safe zero-copy circular ring buffer & pub-sub broadcaster for 60Hz telemetry."""
+    """Thread-safe circular ring buffer and pub-sub broadcaster for telemetry."""
 
     def __init__(self, buffer_size: int = 120) -> None:
         self.buffer_size = buffer_size

@@ -1,10 +1,7 @@
 """AVCS Cloud Inference API Server (FastAPI).
 
-Hosts the proprietary AVCS neural model weights in a secure cloud environment,
-preventing model extraction, unauthorized weight copying, or local weights leakage.
-
-Clients send screen frames over HTTPS; the cloud server computes visual perception,
-affordances, and foveal acuity, returning structured JSON action coordinates.
+Hosts AVCS model weights on the server. Clients send screen frames to this service
+for inference; HTTPS protects transport but does not prevent server-side access.
 """
 from __future__ import annotations
 
@@ -14,7 +11,7 @@ import io
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -25,12 +22,13 @@ from avcs.human_eye import HumanEye, HumanEyeState
 from avcs.grounding import FovealAcuityEngine
 from avcs.focus import VisualFocusDetector
 from avcs.goal_grounder import GoalConditionedGrounder, load_grounding_checkpoint
+from avcs.query_limits import MAX_QUERY_BYTES
 from avcs.servoing import NeuromuscularServoingController
 from forge.vision.cortex.motor.driver import VirtualCursorDriver
 
 app = FastAPI(
     title="AVCS Cloud Neural Inference Service",
-    description="Zero-leakage cloud-hosted biological visual cortex for screen AI agents",
+    description="Remote AVCS visual inference; submitted screen frames are processed by this service.",
     version="1.0.0",
 )
 
@@ -107,8 +105,10 @@ def get_grounder() -> Optional[GoalConditionedGrounder]:
 # Pydantic Schemas
 class PerceiveRequest(BaseModel):
     image_b64: str = Field(..., description="Base64 encoded JPEG or PNG screen frame")
-    action_type: str = Field("all", description="'clickable', 'typeable', or 'all'")
-    top_k: int = Field(5, description="Max affordances to extract")
+    action_type: Literal["clickable", "typeable", "all"] = Field(
+        "all", description="'clickable', 'typeable', or 'all'"
+    )
+    top_k: int = Field(5, ge=0, le=50, description="Max affordances to extract")
 
 
 class PerceiveResponse(BaseModel):
@@ -145,6 +145,8 @@ class GroundResponse(BaseModel):
         ..., description="Candidate normalized (x, y) coordinates; null when outside the frame"
     )
     confidence: float
+    target_present: bool
+    target_presence_probability: float
     frame_width: int
     frame_height: int
     checkpoint: str
@@ -180,12 +182,19 @@ class PlanTrajectoryResponse(BaseModel):
 def health_check(api_key: str = Depends(verify_api_key)):
     eye, fovea, _, _ = get_engine()
     grounder = get_grounder()
+    perception_ready = bool(eye.weights_loaded)
+    fovea_ready = bool(fovea.weights_loaded)
+    grounding_ready = bool(grounder and _grounder_loaded and grounder.is_trained)
+    service_ready = perception_ready or fovea_ready or grounding_ready
     return {
-        "status": "healthy" if eye.weights_loaded or grounder is not None else "degraded",
+        "status": "healthy" if service_ready else "degraded",
         "service": "AVCS Cloud Neural Inference",
         "weights_loaded": eye.weights_loaded,
         "fovea_weights_loaded": fovea.weights_loaded,
-        "grounder_weights_loaded": bool(grounder and _grounder_loaded),
+        "grounder_weights_loaded": grounding_ready,
+        "perceive_ready": perception_ready,
+        "foveate_ready": fovea_ready,
+        "ground_ready": grounding_ready,
         "device": "cpu",
     }
 
@@ -222,6 +231,17 @@ def perceive_screen(req: PerceiveRequest, api_key: str = Depends(verify_api_key)
 @app.post("/v1/ground", response_model=GroundResponse)
 def ground_target(req: GroundRequest, api_key: str = Depends(verify_api_key)):
     t0 = time.perf_counter()
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Grounding query cannot be empty.",
+        )
+    if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Grounding query exceeds {MAX_QUERY_BYTES} UTF-8 bytes.",
+        )
     frame = decode_image(req.image_b64)
     grounder = get_grounder()
     if grounder is None or not grounder.is_trained:
@@ -230,14 +250,18 @@ def ground_target(req: GroundRequest, api_key: str = Depends(verify_api_key)):
             detail="A demonstration-trained grounding checkpoint is not loaded.",
         )
     try:
-        prediction = grounder.predict(frame, req.query.strip())
+            prediction = grounder.predict(frame, query)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return GroundResponse(
-        query=req.query.strip(),
+        query=query,
         target_coord=prediction.candidate_point_norm,
         confidence=round(prediction.peak_probability, 4),
+        target_present=prediction.target_present,
+        target_presence_probability=round(
+            prediction.target_present_probability, 4
+        ),
         frame_width=int(frame.shape[1]),
         frame_height=int(frame.shape[0]),
         checkpoint="demonstration_trained",

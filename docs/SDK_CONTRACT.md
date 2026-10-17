@@ -14,10 +14,14 @@ Terminal statuses are `confirmed`, `failed`, `ambiguous`, `blocked` and `cancell
 
 If the backend cannot establish whether dispatch occurred, it must return/raise an ambiguous result. The client must not retry it. Use the same `action_id` to join an in-flight operation or retrieve the cached result within the same client instance. Caller cancellation does not cancel the shielded backend operation; a same-ID request joins it instead of dispatching twice. This in-memory cache is not a durable cross-process exactly-once mechanism.
 
+The repository adapter currently has no semantic target detector, so `find_targets()` returns no candidates. It requires an explicit target for every action and never substitutes the screen center. Keyboard actions are blocked unless the target has a positive visual focus check. A caller-provided prose `expected_postcondition` is not interpreted as application-state proof; if only a visual reaction is observed, the result remains `ambiguous` with `verified=False`. Scroll is not implemented by this adapter and is blocked rather than translated to another input.
+
+Visual-reaction evidence means that the screen reacted near the input point; it does not prove that a requested business outcome (such as submitting a form or approving a payment) occurred.
+
 ## Idempotency and risk
 
 `ActionClass` is declared by the caller as context for broker policy; it is not proof that an operation is safe to repeat. The real broker must enforce repeat behavior. High-risk actions require an `authorization_ref`; the broker must validate that reference against trusted state, bind it to the action and expiry, and refuse self-issued or stale grants.
 
 ## Compatibility
 
-The SDK uses dataclasses and enums, with no runtime dependencies, and targets Python 3.10+. v0.1 is pre-release. Breaking changes are permitted before v1.0; serialized wire-format compatibility is not promised in this scaffold.
+The published package metadata currently requires Python 3.9 or newer and declares PyTorch, NumPy and Pillow dependencies. v0.1 is pre-release. Breaking changes are permitted before v1.0; serialized wire-format compatibility is not promised in this scaffold.

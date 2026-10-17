@@ -134,6 +134,19 @@ def test_action_broker_prevents_blind_replay_on_non_idempotent():
     assert result.recovery_attempts == 1
 
 
+def test_action_request_defaults_to_no_blind_click_replay():
+    request = ActionRequest(
+        action_type="click",
+        target_coord=(0.5, 0.5),
+    )
+    assert request.action_class == ActionClass.NON_IDEMPOTENT
+
+    eye = HumanEye(source=SyntheticScreen())
+    broker = ActionBroker(eye=eye, driver=VirtualCursorDriver(), settle_delay_s=0)
+    result = broker.execute(request)
+    assert result.recovery_attempts == 1
+
+
 def test_action_broker_semantic_postcondition_evaluation():
     """Verify ActionBroker evaluates semantic postcondition predicate."""
     eye = HumanEye(source=SyntheticScreen())

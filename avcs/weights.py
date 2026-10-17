@@ -21,6 +21,7 @@ DEFAULT_WEIGHTS_URL = (
 # Standard filenames
 WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
 HUMAN_EYE_WEIGHTS_FILENAME = "human_eye_weights.pt"
+GOAL_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_best.pt"
 
 
 def get_default_cache_dir() -> Path:
@@ -82,6 +83,11 @@ def get_human_eye_weights_path(custom_path: Optional[str] = None) -> Optional[st
     return get_weights_path(custom_path=custom_path, filename=HUMAN_EYE_WEIGHTS_FILENAME)
 
 
+def get_grounding_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+    """Finds the path to pre-trained GoalConditionedGrounder neural weights."""
+    return get_weights_path(custom_path=custom_path, filename=GOAL_GROUNDER_WEIGHTS_FILENAME)
+
+
 def download_weights(
     dest_path: Optional[str] = None,
     url: str = DEFAULT_WEIGHTS_URL,
@@ -122,6 +128,41 @@ def _is_human_eye_model(cortex: Any) -> bool:
     if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
         return True
     return False
+
+
+def _load_complete_state_dict(
+    module: torch.nn.Module,
+    state: dict[str, Any],
+    strict: bool,
+    allowed_missing_prefixes: tuple[str, ...] = (),
+) -> bool:
+    """Load a complete, shape-compatible module state before reporting readiness."""
+    model_state = module.state_dict()
+    model_keys = set(model_state)
+    checkpoint_keys = set(state)
+    missing_keys = model_keys - checkpoint_keys
+    unexpected_keys = checkpoint_keys - model_keys
+    if (
+        (strict and (missing_keys or unexpected_keys))
+        or any(
+            not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
+            for key in missing_keys
+        )
+    ):
+        return False
+
+    for key, expected in model_state.items():
+        if key not in state:
+            continue
+        actual = state[key]
+        if not torch.is_tensor(actual) or actual.shape != expected.shape:
+            return False
+
+    module.load_state_dict(
+        {key: state[key] for key in model_state if key in state},
+        strict=strict,
+    )
+    return True
 
 
 def load_avcs_weights(
@@ -167,57 +208,53 @@ def load_avcs_weights(
             if not isinstance(state, dict):
                 return False
 
-            # Determine actual target module (forward FovealAcuityEngine to its head)
+            # The fovea engine wraps its head; other modules must load as a whole.
             target_module = (
                 cortex.head
-                if (hasattr(cortex, "head") and isinstance(cortex.head, torch.nn.Module))
+                if (
+                    cortex.__class__.__name__ == "FovealAcuityEngine"
+                    and isinstance(cortex.head, torch.nn.Module)
+                )
                 else cortex
             )
 
             target_cls = target_module.__class__.__name__
-            loaded = False
 
             # Direct submodule state dictionary extraction
             if target_cls == "FovealAcuityHead" and "fovea_head" in state and isinstance(state["fovea_head"], dict):
-                target_module.load_state_dict(state["fovea_head"], strict=strict)
-                return True
+                loaded = _load_complete_state_dict(target_module, state["fovea_head"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
             elif target_cls == "FastAffordanceHead" and "affordance_head" in state and isinstance(state["affordance_head"], dict):
-                target_module.load_state_dict(state["affordance_head"], strict=strict)
-                return True
+                loaded = _load_complete_state_dict(target_module, state["affordance_head"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
             elif target_cls == "RealTimeCorticalBackbone" and "backbone" in state and isinstance(state["backbone"], dict):
-                target_module.load_state_dict(state["backbone"], strict=strict)
-                return True
+                loaded = _load_complete_state_dict(target_module, state["backbone"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
 
-            # If full model match works directly
-            try:
-                target_module.load_state_dict(state, strict=strict)
-                loaded = True
-            except Exception:
-                pass
-
-            if not loaded and hasattr(target_module, "state_dict"):
-                # Robust partial key matching with shape validation
-                model_dict = target_module.state_dict()
-                matched_keys = {}
-                for k, v in state.items():
-                    if k in model_dict and hasattr(v, "shape") and v.shape == model_dict[k].shape:
-                        matched_keys[k] = v
-
-                if matched_keys:
-                    model_dict.update(matched_keys)
-                    target_module.load_state_dict(model_dict)
-                    loaded = True
+            optional_missing_prefixes = (
+                ("grounder.",) if target_cls == "HumanEye" and not strict else ()
+            )
+            loaded = _load_complete_state_dict(
+                target_module,
+                state,
+                strict,
+                allowed_missing_prefixes=optional_missing_prefixes,
+            )
 
             # If cortex is HumanEye, also ensure fovea_engine.head is populated
             if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
                 fov_head = cortex.fovea_engine.head
                 fov_dict = state.get("fovea_head")
                 if isinstance(fov_dict, dict):
-                    try:
-                        fov_head.load_state_dict(fov_dict, strict=False)
-                        cortex.fovea_engine.weights_loaded = True
-                    except Exception:
-                        pass
+                    cortex.fovea_engine.weights_loaded = _load_complete_state_dict(
+                        fov_head, fov_dict, strict
+                    )
 
             return loaded
         except Exception as exc:

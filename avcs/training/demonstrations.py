@@ -1,4 +1,4 @@
-"""Dataset support for human-recorded AVCS click demonstrations."""
+"""Dataset support for human-recorded AVCS click and target-absence examples."""
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +27,8 @@ class DemoRecord:
     session_dir: Path
     frame_path: Path
     target_label: str
-    point_norm: tuple[float, float]
+    point_norm: Optional[tuple[float, float]]  # noqa: UP045
+    target_present: bool = True
 
 
 def fingerprint_sessions(
@@ -71,23 +72,32 @@ def _load_record(session_dir: Path, raw: dict[str, Any]) -> DemoRecord:
     if raw.get("schema_version") != 1:
         raise ValueError(f"Unsupported demonstration schema in {session_dir}")
     action = raw.get("action")
-    if not isinstance(action, dict) or action.get("type") != "mouse_click":
-        raise ValueError(f"Only mouse_click demonstrations are supported in {session_dir}")
-    if action.get("button") != "left":
-        raise ValueError(f"Only left-click demonstrations are supported in {session_dir}")
+    if not isinstance(action, dict):
+        raise TypeError(f"Demonstration is missing an action in {session_dir}")
     target_label = raw.get("target_label")
     if not isinstance(target_label, str) or not target_label.strip():
         raise ValueError(f"Demonstration is missing a target_label in {session_dir}")
-    point = action.get("point_norm")
-    if (
-        not isinstance(point, list)
-        or len(point) != 2
-        or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in point)
-    ):
-        raise ValueError(f"Invalid point_norm in {session_dir}")
-    x, y = float(point[0]), float(point[1])
-    if not (math.isfinite(x) and math.isfinite(y) and 0 <= x < 1 and 0 <= y < 1):
-        raise ValueError(f"point_norm must be finite and in [0, 1) in {session_dir}")
+    action_type = action.get("type")
+    if action_type == "target_absent":
+        if set(action) != {"type"}:
+            raise ValueError(f"target_absent action must not contain coordinates in {session_dir}")
+        point_norm = None
+    elif action_type == "mouse_click":
+        if action.get("button") != "left":
+            raise ValueError(f"Only left-click demonstrations are supported in {session_dir}")
+        point = action.get("point_norm")
+        if (
+            not isinstance(point, list)
+            or len(point) != 2
+            or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in point)
+        ):
+            raise ValueError(f"Invalid point_norm in {session_dir}")
+        x, y = float(point[0]), float(point[1])
+        if not (math.isfinite(x) and math.isfinite(y) and 0 <= x < 1 and 0 <= y < 1):
+            raise ValueError(f"point_norm must be finite and in [0, 1) in {session_dir}")
+        point_norm = (x, y)
+    else:
+        raise ValueError(f"Unsupported demonstration action type in {session_dir}")
     frame_value = raw.get("frame")
     if not isinstance(frame_value, str) or not frame_value:
         raise ValueError(f"Demonstration is missing a frame path in {session_dir}")
@@ -98,7 +108,13 @@ def _load_record(session_dir: Path, raw: dict[str, Any]) -> DemoRecord:
         raise ValueError(f"Frame path escapes its demonstration session: {frame_value}") from exc
     if not frame_path.is_file():
         raise FileNotFoundError(f"Demonstration frame does not exist: {frame_path}")
-    return DemoRecord(session_dir, frame_path, target_label.strip(), (x, y))
+    return DemoRecord(
+        session_dir,
+        frame_path,
+        target_label.strip(),
+        point_norm,
+        target_present=point_norm is not None,
+    )
 
 
 def discover_demonstrations(
@@ -189,7 +205,7 @@ def split_sessions(
 
 
 class DemonstrationClickDataset(Dataset):
-    """Letterboxed RGB frames paired with target labels and click-point targets."""
+    """Letterboxed frames paired with target labels and presence/click targets."""
 
     def __init__(
         self,
@@ -216,12 +232,25 @@ class DemonstrationClickDataset(Dataset):
             image_tensor, transform = letterbox_rgb(
                 np.asarray(rgb), self.input_size
             )
-        canvas_point = transform.original_to_canvas(record.point_norm)
+        if record.target_present:
+            if record.point_norm is None:
+                raise ValueError("A target-present demonstration must include point_norm")
+            target_heatmap = click_heatmap(
+                transform.original_to_canvas(record.point_norm),
+                (self.output_size, self.output_size),
+            )
+            point_norm = record.point_norm
+        else:
+            target_heatmap = torch.zeros(
+                (self.output_size, self.output_size), dtype=torch.float32
+            )
+            point_norm = (0.0, 0.0)
         return {
             "image": image_tensor,
             "query_tokens": encode_queries([record.target_label])[0],
-            "target_heatmap": click_heatmap(canvas_point, (self.output_size, self.output_size)),
-            "point_norm": torch.tensor(record.point_norm, dtype=torch.float32),
+            "target_heatmap": target_heatmap,
+            "point_norm": torch.tensor(point_norm, dtype=torch.float32),
+            "target_present": torch.tensor(record.target_present, dtype=torch.float32),
             "letterbox": torch.tensor(
                 [
                     transform.left_norm,

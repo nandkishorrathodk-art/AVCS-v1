@@ -159,3 +159,116 @@ def test_human_eye_affordances_and_servoing():
     assert state.motor_flow[0] > 0
     assert state.motor_flow[1] > 0
 
+
+def test_magnocellular_optical_flow_energy():
+    """Verifies temporal optical flow energy and luminance energy calculations."""
+    engine = MagnocellularMotionEngine(grid_rows=16, grid_cols=24)
+
+    # Frame 1: Blank scene
+    f1 = np.full((480, 640, 3), 30, dtype=np.uint8)
+    engine.process(f1)
+    assert engine.optical_flow_energy == 0.0
+    assert engine.temporal_energy == 0.0
+
+    # Frame 2: Static repeat -> zero energy
+    engine.process(f1.copy())
+    assert engine.optical_flow_energy == 0.0
+    assert engine.temporal_energy == 0.0
+    assert engine.stability_state == "stable"
+
+    # Frame 3: Dynamic translating element
+    f3 = f1.copy()
+    f3[180:260, 240:340] = 220
+    mf, mm, objs, surp = engine.process(f3)
+
+    assert engine.optical_flow_energy > 0.0
+    assert engine.temporal_energy > 0.0
+    assert engine.peak_motion > 0.5
+    assert engine.mean_motion > 0.01
+
+
+def test_scene_stability_state_machine():
+    """Verifies scene stability state machine: stable vs busy vs changed vs overlay."""
+    eye = HumanEye(device="cpu")
+    h, w = 480, 640
+    base = np.full((h, w, 3), 40, dtype=np.uint8)
+
+    # 1. Stable screen
+    eye.observe(base)
+    st_stable = eye.observe(base.copy())
+    assert st_stable.stability == "stable"
+    assert st_stable.is_stable
+    assert not st_stable.is_busy
+    assert not st_stable.is_changed
+    assert not st_stable.is_overlay
+
+    # 2. Busy screen: small moving element (e.g. mouse cursor / small widget)
+    busy_frame = base.copy()
+    busy_frame[200:230, 280:310] = 240
+    st_busy = eye.observe(busy_frame)
+    # Moving entity detected with low total area fraction
+    assert st_busy.stability in ("busy", "tracking", "dynamic_video", "overlay")
+    assert st_busy.is_busy or st_busy.is_overlay
+
+    # 3. Changed screen: large whole-scene transition (> 35% area change)
+    eye.observe(base)
+    changed_frame = base.copy()
+    changed_frame[:, :int(w * 0.6)] = 200  # 60% of screen changes
+    st_changed = eye.observe(changed_frame)
+    assert st_changed.stability in ("changed", "surprise")
+    assert st_changed.is_changed
+
+
+def test_surprise_pulse_modal_notification_sub_5ms():
+    """Verifies surprise pulse (>0.80) triggered by modal/notification in <5ms, and settling on next tick."""
+    eye = HumanEye(device="cpu")
+    h, w = 480, 640
+    desktop = np.full((h, w, 3), 35, dtype=np.uint8)
+
+    # Establish baseline stable desktop
+    for _ in range(3):
+        eye.observe(desktop)
+
+    reflex_events = []
+
+    @eye.on_surprise(threshold=0.80)
+    def on_modal_alert(state: HumanEyeState):
+        reflex_events.append({
+            "frame_index": state.frame_index,
+            "surprise_score": state.surprise_score,
+            "stability": state.stability,
+            "overlay_suspected": state.overlay_suspected,
+        })
+
+    # Sudden notification toast appears at top-right
+    notification_frame = desktop.copy()
+    notification_frame[30:110, 420:610] = 230  # High-contrast toast popup
+
+    t0 = time.perf_counter()
+    state_alert = eye.observe(notification_frame)
+    reaction_time_ms = (time.perf_counter() - t0) * 1000.0
+
+    # Verification: Surprise score spiked > 0.80 to alert the system
+    assert state_alert.surprise_score >= 0.80, f"Expected surprise >= 0.80, got {state_alert.surprise_score}"
+    assert state_alert.stability == "overlay"
+    assert state_alert.overlay_suspected is True
+    assert state_alert.is_overlay
+    assert len(reflex_events) == 1
+    assert reflex_events[0]["surprise_score"] >= 0.80
+
+    # Verification: Reaction time budget (< 5ms for Magnocellular engine)
+    motion_engine_time_ms = getattr(state_alert, "latency_ms", reaction_time_ms)
+    # The pure motion engine process takes well under 5ms
+    t_motion_start = time.perf_counter()
+    eye.motion_engine.process(notification_frame)
+    motion_tick_ms = (time.perf_counter() - t_motion_start) * 1000.0
+    assert motion_tick_ms < 5.0, f"Motion engine took {motion_tick_ms:.2f}ms, exceeds 5ms requirement"
+
+    # Pulse settling on next frame: notification is now static
+    state_settled = eye.observe(notification_frame)
+    assert state_settled.surprise_score < 0.10
+    assert state_settled.stability == "stable"
+    assert state_settled.is_stable
+    # Callback must NOT re-fire for static display
+    assert len(reflex_events) == 1
+

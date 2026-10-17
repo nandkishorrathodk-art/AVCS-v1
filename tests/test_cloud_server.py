@@ -44,6 +44,27 @@ def test_health_endpoint(client):
     assert data["status"] == "healthy"
     assert data["weights_loaded"] is True
     assert data["device"] == "cpu"
+    assert data["perceive_ready"] is True
+    assert data["ground_ready"] is False
+
+
+def test_health_endpoint_does_not_treat_untrained_grounder_as_ready(client, monkeypatch):
+    from types import SimpleNamespace
+
+    eye = SimpleNamespace(weights_loaded=False)
+    fovea = SimpleNamespace(weights_loaded=False)
+    untrained_grounder = SimpleNamespace(is_trained=False)
+    monkeypatch.setattr(server_api, "get_engine", lambda: (eye, fovea, None, None))
+    monkeypatch.setattr(server_api, "get_grounder", lambda: untrained_grounder)
+    monkeypatch.setattr(server_api, "_grounder_loaded", True)
+
+    response = client.get("/v1/health")
+    data = response.json()
+
+    assert data["status"] == "degraded"
+    assert data["weights_loaded"] is False
+    assert data["grounder_weights_loaded"] is False
+    assert data["ground_ready"] is False
 
 
 def test_perceive_endpoint(client):
@@ -70,6 +91,20 @@ def test_perceive_endpoint(client):
     assert data["weights_loaded"] is True
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"image_b64": "unused", "action_type": "execute", "top_k": 5},
+        {"image_b64": "unused", "action_type": "all", "top_k": -1},
+        {"image_b64": "unused", "action_type": "all", "top_k": 51},
+    ],
+)
+def test_perceive_endpoint_rejects_invalid_filters(client, payload):
+    response = client.post("/v1/perceive", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_ground_endpoint_uses_loaded_demonstration_grounder(client, monkeypatch):
     from types import SimpleNamespace
 
@@ -82,6 +117,8 @@ def test_ground_endpoint_uses_loaded_demonstration_grounder(client, monkeypatch)
             return SimpleNamespace(
                 candidate_point_norm=(0.63, 0.42),
                 peak_probability=0.81,
+                target_present=True,
+                target_present_probability=0.92,
             )
 
     monkeypatch.setattr(server_api, "_grounder", StubGrounder())
@@ -101,6 +138,8 @@ def test_ground_endpoint_uses_loaded_demonstration_grounder(client, monkeypatch)
     data = response.json()
     assert data["target_coord"] == [0.63, 0.42]
     assert data["confidence"] == 0.81
+    assert data["target_present"] is True
+    assert data["target_presence_probability"] == 0.92
     assert data["frame_width"] == 96
     assert data["frame_height"] == 64
     assert data["checkpoint"] == "demonstration_trained"
@@ -122,6 +161,23 @@ def test_ground_endpoint_fails_closed_without_trained_checkpoint(client, monkeyp
     )
     assert response.status_code == 503
     assert "checkpoint" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "query, detail",
+    [
+        ("   ", "cannot be empty"),
+        ("x" * 97, "exceeds 96 UTF-8 bytes"),
+    ],
+)
+def test_ground_endpoint_rejects_invalid_query_before_decoding(client, query, detail):
+    response = client.post(
+        "/v1/ground",
+        json={"image_b64": "not-an-image", "query": query},
+    )
+
+    assert response.status_code == 400
+    assert detail in response.json()["detail"]
 
 
 def test_foveate_endpoint(client):
@@ -244,6 +300,7 @@ def test_cloud_client_local_workflow(monkeypatch):
         api_key=TEST_INFERENCE_KEY,
         source=source,
         force_virtual_motor=True,
+        allow_insecure_http=True,
     )
 
     # 1. ping
@@ -279,3 +336,92 @@ def test_cloud_client_local_workflow(monkeypatch):
         c.type_into((0.5, 0.5), "hello world", enforce_focus=True)
 
     c.close()
+
+
+def test_cloud_client_rejects_remote_http_by_default():
+    with pytest.raises(ValueError, match="use HTTPS for remote servers"):
+        AVCSCloudClient(
+            endpoint_url="http://avcs.example",
+            source=SyntheticScreen(),
+            force_virtual_motor=True,
+        )
+
+
+def test_cloud_client_ground_calls_authenticated_route(monkeypatch):
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"target_coord": [0.25, 0.75], "confidence": 0.6}
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        requests.append((url, json, headers, timeout))
+        return Response()
+
+    monkeypatch.setattr("avcs.server.client.requests.post", mock_post)
+    c = AVCSCloudClient(
+        endpoint_url="https://avcs.example",
+        api_key=TEST_INFERENCE_KEY,
+        source=SyntheticScreen(),
+        force_virtual_motor=True,
+    )
+    try:
+        result = c.ground("  Save button  ", frame=np.zeros((24, 32, 3), dtype=np.uint8))
+    finally:
+        c.close()
+
+    assert result["target_coord"] == [0.25, 0.75]
+    assert requests[0][0] == "https://avcs.example/v1/ground"
+    assert requests[0][1]["query"] == "Save button"
+    assert requests[0][2]["X-API-Key"] == TEST_INFERENCE_KEY
+
+
+def test_cloud_client_rejects_malformed_focus_response(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"is_focused": "false"}
+
+    monkeypatch.setattr("avcs.server.client.requests.post", lambda *args, **kwargs: Response())
+    c = AVCSCloudClient(
+        endpoint_url="https://avcs.example",
+        source=SyntheticScreen(),
+        force_virtual_motor=True,
+    )
+    c._last_frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    try:
+        with pytest.raises(ValueError, match="must contain a boolean"):
+            c.verify_focus((0.5, 0.5))
+    finally:
+        c.close()
+
+
+def test_cloud_client_does_not_type_after_malformed_focus_response(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"is_focused": "false"}
+
+    monkeypatch.setattr("avcs.server.client.requests.post", lambda *args, **kwargs: Response())
+    c = AVCSCloudClient(
+        endpoint_url="https://avcs.example",
+        source=SyntheticScreen(),
+        force_virtual_motor=True,
+    )
+    c._last_frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    monkeypatch.setattr(c, "click", lambda target: True)
+    monkeypatch.setattr(c, "see", lambda: {})
+    try:
+        with pytest.raises(ValueError, match="must contain a boolean"):
+            c.type_into((0.5, 0.5), "must not be typed")
+        assert c.driver.typed_history == []
+        assert c.driver.key_history == []
+    finally:
+        c.close()

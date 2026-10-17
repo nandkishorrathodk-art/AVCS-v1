@@ -1,13 +1,56 @@
 # AVCS Cloud Inference & Integration Guide
-### *Zero-Leakage Proprietary Visual Cortex Deployment for External Projects*
+### *Remote inference integration for external projects*
+
+---
+
+## System 1 → System 2 privacy boundary
+
+For the intended architecture, run capture, perception, grounding, and motor
+actions locally. Send only a minimized, allowlisted text observation and the
+user's text task to System 2 with `TextOnlySystem2Client`:
+
+```python
+from avcs.server import TextOnlySystem2Client
+
+brain = TextOnlySystem2Client(
+    endpoint_url="https://your-system2.example",
+    api_key="your_system2_key",
+)
+turn = controller.consult_system2(
+    task,
+    brain,
+    consent_confirmed=user_has_consented,
+)
+goal = turn.goal
+```
+
+The client posts to `/v1/system2/goal` and accepts a text `goal` response. It
+does not capture, encode, or attach images or embeddings. The remote System 2
+service must implement that endpoint. Text can still contain sensitive data;
+the client masks some common secret patterns, but this is not comprehensive
+redaction. Minimize observations locally and obtain explicit user consent
+before sharing. `consult_system2()` returns the goal for review and never
+dispatches mouse or keyboard input. Free-form goal text is not an executable
+action protocol.
+
+For live desktop acceptance, construct `AVCSController(require_real_capture=True)`
+and use `start_streaming()` / `stop_streaming()`. This prevents synthetic
+fallback, but does not guarantee a particular frame rate. Record
+`controller.capture_backend` and `controller.stream_metrics` from the target
+machine; do not label the configured target rate as measured performance.
+
+`AVCSCloudClient` and the visual-inference endpoints documented below are a
+separate legacy mode that sends screen frames to a remote visual inference
+service. Do not use that mode for the strict zero-pixel System 1/System 2
+architecture.
 
 ---
 
 ## 1. Executive Summary & Architecture
 
-The **Artificial Visual Cortex System (AVCS)** is a biological System 1 (Eyes + Hands) neural perception engine designed for autonomous desktop and screen interaction. 
+AVCS provides a remote inference API and a client that can capture frames locally and send them to a configured server. This is a cloud deployment option, not a zero-leakage or local-only architecture: screenshots leave the client device and are processed by the server.
 
-To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_weights.pt`) and prevent model extraction or reverse-engineering, AVCS uses a **Zero-Leakage Cloud Architecture**:
+The following diagram describes the client/server data path:
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -35,8 +78,8 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
 |   +---------------------------------------+             +---------------------------+   |
 +-----------------------------------------------------------------------------------------+
                                             ^
-                                            |  HTTPS (Zero Weights Downloaded)
-                                            |  Encrypted Base64 JPEGs (<50 KB)
+                                            |  HTTPS for remote endpoints
+                                            |  Screen frames sent to the server
                                             |  Normalized (x, y) Actions & Kinematics
                                             v
 +-----------------------------------------------------------------------------------------+
@@ -45,20 +88,21 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
 |                                                                                         |
 |   +---------------------------------------------------------------------------------+   |
 |   |                             AVCSCloudClient SDK                                 |   |
-|   |    - NO PyTorch dependency.                                                     |   |
-|   |    - ZERO weight files downloaded or stored locally.                            |   |
-|   |    - High-speed local screen capture (mss / GDI DIBSection, <10ms).             |   |
+|   |    - Does not download model weights during inference.                          |   |
+|   |    - Sends captured screen frames to the configured inference server.           |   |
+|   |    - Uses the project's declared runtime dependencies.                          |   |
 |   |    - Local motor execution (Win32 SendInput / Virtual Driver).                  |   |
 |   +---------------------------------------------------------------------------------+   |
 +-----------------------------------------------------------------------------------------+
 ```
 
-### Key Guarantees:
-1. **Zero Weight Leakage**: Client installations never download `.pt` files. The neural networks execute exclusively in memory inside the cloud container.
-2. **Ultra-Lightweight Client**: Client only requires `requests`, `numpy`, `pillow`, and `mss`. It does **not** need PyTorch or a GPU.
-3. **High-Speed Network Protocol**: Frames are compressed to high-quality base64 JPEGs (~40-60 KB). Payload transit latency is $<15$ ms over standard broadband.
-4. **Single-Thread CPU Inference**: The cloud model runs on standard CPU instances (2-4 vCPUs) with $\approx 10$ ms forward pass latency.
-5. **Fail-Closed Safety**: Typing actions are verified for visual caret blink before keystrokes are dispatched, preventing erratic input leaks.
+### Deployment facts and limits:
+1. The client sends captured screen frames to the configured server. HTTPS protects the network transport; it does not prevent the server from receiving or processing those frames.
+2. Non-loopback HTTP endpoints are rejected by default. `allow_insecure_http=True` is an explicit opt-in for trusted test networks only; do not use it for production credentials or screen data.
+3. Model weights are not downloaded by the client as part of inference. This alone does not establish that the client has no model/runtime dependencies; use the package metadata for installation requirements.
+4. Frame size, network latency, inference time and total action latency depend on the image, hardware, network and server load. Measure them on the deployment environment; this guide makes no fixed latency or FPS guarantee.
+5. `verify_focus()` requires a boolean response. The client blocks typing when focus is false or malformed, but this visual check is not a compliance certification or proof of a completed business action.
+6. `/v1/ground` returns a candidate point, not authorization to click or proof that the named target exists. Validate the application outcome independently and keep high-impact actions behind human approval.
 
 ---
 
@@ -143,14 +187,15 @@ To protect proprietary neural weights (`avcs_cortex_weights.pt` and `human_eye_w
 ## 3. Client Integration in "Project X"
 
 ### Step 1: Install Client Dependencies
-In your external project's virtual environment, run:
+Install AVCS from a repository checkout so the client and its internal capture and
+motor modules are present:
 ```bash
-pip install requests pillow numpy mss
+pip install ".[client,desktop]"
 ```
-*(Notice: No PyTorch or CUDA required!)*
 
-### Step 2: Include the Client SDK
-Copy `avcs/server/client.py` into your project directory (e.g. `project_x/avcs_client.py`).
+Do not copy only `avcs/server/client.py`; it imports other AVCS modules. The base
+package currently declares PyTorch, NumPy and Pillow. The `client` extra adds
+Requests; `desktop` adds optional screen capture support.
 
 ### Step 3: Quickstart Integration Example
 

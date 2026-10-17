@@ -305,7 +305,7 @@ def test_unvalidated_string_target_actions_fail_before_motor_input(action):
     try:
         with pytest.raises(
             UnvalidatedGroundingError,
-            match="validated trained semantic grounding|not validated grounding",
+            match="validated trained semantic grounding|not validated grounding|not action-authorized",
         ):
             action(client)
         assert driver.get_position_normalized() == before_position

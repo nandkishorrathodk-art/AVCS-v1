@@ -7,6 +7,10 @@ import torch
 from PIL import Image
 
 from avcs.goal_grounder import (
+    GROUNDING_CHECKPOINT_SCHEMA,
+    GROUNDING_DATASET_PROVENANCE,
+    LEGACY_GROUNDING_CHECKPOINT_SCHEMA,
+    LEGACY_GROUNDING_DATASET_PROVENANCE,
     GoalConditionedGrounder,
     GroundingPrediction,
     GroundingStream,
@@ -14,6 +18,7 @@ from avcs.goal_grounder import (
     encode_queries,
     letterbox_rgb,
     load_grounding_checkpoint,
+    migrate_grounding_checkpoint,
 )
 from avcs.training.demonstrations import (
     DemonstrationClickDataset,
@@ -21,6 +26,7 @@ from avcs.training.demonstrations import (
     fingerprint_sessions,
     split_sessions,
 )
+from avcs.training.train_grounder import train_grounder
 
 
 def test_query_encoder_uses_byte_tokens_and_rejects_empty_text():
@@ -71,23 +77,35 @@ def test_click_heatmap_is_normalized_and_peaks_near_labeled_click():
     assert abs((y + 0.5) / 32 - 0.25) < 0.04
 
 
-def _write_session(root, name, point=(0.5, 0.5)):
+def _write_session(root, name, point=(0.5, 0.5), include_absent=False):
     session = root / name
     (session / "frames").mkdir(parents=True)
     Image.new("RGB", (120, 60), color=(40, 50, 60)).save(session / "frames" / "frame.png")
-    record = {
+    records = [{
         "schema_version": 1,
         "target_label": "Save button",
         "frame": "frames/frame.png",
         "action": {"type": "mouse_click", "button": "left", "point_norm": list(point)},
-    }
-    (session / "samples.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    }]
+    if include_absent:
+        Image.new("RGB", (120, 60), color=(0, 0, 0)).save(
+            session / "frames" / "absent.png"
+        )
+        records.append({
+            "schema_version": 1,
+            "target_label": "Save button",
+            "frame": "frames/absent.png",
+            "action": {"type": "target_absent"},
+        })
+    (session / "samples.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
     manifest = {
         "schema_version": 1,
         "status": "stopped",
         "task": "click the labeled test button",
         "target_window_title": "AVCS disposable test fixture",
-        "sample_count": 1,
+        "sample_count": len(records),
         "capture_scope": "cropped target window only",
         "keyboard_recording": False,
         "network_upload": False,
@@ -112,6 +130,19 @@ def test_demonstration_split_keeps_recording_sessions_disjoint(tmp_path):
     assert sample["image"].shape == (3, 64, 64)
     assert sample["target_heatmap"].shape == (32, 32)
     assert sample["query_tokens"].shape == (96,)
+    assert sample["target_present"].item() == 1.0
+
+
+def test_dataset_loads_explicit_target_absence_without_fake_click_coordinates(tmp_path):
+    _write_session(tmp_path, "session-absent", include_absent=True)
+    records = discover_demonstrations(tmp_path)[tmp_path / "session-absent"]
+    absent = next(record for record in records if not record.target_present)
+
+    sample = DemonstrationClickDataset([absent], input_size=64)[0]
+
+    assert absent.point_norm is None
+    assert sample["target_present"].item() == 0.0
+    assert sample["target_heatmap"].count_nonzero().item() == 0
 
 
 def test_dataset_rejects_frame_path_traversal(tmp_path):
@@ -152,13 +183,50 @@ def test_session_split_requires_multiple_recording_sessions(tmp_path):
         split_sessions(discover_demonstrations(tmp_path))
 
 
+def test_real_demo_trainer_learns_presence_and_calibrates_abstention(tmp_path):
+    data_dir = tmp_path / "demos"
+    for index in range(5):
+        _write_session(data_dir, f"session-{index}", include_absent=True)
+
+    report = train_grounder(
+        data_dir=str(data_dir),
+        output_dir=str(tmp_path / "trained"),
+        epochs=1,
+        batch_size=2,
+        input_size=64,
+        seed=7,
+        device_name="cpu",
+    )
+
+    model = load_grounding_checkpoint(tmp_path / "trained" / "goal_grounder_best.pt")
+    assert report["target_presence_calibration"]["validation_false_activations"] == 0
+    assert report["target_presence_threshold"] > 0
+    assert report["abstention_action_authorized"] is False
+    assert model.is_trained
+
+
+def test_real_demo_trainer_refuses_data_without_absence_labels(tmp_path):
+    data_dir = tmp_path / "positive-only"
+    for index in range(5):
+        _write_session(data_dir, f"session-{index}")
+
+    with pytest.raises(ValueError, match="target-present and target-absent"):
+        train_grounder(
+            data_dir=str(data_dir),
+            output_dir=str(tmp_path / "must-not-train"),
+            epochs=1,
+            input_size=64,
+            device_name="cpu",
+        )
+
+
 def test_checkpoint_loader_rejects_non_demonstration_provenance(tmp_path):
     checkpoint = tmp_path / "synthetic.pt"
     torch.save(
         {
-            "schema_version": 1,
+            "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
             "model_type": "avcs_goal_conditioned_grounder",
-            "dataset_provenance": "synthetic_colored_blocks",
+            "dataset_provenance": "avcs_procedural_synthetic_desktop_v1",
             "training_samples": 100,
         },
         checkpoint,
@@ -170,15 +238,19 @@ def test_checkpoint_loader_rejects_non_demonstration_provenance(tmp_path):
 
 def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_path):
     source_model = GoalConditionedGrounder(input_size=64)
+    with torch.no_grad():
+        source_model.target_presence.weight.zero_()
+        source_model.target_presence.bias.fill_(-10.0)
     checkpoint = tmp_path / "grounder.pt"
     torch.save(
         {
-            "schema_version": 1,
+            "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
             "model_type": "avcs_goal_conditioned_grounder",
-            "dataset_provenance": "recorded_ui_click_demonstrations",
+            "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
             "training_samples": 12,
             "validation_samples": 3,
             "held_out_test_samples": 3,
+            "target_presence_threshold": 0.5,
             "input_size": 64,
             "split_seed": 42,
             "model_state_dict": source_model.state_dict(),
@@ -191,10 +263,79 @@ def test_checkpoint_loader_accepts_demonstration_trainer_shape_and_predicts(tmp_
 
     assert loaded.is_trained is True
     assert result.heatmap.shape == (32, 32)
-    assert result.candidate_point_norm is None or all(
-        0 <= coordinate < 1 for coordinate in result.candidate_point_norm
-    )
+    assert result.target_present is False
+    assert result.target_present_probability < 0.5
+    assert result.candidate_point_norm is None
     assert result.action_authorized is False
+
+
+def test_checkpoint_loader_rejects_legacy_schema_even_with_demo_label(tmp_path):
+    checkpoint = tmp_path / "legacy-mislabeled.pt"
+    torch.save(
+        {
+            "schema_version": 1,
+            "model_type": "avcs_goal_conditioned_grounder",
+            "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
+            "training_samples": 100,
+            "validation_samples": 10,
+            "model_state_dict": GoalConditionedGrounder(input_size=64).state_dict(),
+        },
+        checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        load_grounding_checkpoint(checkpoint)
+
+
+def test_checkpoint_loader_accepts_and_migrates_legacy_schema_1(tmp_path):
+    source_model = GoalConditionedGrounder(input_size=64)
+    raw_state = {
+        k: v for k, v in source_model.state_dict().items() if not k.startswith("target_presence")
+    }
+    checkpoint = tmp_path / "legacy-valid.pt"
+    torch.save(
+        {
+            "schema_version": LEGACY_GROUNDING_CHECKPOINT_SCHEMA,
+            "model_type": "avcs_goal_conditioned_grounder",
+            "dataset_provenance": LEGACY_GROUNDING_DATASET_PROVENANCE,
+            "training_samples": 100,
+            "validation_samples": 10,
+            "held_out_test_samples": 5,
+            "input_size": 64,
+            "model_state_dict": raw_state,
+        },
+        checkpoint,
+    )
+
+    loaded = load_grounding_checkpoint(checkpoint)
+    assert loaded.is_trained is True
+    assert loaded.checkpoint_metadata["schema_version"] == GROUNDING_CHECKPOINT_SCHEMA
+    assert loaded.checkpoint_metadata["legacy_schema_version"] == 1
+    assert loaded.checkpoint_metadata["target_presence_threshold"] == 0.5
+
+    result = loaded.predict(np.zeros((48, 96, 3), dtype=np.uint8), "Save button")
+    assert result.heatmap.shape == (32, 32)
+    assert result.target_present is True
+    assert result.target_present_probability > 0.5
+    assert result.action_authorized is False
+
+
+def test_controller_loads_legacy_grounder_weights_best_pt():
+    from avcs.controller import AVCSController
+    from forge.vision.capture import SyntheticScreen
+
+    source = SyntheticScreen(width=320, height=240)
+    controller = AVCSController(
+        source=source,
+        weights_path="runs/weights/goal_grounder_best.pt",
+        device="cpu",
+        force_virtual_motor=True,
+    )
+    assert controller.is_grounder_trained is True
+    assert controller.grounder is not None
+    assert controller.load_grounder_weights() is True
+    if hasattr(controller.source, "close"):
+        controller.source.close()
 
 
 def test_grounding_stream_reports_measured_per_frame_work_without_authorizing_actions(
@@ -204,12 +345,13 @@ def test_grounding_stream_reports_measured_per_frame_work_without_authorizing_ac
     checkpoint = tmp_path / "trained-stream-fixture.pt"
     torch.save(
         {
-            "schema_version": 1,
+            "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
             "model_type": "avcs_goal_conditioned_grounder",
-            "dataset_provenance": "recorded_ui_click_demonstrations",
+            "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
             "training_samples": 12,
             "validation_samples": 3,
             "held_out_test_samples": 3,
+            "target_presence_threshold": 0.5,
             "input_size": 64,
             "model_state_dict": source_model.state_dict(),
         },
@@ -258,7 +400,12 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
     from avcs.training import evaluate_grounder as evaluator
 
     for index in range(5):
-        _write_session(tmp_path / "demos", f"session-{index}", (0.5, 0.5))
+        _write_session(
+            tmp_path / "demos",
+            f"session-{index}",
+            (0.5, 0.5),
+            include_absent=True,
+        )
     sessions = discover_demonstrations(tmp_path / "demos")
     train, validation, test = split_sessions(sessions, seed=7)
     model_checkpoint = tmp_path / "fixture.pt"
@@ -268,6 +415,7 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
             "training_samples": len(train),
             "validation_samples": len(validation),
             "held_out_test_samples": len(test),
+            "target_presence_threshold": 0.5,
             "training_session_fingerprint": fingerprint_sessions(tmp_path / "demos", train),
             "validation_session_fingerprint": fingerprint_sessions(
                 tmp_path / "demos", validation
@@ -282,10 +430,15 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
     class CenterModel(torch.nn.Module):
         input_size = 64
 
-        def forward(self, images, queries):
+        @property
+        def checkpoint_metadata(self):
+            return {"target_presence_threshold": 0.5}
+
+        def forward_with_presence(self, images, queries):
             logits = torch.zeros((images.shape[0], 1, 32, 32), device=images.device)
             logits[:, :, 15:17, 15:17] = 10.0
-            return logits
+            presence_logits = images.mean(dim=(1, 2, 3)) * 20.0 - 2.0
+            return logits, presence_logits
 
     monkeypatch.setattr(evaluator, "load_grounding_checkpoint", lambda _path: CenterModel())
     report = evaluator.evaluate_grounder(
@@ -293,7 +446,9 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
         checkpoint_path=str(model_checkpoint),
     )
 
-    assert report["held_out_test_samples"] == 1
+    assert report["held_out_test_samples"] == 2
+    assert report["target_presence"]["false_activations"] == 0
+    assert report["target_presence"]["false_activation_rate_wilson_95_percent"][1] > 0
     assert report["pck_1_percent_diagonal"] == 0
     assert report["pck_2_percent_diagonal"] == 1
     assert report["pck_5_percent_diagonal"] == 1

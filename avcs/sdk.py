@@ -9,6 +9,7 @@ Provides a unified, high-level developer interface for:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -113,7 +114,11 @@ class HumanEyeClient:
         self.servoing = NeuromuscularServoingController(driver=self.motor_driver)
         self.verifier = VisualRippleVerifier(eye=self.eye, driver=self.motor_driver)
 
-        # 5. Background Perception Loop
+        # 5. Trained Neural Grounder
+        self._grounder: Optional[Any] = None
+        self._load_grounder()
+
+        # 6. Background Perception Loop
         self._running = False
         self._worker_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -229,6 +234,57 @@ class HumanEyeClient:
             res = self.eye.look_at(query=query_or_coords, inspect=True)
             return res.target_coord
 
+    def _load_grounder(self) -> None:
+        """Loads verified trained neural grounding model if checkpoint exists."""
+        try:
+            from avcs.goal_grounder import load_grounding_checkpoint
+            for p in [Path("runs/weights/goal_grounder_best.pt"), Path("runs/weights/human_eye_weights.pt")]:
+                if p.is_file():
+                    self._grounder = load_grounding_checkpoint(p, device=self.device)
+                    break
+        except Exception:
+            self._grounder = None
+
+    @property
+    def is_grounder_trained(self) -> bool:
+        """Returns True if a verified demonstration-trained grounder is loaded."""
+        return self._grounder is not None and getattr(self._grounder, "is_trained", False)
+
+    def _resolve_target_coordinate(
+        self,
+        target: Optional[str | Tuple[float, float]],
+    ) -> Tuple[float, float]:
+        """Resolves target: if (x, y) tuple, validates; if string, grounds via neural model."""
+        if isinstance(target, tuple):
+            return target
+        if isinstance(target, str):
+            clean_q = target.strip()
+            if not clean_q:
+                raise ValueError("Target query cannot be empty")
+            if self.is_grounder_trained and self._grounder is not None:
+                frame = self.source.grab()
+                pred = self._grounder.predict(frame, clean_q)
+                if (
+                    pred.action_authorized
+                    and pred.candidate_point_norm is not None
+                ):
+                    return pred.candidate_point_norm
+                raise UnvalidatedGroundingError(
+                    f"Target '{clean_q}' cannot drive a motor action: the grounding "
+                    "candidate is not action-authorized. Calibrated target-absence "
+                    "and abstention evidence is required."
+                )
+            raise UnvalidatedGroundingError(
+                "Natural-language targets cannot drive motor actions: validated trained "
+                "semantic grounding is unavailable. Pass an explicit normalized (x, y) coordinate."
+            )
+        if target is None:
+            raise UnvalidatedGroundingError(
+                "Motor actions require an explicit normalized (x, y) coordinate; "
+                "the current gaze fixation is not validated grounding."
+            )
+        return target
+
     @staticmethod
     def _require_coordinate_target(
         target: Optional[str | Tuple[float, float]],
@@ -304,9 +360,9 @@ class HumanEyeClient:
         double_click: bool = False,
     ) -> bool:
         """Executes closed-loop biological hand-eye visual steering and clicks."""
-        target = self._require_coordinate_target(target)
+        resolved = self._resolve_target_coordinate(target)
         self.meter.record_action(f"click_{button}")
-        tx, ty = target
+        tx, ty = resolved
 
         self.motor_driver.move_to_normalized(tx, ty)
         if double_click:
@@ -358,6 +414,8 @@ class HumanEyeClient:
         target: Optional[str | Tuple[float, float]] = None,
         button: str = "left",
         max_recovery_tier: int = 3,
+        is_destructive: bool = False,
+        destructive: bool = False,
     ) -> VerificationResult:
         """Clicks target and runs closed-loop visual ripple assertion with 5-tier self-healing."""
         target = self._require_coordinate_target(target)
@@ -369,6 +427,7 @@ class HumanEyeClient:
             target=coords,
             max_recovery_tier=max_recovery_tier,
             button=button,
+            is_destructive=is_destructive or destructive,
         )
 
     def type_and_verify(

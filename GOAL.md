@@ -1,127 +1,89 @@
-# AVCS // Artificial Visual Cortex System
-## Master Mission, Reality Baseline & Research Roadmap
+# AVCS — Honest Model Specification & Brutal Engineering Reality
+
+## 1. The Raw Reality: What This Model Actually Is
+
+Strip away all marketing, hype, and academic sugar-coating. Here is the unvarnished truth of what this model is:
+
+* **It is NOT an LLM, VLM, or thinking AI:** It has no general intelligence, no reasoning, no concept of time, and zero memory of what happened a second ago.
+* **It is a microscopic 1.35M-parameter CNN compass:** Modern vision models (Claude 3.5 Sonnet, GPT-4o, Qwen-2-VL) are 7 Billion to 70 Billion parameters. This model is **1,354,050 parameters (~5.5 MB file)**.
+* **Its entire job is simple coordinate guessing:** It takes a 256×256 thumbnail of the desktop, takes a short query string (e.g. *"close button"*), and outputs a 64×64 heatmap guessing `(x, y)` coordinates.
+* **Who does the real work?**  
+  * **Planning & Thinking:** Handled 100% by **System 2 (External LLM)**.
+  * **Safety, Error Handling, & Verification:** Handled 100% by **Python code (`VisualRippleVerifier`, `ControlKernel`)**.
+  * **The Model:** Acts only as a dumb, fast visual pointer (a mathematical cursor compass).
 
 ---
 
-## 1. Executive Mission & Vision
+## 2. The 5 Brutal Flaws & Bottlenecks (No Sugar-Coating)
 
-The overarching mission of **AVCS (Artificial Visual Cortex System)** is to build a **Real-Time, Goal-Conditioned, Pure-Pixel Desktop Control System** that can operate a computer like a human:
+### Flaw 1: The Model is Legally Blind (256×256 Resolution Blur)
+* Real displays are **1920×1080** or 4K. The model forces the desktop into a **256×256 pixel thumbnail**.
+* At this resolution, standard 10–12px system text or small 16×16 icons become **3 to 4 blurry grey pixels**.
+* The model **cannot read text** (Zero OCR). It only matches fuzzy visual blobs and shapes. If two buttons have similar shapes or icons, it has zero ability to distinguish them without high-res foveal cropping.
 
-1. **Aankh (System 1 - Visual Perception):** Perceives continuous desktop frames in real time directly from raw RGB framebuffer pixels—without relying on heavy OCR engines, accessibility trees (UIA/DOM), or OS inspect APIs.
-2. **Dimag (System 2 - Cognitive Planning):** Understands the operator's high-level goal, breaks it down into sequential visual action steps, and adapts dynamically to screen state changes.
-3. **Haath (Motor Control):** Dispatches smooth, human-like cursor movements and physical mouse/keyboard inputs to visually grounded targets, with hardware safety breakout failsafes.
-4. **Verification (Optical Oracle):** Confirms that each action actually succeeded by observing fresh visual evidence on screen (optical flow, state changes, window transitions), never by assuming success or faking completions.
+### Flaw 2: The Softmax Hallucination Trap (Clicks on Blank Screens)
+* Neural networks use a spatial `softmax` over the 64×64 grid. By mathematical definition, **softmax probabilities must sum to 1.0 (100%)**.
+* If the screen is a completely blank solid color or empty wallpaper and you query *"click save button"*, the model **cannot output "nothing" on its own**. It will pick a random pixel of background noise and claim with confidence that the button is there.
+* *Reality in code:* This is why Gate 4 failed on blank screens (2 false positive clicks). A separate target-presence classifier and calibrated abstention loss are strictly required to stop it from clicking into the void.
 
----
+### Flaw 3: Synthetic Training Bias (It Has Never Seen the Real World)
+* The model was trained almost entirely on **procedurally drawn Python graphics** (rectangles, synthetic buttons, basic Tkinter/Pillow mockups).
+* It has **not** been trained on dirty, complex real-world enterprise software (SAP, Salesforce, custom Electron/WPF apps, dark-mode themes, canvas elements).
+* On clean synthetic benchmarks, it achieves ~90.8% accuracy. On an unseen, cluttered, real-world enterprise screen, its raw accuracy will drop significantly unless constrained by code.
 
-## 2. Honest Current State & Baseline (Unvarnished Truth)
+### Flaw 4: Zero Memory & Zero Context (Stateless Reflex)
+* Each frame is processed in total isolation.
+* If a click causes an unexpected error popup (*"Session Expired"*, *"Access Denied"*), the model does not know what happened. It will keep searching for its original target or click blindly unless Python code halts motor execution.
 
-To ensure scientific integrity and eliminate false assumptions, the current system state is explicitly defined as an **experimental research prototype**, not a general-purpose autonomous computer-use agent.
-
-| Subsystem | Current Implementation | Measured Reality / Current Limitation | Production Status |
-| :--- | :--- | :--- | :--- |
-| **Frame Capture** | `Win32FastCapture` (GDI DIBSection) | Real-time RAM framebuffer capture (~56–60 FPS, <1ms grab overhead). | **Functional** |
-| **Motor Execution** | `Win32CursorDriver` (SendInput) | Can move cursor and dispatch clicks/keystrokes; includes failsafe breakout. | **Functional primitive** (Cannot choose actions on its own) |
-| **Cortical Neural Model** | `Cortex-2M` (`cortex_2m_best.pt`) | 2.43M params trained on **synthetic geometric shapes** (10.83% category accuracy). **Unproven on real UI**. | **Experimental** (Distribution shift to real desktop) |
-| **Goal-Conditioned Grounder** | `GoalConditionedGrounder` (`avcs/goal_grounder.py`) | Pixel/query-conditioned dense click heatmap and real-demonstration trainer are implemented; no real-demonstration checkpoint exists yet. | **Implemented architecture; untrained / not action-ready** |
-| **Language Gaze Grounding** | `LanguageGazeGrounder` | Character n-gram cross-correlation; does not yet reliably ground arbitrary desktop controls. | **Experimental prototype** |
-| **Demonstration Recorder** | `avcs.training.demo_recorder` | Collects labeled click coordinates on isolated, foreground windows. | **Active Data Collection Tool** |
-| **Cognitive Planning** | Multi-step task logic | 2.4M parameters cannot handle long-horizon planning. Requires external System-2 planner. | **Not Implemented Locally** |
-| **End-to-End Autonomy** | Desktop workflows (e.g. Notepad) | Historical tests used scripted shortcuts (`Win+S`, `Ctrl+S`, `Alt+F4`) or file writes, not visual autonomy. | **Unproven / Faked in past** (Now Fail-Closed) |
-
----
-
-## 3. Core Architectural Principles (Non-Negotiable Invariants)
-
-1. **Zero-Shortcut Rule for Autonomous Evaluation:**
-   When testing visual autonomy, the system must never cheat via keyboard macros (`Win+S`, `Ctrl+N`, `Ctrl+S`, `Alt+F4`), background OS API hooks, or Python filesystem writes. Every evaluated action must originate from visual target identification and physical motor input.
-2. **Pure Pixels Mandate:**
-   Never depend on browser DOM trees, accessibility APIs (UI Automation, MSAA), or OCR text-scraping crutches. The perception model must learn to ground directly on raw pixel visual features.
-3. **Separation of System-1 and System-2:**
-   - **System 1 (AVCS):** High-frequency visual perception, target grounding $(x, y)$, and motor servoing.
-   - **System 2 (Cognitive Planner):** High-level task reasoning, sub-goal generation, and workflow error recovery (via LLM tool-calling).
-4. **Strict Postcondition Verification:**
-   Task completion must be judged by independent, out-of-band state oracles and verified visual deltas—never self-reported by the executing agent.
-5. **Fail-Closed Safety & Hardware Failsafes:**
-   Cursor control must always yield immediately to human operator breakout (corner failsafe / ESC emergency abort). No destructive testing on personal or unisolated environments.
+### Flaw 5: Scaling Parameter Myth (More Params Won't Magically Fix This)
+* The repository's own measured facts proved that scaling parameters from 2.7M to 31M actually made the planner **worse** (Semantic rate dropped 56.7% → 10.0%).
+* Simply making this network larger does not solve the grounding problem. Data quality, spatial calibration, and closed-loop verification are what keep it functioning.
 
 ---
 
-## 4. AVCS Development Stages (Model First, LLM Later)
+## 3. Division of Labor: Who Actually Does What?
 
-AVCS is a visual-grounding and motor-control model/system, not a language model.
-Its work therefore begins with pixel/query data and spatial prediction, not
-next-token pretraining. Model readiness and product readiness are separate
-milestones:
+To make this system work without delusions, duties are strictly separated:
 
-| Stage | Deliverable | Exit evidence | Current status |
-| :--- | :--- | :--- | :--- |
-| 1. Model contract | Define inputs, outputs, coordinate spaces, and prohibited shortcuts. | Typed RGB + target-phrase input and spatial heatmap output are documented. | **Done** |
-| 2. Grounding architecture | Build visual encoder, learned goal-text encoder, multi-scale spatial decoder, per-frame stream interface, and fail-closed inference. | Shape/gradient/stream-interface tests; no random-weight predictions or motor authorization. | **Implemented; streaming performance unmeasured** |
-| 3. Demonstration data | Collect and curate opt-in isolated-window human click demonstrations. | Session-separated set with reviewed labels and recorder provenance. | **Not started** |
-| 4. AVCS training | Train the grounder from those real demonstrations only. | Demonstration-provenance checkpoint selected on validation sessions. | **Blocked on data** |
-| 5. Offline model evaluation | Evaluate once on unchanged held-out sessions; calibrate abstention and resolution. | Reproducible report with point distance/PCK, limitations, and no training leakage. | **Pipeline implemented; awaits trained weights/data** |
-| 6. Safe motor interface | Connect grounded points to input only behind freshness, bounds, confidence/calibration, human stop, and independent post-action checks. | Isolated acceptance evidence for one action type at a time. | **Not started** |
-| 7. System-2/LLM integration | Add an optional planner that provides subgoals; AVCS remains responsible for visual grounding. | Explicit protocol and no-LLM baseline preserved. | **Deferred until AVCS model stages complete** |
-| 8. Product readiness | Test across unseen apps/tasks, reliability, privacy, packaging, docs, support, and release monitoring. | Independent reproducible acceptance, failure reporting, security/privacy review. | **Not started** |
+| Responsibility | Who Owns It | Why |
+| :--- | :--- | :--- |
+| **High-level Goal & Strategy** | **System 2 (Cloud LLM)** | Decides *what* needs to be done (e.g. "open notepad, write test, close without saving"). The local model cannot think. |
+| **Coarse Target Guessing** | **AVCS Model (`GoalConditionedGrounder`)** | Fast sub-15ms reflex on CPU. Points the cursor in the rough direction of the visual blob. |
+| **Sub-Pixel Precision** | **Python Foveal Engine (`grounding.py`)** | Takes an uncompressed 1:1 patch around the model's guess to find exact boundaries ($\pm 2\text{ px}$). |
+| **Focus & Typing Security** | **Python Controller (`focus.py`)** | Checks caret blinking (0.8–2.0 Hz). Fails closed if focus is missing. Model cannot verify typing safety. |
+| **Action Containment & Gates** | **Python Kernel (`ControlKernel`)** | Blocks unauthorized mutating operations (`mkdir`, `write`, dangerous clicks). |
+| **Postcondition Verification** | **Python Verifier (`verifier.py`)** | Checks optical delta / window appearance after a click. Never trusts the model's self-reported success. |
 
-For the requested order, **Stages 1–5 build and measure AVCS before any LLM
-integration**. A learned checkpoint requires real labeled pixel demonstrations;
-source code alone cannot create trained visual knowledge. Stage 6 is also kept
-outside model-training claims: moving a cursor is not proof of perception.
-The current `GroundingStream` accepts fresh frames one by one and reports
-measured inference latency/input cadence; it has no temporal memory and is not
-a desktop capture or input driver. Real-time throughput must be measured on the
-target hardware after training. A temporal model would require sequence labels
-and a separately validated architecture.
-Stages 7–8 are integration/productization, not prerequisites for defining the
-model, and do not begin until the operator approves the AVCS-only evidence.
+---
 
-## 5. Realistic 4-Phase Research Roadmap
+## 4. What the Model MUST DO (Strict Requirements)
 
-```mermaid
-flowchart TD
-    Phase1["Phase 1: Goal-Conditioned Pixel Grounder<br/>(architecture + demonstration training pipeline)"]
-    Phase2["Phase 2: Isolated Demonstrations + Offline Training<br/>(recording-session-disjoint evaluation)"]
-    Phase3["Phase 3: System-1 / System-2 Decoupled Interface<br/>(LLM Planner ↔ AVCS Tool Protocol)"]
-    Phase4["Phase 4: Genuine Benchmark Evaluation<br/>(OSWorld / WindowsAgentArena tasks with 0 shortcuts)"]
+1. **Fast CPU Forward Pass:** Must execute in $\le 15\text{ ms}$ on 1 CPU thread (ensuring 60+ FPS real-time reflex).
+2. **Dense Heatmap Prediction:** Must output a normalized 64×64 spatial distribution over the 256×256 canvas.
+3. **Calibrated Presence Score:** Must predict a scalar presence probability $\in [0.0, 1.0]$. If target is absent, score must drop below threshold ($0.50$).
+4. **Hard-Zero Blank Screen False Positives (Gate 4):** Under zero circumstances may the model authorize a click on an empty desktop or blank canvas.
+5. **Fail-Closed Default:** If confidence is low or query is ambiguous, `action_authorized` must evaluate to `False`.
 
-    Phase1 --> Phase2
-    Phase2 --> Phase3
-    Phase3 --> Phase4
-```
+---
 
-### Phase 1: Goal-Conditioned Pixel Grounder (Architecture Implemented; Weights Not Trained)
-- [x] Define a model that consumes raw RGB pixels and a target phrase and emits a dense spatial click-target heatmap.
-- [x] Add a UTF-8 byte-query encoder and query-conditioned visual feature modulation; no OCR or accessibility text is consumed by the model.
-- [x] Add a demonstration loader, recording-session-disjoint train/validation/test split, recorder-manifest checks, and source-data fingerprints.
-- [x] Add a separate held-out evaluation command; it rejects changed demo data and does not dispatch desktop actions or call an LLM.
-- [ ] Obtain recorded real-UI demonstrations before training. No trained weights are currently available for this model.
+## 5. What the Model MUST NOT DO (Prohibitions & Anti-Cheating)
 
-### Phase 2: Real-World Demonstrations and Grounding Training
-- [x] Build safe, isolated demonstration recorder (`avcs.training.demo_recorder`).
-- [ ] Record high-quality human demonstrations across standard Windows applications (Notepad, Calculator, Settings, File Explorer) in isolated disposable test windows. At least five separate sessions are required by the training split.
-- [ ] Curate session-disjoint Train / Validation / Test sets. The current recorder labels click points, not target bounding boxes.
-- [ ] Train `GoalConditionedGrounder` on genuine demonstrations. The synthetic checkpoint is not used as a pretrained real-UI model.
-- [ ] Report validation click-point distance first; target-hit rate requires bounding-box labels and is not measured by the current recorder.
-- [ ] Evaluate the held-out test split only after model choices are fixed. Offline metrics do not prove end-to-end desktop autonomy.
+* ⛔ **NO Cheating with OCR:** Do NOT import Tesseract, EasyOCR, PaddleOCR, or Windows OCR.
+* ⛔ **NO Cheating with Accessibility Trees / DOM:** Do NOT query Windows UIAutomation, accessibility APIs, or browser DOM (Selenium/Playwright).
+* ⛔ **NO Hardcoded Coordinates:** Do NOT hardcode button positions in Python scripts.
+* ⛔ **NO Raw Pixel Leakage:** Zero raw RGB frames, screenshots, or embeddings may leave the local machine to System 2.
+* ⛔ **NO Self-Authorization:** The model's raw heatmap must never directly move the hardware mouse without passing through the `ControlKernel` and `VisualRippleVerifier`.
+* ⛔ **NO Overclaiming:** Do NOT report synthetic test passes as "universal computer use solved". Report real numbers from real runs.
 
-### Phase 3: Decoupled System-1 / System-2 Cognitive Architecture
-- [ ] Formalize the System-1 tool interface:
-  - `look_at(subgoal_query) -> (x, y, confidence)`
-  - `move_and_click(x, y) -> visual_delta_detected`
-  - `type_text(string) -> visual_delta_detected`
-  - `inspect_window() -> scene_summary`
-- [ ] Integrate with external System-2 cognitive planners (Ollama / local LLM / hosted API) where the LLM reasons about *what* to do, and AVCS handles *where* and *how* to see and click.
+---
 
-### Phase 4: Rigorous Sandbox Evaluation (OSWorld-Verified Alignment)
-- [ ] After the AVCS-only grounder evaluation and later planner integration, benchmark the complete agent in standard, reproducible OS tasks (OSWorld-Verified / WindowsAgentArena subset).
-- [ ] Strict out-of-band evaluation: verify actual application states on disk and OS handles without shortcut bypasses.
-- [ ] Publish honest, auditable success rates with zero inflated claims.
+## 6. What Needs to Be Done (The Realistic Action Plan)
 
-The [official OSWorld repository](https://github.com/xlang-ai/OSWorld) announced
-**OSWorld-Verified** on 2025-07-28 as a refined benchmark release, not a
-standalone model called “OSWorld 2”. Its [release report](https://xlang.ai/blog/osworld-verified)
-describes task/infrastructure fixes and updated evaluation signals. AVCS may
-eventually provide visual target grounding inside an agent evaluated there;
-AVCS by itself is not an OSWorld task-completion agent or score.
+1. **Fix Blank Screen Rejection (Gate 4):**  
+   Train with calibrated target-absence loss (margin penalty + negative spatial entropy regularization) on solid, gradient, and wallpaper frames so the model outputs near-zero logits on missing targets.
+2. **Foveal Saccade Hand-off:**  
+   Because 256×256 downsampling blinds the model to fine text, enforce that all small targets ($< 32\times32$) must be cropped at 1:1 physical resolution and refined by `FovealAcuityEngine`.
+3. **Strict Verifier-Gated Execution:**  
+   Treat the model as an unreliable advisor. Every click proposed by the model must be verified by `VisualRippleVerifier` against real screen deltas before System 2 is told that progress occurred.
+4. **Natural Model-to-Model Communication:**  
+   System 2 sends plain-language subgoals; System 1 executes substeps locally and reports real, observed visual facts back without robotic coordinate dumps.

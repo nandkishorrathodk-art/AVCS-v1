@@ -1,0 +1,352 @@
+"""Fitts' Law Neuromuscular Motor Servoing.
+
+Implements human biological motor control:
+1. Flash & Hogan (1985) Minimum-Jerk kinematic trajectory:
+   x(tau) = x_0 + (x_f - x_0) * (10*tau^3 - 15*tau^4 + 6*tau^5)
+2. Fitts' Law duration scaling:
+   T = a + b * log2(1 + D / W)
+3. Physiological 8-12 Hz micro-tremor and sub-pixel motor jitter.
+4. Closed-loop gaze-servo correction: steers toward moving targets in flight.
+"""
+from __future__ import annotations
+
+import math
+import random
+import sys
+import time
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from forge.vision.cortex.motor.driver import OSCursorDriver, get_default_driver
+from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe, SafetyBreakoutException
+
+
+if sys.platform == "win32":
+    import ctypes
+
+    def _begin_high_res_timer() -> None:
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
+
+    def _end_high_res_timer() -> None:
+        try:
+            ctypes.windll.winmm.timeEndPeriod(1)
+        except Exception:
+            pass
+else:
+    def _begin_high_res_timer() -> None:
+        pass
+
+    def _end_high_res_timer() -> None:
+        pass
+
+
+@dataclass
+class NeuromuscularTrajectoryPoint:
+    """A single spatial-temporal coordinate along the neuromuscular trajectory."""
+    timestamp: float
+    x: float
+    y: float
+    vx: float
+    vy: float
+    acceleration: float
+    jitter_offset: Tuple[float, float]
+
+
+@dataclass
+class NeuromuscularServoingResult:
+    """Result of a neuromuscular motor movement."""
+    target: Tuple[float, float]
+    final_cursor: Tuple[float, float]
+    duration_ms: float
+    total_waypoints: int
+    fitts_index_of_difficulty: float
+    success: bool
+    trajectory: List[NeuromuscularTrajectoryPoint]
+
+
+class NeuromuscularServoingController:
+    """Biological human motor controller producing human-like mouse movement trajectories."""
+
+    def __init__(
+        self,
+        driver: Optional[OSCursorDriver] = None,
+        tick_rate_hz: int = 120,
+        fitts_a: float = 0.12,  # Empirical reaction overhead (seconds)
+        fitts_b: float = 0.18,  # Empirical log scaling (seconds/bit)
+        fovea_width: float = 0.04,  # Estimated target hitbox width [0, 1]
+        micro_tremor_std: float = 0.0006,  # ~0.06% of screen (~1 pixel on 1080p)
+        micro_tremor_freq_hz: float = 10.5,  # Biological central tremor resonance frequency
+        enable_micro_tremor: bool = True,  # Clean toggle for physiological jitter
+        failsafe: Optional[CornerBreakoutFailSafe] = None,  # Emergency corner breakout failsafe
+    ) -> None:
+        self.driver = driver or get_default_driver()
+        self.tick_rate_hz = tick_rate_hz
+        self.fitts_a = fitts_a
+        self.fitts_b = fitts_b
+        self.fovea_width = fovea_width
+        self.micro_tremor_std = micro_tremor_std
+        self.micro_tremor_freq_hz = micro_tremor_freq_hz
+        self.enable_micro_tremor = enable_micro_tremor
+        self.failsafe = failsafe or getattr(self.driver, "failsafe", None)
+        if self.failsafe is None:
+            self.failsafe = CornerBreakoutFailSafe(enabled=True)
+
+    @property
+    def is_failsafe_tripped(self) -> bool:
+        """True if the emergency corner breakout failsafe is currently latched tripped."""
+        return bool(self.failsafe.is_tripped) if self.failsafe is not None else False
+
+    def reset_failsafe(self) -> None:
+        """Resets the emergency safety fail-safe latch, allowing motor control to resume."""
+        if self.failsafe is not None:
+            self.failsafe.reset()
+
+    def calculate_fitts_duration(self, distance: float, target_width: Optional[float] = None) -> float:
+        """Calculates biologically human movement duration via Fitts' Law (seconds)."""
+        w = target_width or self.fovea_width
+        id_difficulty = math.log2(1.0 + max(1e-4, distance) / max(1e-4, w))
+        duration = self.fitts_a + self.fitts_b * id_difficulty
+        # Clamped between 150ms and 950ms for realistic UI movements
+        return float(np.clip(duration, 0.15, 0.95))
+
+    def generate_minimum_jerk_profile(
+        self,
+        start: Tuple[float, float],
+        target: Tuple[float, float],
+        duration_s: float,
+    ) -> List[NeuromuscularTrajectoryPoint]:
+        """Generates smooth Minimum-Jerk kinematic waypoints with micro-tremor."""
+        x0, y0 = start
+        xf, yf = target
+        dx = xf - x0
+        dy = yf - y0
+        dist = math.hypot(dx, dy)
+
+        dt = 1.0 / self.tick_rate_hz
+        num_steps = max(5, int(duration_s / dt))
+        points: List[NeuromuscularTrajectoryPoint] = []
+
+        prev_x, prev_y = x0, y0
+        prev_vx, prev_vy = 0.0, 0.0
+        prev_tx1, prev_tx2 = 0.0, 0.0
+        prev_ty1, prev_ty2 = 0.0, 0.0
+
+        # Biological AR(2) micro-tremor resonator (f0 = micro_tremor_freq_hz, r = 0.82)
+        fs = max(1.0, float(self.tick_rate_hz))
+        w0 = 2.0 * math.pi * (self.micro_tremor_freq_hz / fs)
+        r = 0.82
+        a1 = 2.0 * r * math.cos(w0)
+        a2 = -(r ** 2)
+
+        for i in range(num_steps + 1):
+            tau = float(i) / float(num_steps)  # Normalized time in [0.0, 1.0]
+
+            # 5th-order minimum jerk polynomial: 10*tau^3 - 15*tau^4 + 6*tau^5
+            poly = 10.0 * (tau ** 3) - 15.0 * (tau ** 4) + 6.0 * (tau ** 5)
+            # Velocity polynomial derivative: 30*tau^2 - 60*tau^3 + 30*tau^4
+            d_poly = (30.0 * (tau ** 2) - 60.0 * (tau ** 3) + 30.0 * (tau ** 4)) / max(1e-4, duration_s)
+
+            # Smooth ballistic coordinate
+            nom_x = x0 + dx * poly
+            nom_y = y0 + dy * poly
+
+            # Physiological 10.5 Hz micro-tremor resonator (biological AR(2) filter)
+            if not self.enable_micro_tremor or self.micro_tremor_std <= 0.0 or i == 0 or i == num_steps:
+                jx, jy = 0.0, 0.0
+            else:
+                envelope = math.sin(math.pi * tau)
+                tremor_scale = self.micro_tremor_std * envelope * 0.35
+                raw_jx = random.gauss(0.0, tremor_scale)
+                raw_jy = random.gauss(0.0, tremor_scale)
+                jx = a1 * prev_tx1 + a2 * prev_tx2 + raw_jx
+                jy = a1 * prev_ty1 + a2 * prev_ty2 + raw_jy
+                prev_tx2, prev_tx1 = prev_tx1, jx
+                prev_ty2, prev_ty1 = prev_ty1, jy
+
+                # Clamp jitter strictly within human physical bounds (~1-2 pixels, max 3-sigma)
+                max_jitter = self.micro_tremor_std * 3.0
+                jx = float(np.clip(jx, -max_jitter, max_jitter))
+                jy = float(np.clip(jy, -max_jitter, max_jitter))
+
+            cur_x = float(np.clip(nom_x + jx, 0.0, 1.0))
+            cur_y = float(np.clip(nom_y + jy, 0.0, 1.0))
+
+            # Analytical minimum jerk velocity combined with smooth tremor delta
+            nom_vx = dx * d_poly
+            nom_vy = dy * d_poly
+            if i == 0 or i == num_steps:
+                vx, vy = 0.0, 0.0
+                acc = 0.0
+            else:
+                vx = float(nom_vx + (jx / max(dt, 1e-4) * 0.15))
+                vy = float(nom_vy + (jy / max(dt, 1e-4) * 0.15))
+                acc = math.hypot(vx - prev_vx, vy - prev_vy) / dt if i > 1 else 0.0
+
+            points.append(
+                NeuromuscularTrajectoryPoint(
+                    timestamp=i * dt,
+                    x=cur_x,
+                    y=cur_y,
+                    vx=vx,
+                    vy=vy,
+                    acceleration=acc,
+                    jitter_offset=(jx, jy),
+                )
+            )
+
+            prev_x, prev_y = cur_x, cur_y
+            prev_vx, prev_vy = vx, vy
+
+        return points
+
+    def _get_cursor(self) -> Tuple[float, float]:
+        if hasattr(self.driver, "get_position_normalized"):
+            position = self.driver.get_position_normalized()
+        elif hasattr(self.driver, "get_position"):
+            position = self.driver.get_position()
+        else:
+            raise RuntimeError("Cursor driver does not support position readback.")
+        if (
+            not isinstance(position, (tuple, list))
+            or len(position) != 2
+            or not all(math.isfinite(float(value)) for value in position)
+        ):
+            raise RuntimeError(f"Cursor driver returned an invalid position: {position!r}")
+        return float(position[0]), float(position[1])
+
+    def _move_cursor(self, x: float, y: float) -> None:
+        if self.failsafe is not None and self.failsafe.enabled:
+            w, h = getattr(self.driver, "screen_size", (1920, 1080))
+            px = int(round(x * (w - 1)))
+            py = int(round(y * (h - 1)))
+            self.failsafe.check(px, py, w, h)
+
+        if hasattr(self.driver, "move_to_normalized"):
+            self.driver.move_to_normalized(x, y)
+        elif hasattr(self.driver, "move_to"):
+            self.driver.move_to(x, y)
+        else:
+            raise RuntimeError("Cursor driver does not support pointer movement.")
+
+    def servo_to(
+        self,
+        target: Tuple[float, float],
+        target_width: Optional[float] = None,
+        realtime: bool = False,
+    ) -> NeuromuscularServoingResult:
+        """Executes smooth neuromuscular hand-eye movement toward target coordinates.
+
+        Parameters:
+            target: (tx, ty) normalized screen coordinates [0, 1]
+            target_width: estimated hitbox width of target [0, 1]
+            realtime: if True, sleeps between ticks for real OS cursor animation
+        """
+        if (
+            len(target) != 2
+            or not all(math.isfinite(float(value)) for value in target)
+            or not all(0.0 <= float(value) <= 1.0 for value in target)
+        ):
+            raise ValueError(f"Target must be normalized screen coordinates in [0, 1]: {target!r}")
+        target = (float(target[0]), float(target[1]))
+
+        # Failsafe check: verify not already latched in abort state
+        if self.failsafe is not None and self.failsafe.enabled and self.failsafe.is_tripped:
+            raise SafetyBreakoutException(
+                "[AVCS Safety Fail-Safe] Motor control is latched in emergency abort state. "
+                "Call failsafe.reset() to re-enable motor operations."
+            )
+
+        start_x, start_y = self._get_cursor()
+
+        # Failsafe check: ensure start position is not in an emergency corner
+        if self.failsafe is not None and self.failsafe.enabled:
+            w, h = getattr(self.driver, "screen_size", (1920, 1080))
+            px = int(round(start_x * (w - 1)))
+            py = int(round(start_y * (h - 1)))
+            self.failsafe.check(px, py, w, h)
+
+        dist = math.hypot(target[0] - start_x, target[1] - start_y)
+        w = target_width or self.fovea_width
+        id_difficulty = math.log2(1.0 + max(1e-4, dist) / max(1e-4, w))
+
+        duration_s = self.calculate_fitts_duration(dist, target_width=w)
+        waypoints = self.generate_minimum_jerk_profile((start_x, start_y), target, duration_s)
+
+        t0 = time.perf_counter()
+        dt = 1.0 / self.tick_rate_hz
+
+        if realtime:
+            _begin_high_res_timer()
+        try:
+            for pt in waypoints:
+                # Physical safety check (corner breakout failsafe)
+                self._move_cursor(pt.x, pt.y)
+                if realtime:
+                    time.sleep(dt)
+        finally:
+            if realtime:
+                _end_high_res_timer()
+
+        # Final precision docking onto target
+        self._move_cursor(target[0], target[1])
+        final_pos = self._get_cursor()
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        reached_target = math.hypot(final_pos[0] - target[0], final_pos[1] - target[1]) <= 0.003
+
+        return NeuromuscularServoingResult(
+            target=target,
+            final_cursor=final_pos,
+            duration_ms=elapsed_ms,
+            total_waypoints=len(waypoints),
+            fitts_index_of_difficulty=id_difficulty,
+            success=reached_target,
+            trajectory=waypoints,
+        )
+
+    def move_to(
+        self,
+        target: Tuple[float, float],
+        realtime: bool = False,
+        target_width: Optional[float] = None,
+    ) -> NeuromuscularServoingResult:
+        """Moves cursor to target coordinates using minimum-jerk neuromuscular trajectory."""
+        return self.servo_to(target=target, target_width=target_width, realtime=realtime)
+
+    def click(
+        self,
+        target: Optional[Tuple[float, float]] = None,
+        button: str = "left",
+        double_click: bool = False,
+        realtime: bool = False,
+    ) -> bool:
+        """Clicks at current cursor or moves to target and clicks."""
+        if target is not None:
+            self.move_to(target, realtime=realtime)
+        if double_click:
+            self.driver.double_click(button=button)
+        else:
+            self.driver.click(button=button)
+        return True
+
+    def type_text(
+        self,
+        text: str,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        """Dispatches native keystrokes for typing."""
+        if clear_first:
+            self.driver.press_hotkey("ctrl", "a")
+            self.driver.press_key("backspace")
+        self.driver.type_text(text)
+        if press_enter:
+            self.driver.press_key("enter")
+
+    def press_hotkey(self, *keys: str) -> None:
+        """Dispatches keyboard hotkeys (e.g. 'ctrl', 'c')."""
+        self.driver.press_hotkey(*keys)

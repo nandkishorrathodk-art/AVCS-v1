@@ -6,16 +6,28 @@ and dynamic UI re-renders, preventing coordinate drift across multi-turn agent s
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Dict, List, Optional, Set, Tuple
+
 import numpy as np
 
 from avcs.memory.types import EntityLifecycle, UIMLElement
+
+
+@lru_cache(maxsize=1)
+def _get_linear_sum_assignment():
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except ImportError:
+        return None
+    return linear_sum_assignment
 
 
 class PersistentUIRegistry:
     """Tracks UI elements persistently across multiple observation turns using bipartite matching."""
 
     def __init__(self, cost_threshold: float = 0.40) -> None:
+        _get_linear_sum_assignment()
         self.cost_threshold = cost_threshold
         self.registry: Dict[str, UIMLElement] = {}
         self.lifecycles: Dict[str, EntityLifecycle] = {}
@@ -175,33 +187,33 @@ class PersistentUIRegistry:
 
     def _solve_assignment(self, C: np.ndarray) -> Tuple[List[int], List[int]]:
         """Solves bipartite assignment via Hungarian algorithm (or fast vectorized NumPy greedy)."""
-        try:
-            from scipy.optimize import linear_sum_assignment  # type: ignore
+        linear_sum_assignment = _get_linear_sum_assignment()
+        if linear_sum_assignment is not None:
             r, c = linear_sum_assignment(C)
             return list(r), list(c)
-        except Exception:
-            # Vectorized NumPy argsort greedy matching (<0.2ms)
-            rows, cols = C.shape
-            if rows == 0 or cols == 0:
-                return [], []
-            matched_r: List[int] = []
-            matched_c: List[int] = []
-            used_rows: Set[int] = set()
-            used_cols: Set[int] = set()
 
-            flat_order = np.argsort(C.ravel())
-            for idx in flat_order:
-                r = int(idx // cols)
-                col = int(idx % cols)
-                if r not in used_rows and col not in used_cols:
-                    if C[r, col] < self.cost_threshold:
-                        matched_r.append(r)
-                        matched_c.append(col)
-                        used_rows.add(r)
-                        used_cols.add(col)
-                    if len(used_rows) == rows or len(used_cols) == cols:
-                        break
-            return matched_r, matched_c
+        # Vectorized NumPy argsort greedy matching when SciPy is not installed.
+        rows, cols = C.shape
+        if rows == 0 or cols == 0:
+            return [], []
+        matched_r: List[int] = []
+        matched_c: List[int] = []
+        used_rows: Set[int] = set()
+        used_cols: Set[int] = set()
+
+        flat_order = np.argsort(C.ravel())
+        for idx in flat_order:
+            r = int(idx // cols)
+            col = int(idx % cols)
+            if r not in used_rows and col not in used_cols:
+                if C[r, col] < self.cost_threshold:
+                    matched_r.append(r)
+                    matched_c.append(col)
+                    used_rows.add(r)
+                    used_cols.add(col)
+                if len(used_rows) == rows or len(used_cols) == cols:
+                    break
+        return matched_r, matched_c
 
     def get_element(self, element_id: str) -> Optional[UIMLElement]:
         return self.registry.get(element_id)

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import time
+
 import numpy as np
 import pytest
 
+from avcs.grounding import FovealInspection
+from avcs.human_eye import HumanEye, HumanEyeState
 from avcs.memory import (
     AffordanceType,
     BoundingBox,
@@ -18,8 +21,6 @@ from avcs.memory import (
     VisualMemoryManager,
     VisualMemorySnapshot,
 )
-from avcs.human_eye import HumanEye, HumanEyeState
-from avcs.grounding import FovealInspection
 from avcs.sdk import HumanEyeClient
 from forge.vision.capture import SyntheticScreen
 
@@ -167,6 +168,23 @@ def test_persistent_ui_registry_reid():
     assert active3[0].label == "Next Page"
     # Old elements should transition to off-screen
     assert registry.lifecycles[id1] in (EntityLifecycle.OFF_SCREEN_BELOW, EntityLifecycle.OFF_SCREEN_ABOVE)
+
+
+def test_registry_caches_optional_assignment_solver_lookup():
+    from avcs.memory.registry import _get_linear_sum_assignment
+
+    _get_linear_sum_assignment.cache_clear()
+    try:
+        PersistentUIRegistry()
+        first = _get_linear_sum_assignment.cache_info()
+        PersistentUIRegistry()
+        second = _get_linear_sum_assignment.cache_info()
+
+        assert first.misses == 1
+        assert second.misses == 1
+        assert second.hits >= 1
+    finally:
+        _get_linear_sum_assignment.cache_clear()
 
 
 def test_visual_diff_engine():
