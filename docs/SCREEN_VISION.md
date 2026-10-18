@@ -34,8 +34,12 @@ frame ───▶ optional VLM captioner (GENERATIVE) ◀───────�
   description vocabulary. The sentence is rendered from the words the model
   actually predicted, so a wrong sentence is a wrong *prediction*, not a wrong
   template.
-* A vision-language model can be plugged in as an optional captioner, but it
-  runs *on change only* and is allowed to lag.
+* An optional local vision-language model can caption a captured RGB frame.
+  It runs in the separate, slow description worker, on detected changes and
+  periodic refreshes, not on the reflex clock.
+  Its caption is an unverified model interpretation; the structured observation
+  records the caption's frame sequence and whether it is pending, current,
+  stale, or failed.
 
 This is the System-1 / System-2 split, made concrete by a latency budget rather
 than by taste.
@@ -75,7 +79,12 @@ flatter the system by roughly a third.
 
 The number that must not be confused with the tick is *description* latency: a
 local VLM caption is order 1 second on CPU. Descriptions are change-triggered
-and run on a separate thread; the dashboard reports tick fps, not caption fps.
+and periodically refreshed on a separate thread; the dashboard reports tick
+fps, not caption fps.
+The optional VLM receives local RGB frames only; this pipeline does not upload
+them. Do not forward images, embeddings, or unreviewed caption text to a cloud
+System 2. Text captions can themselves contain sensitive content and require
+minimization/redaction before any sharing.
 
 ## Honest evaluation
 
@@ -119,9 +128,9 @@ finished one.
   window size, position, luminance and speed, and withhold whole categories, so
   the test catches positional memorisation -- but it is not a substitute for
   evaluation on recorded real desktops. That requires a display.
-* **Description is change-triggered, not per-frame.** This is the honest
-  tradeoff that makes the loop real-time. Per-frame rich description is not
-  achievable at this scale.
+* **Rich semantic description is slow and change-triggered, not per-frame.**
+  This is the tradeoff that keeps it off the reflex clock. Captions may be
+  delayed, wrong, or uncertain.
 
 ## Adding a real desktop source
 
@@ -141,3 +150,53 @@ python3 -m forge.vision_demo --vlm                     # try a local VLM caption
 
 Outputs `runs/screen_vision.html` (graphical dashboard, inline SVG, no external
 assets) and `runs/screen_vision.json` (pollable typed state).
+
+## Asking an LLM about the desktop
+
+`ScreenVision.observe()` returns one adapter-neutral observation for a
+downstream LLM or application. When configured with the local VLM, its
+`visual_perception.local_semantic_caption` field includes the caption, source,
+frame sequence, age, status, and `verified: false`. It separates pixel-derived
+AVCS signals from optional OS window metadata; it does not call an LLM, expose
+MCP, or perform mouse/keyboard actions.
+
+For a local consumer, `ScreenVision.on_observation(callback)` publishes
+rate-limited JSON-ready snapshots from a worker thread. The callback receives
+the same text/structured observation and no frame pixels or visual embeddings.
+This callback is not a cloud transport; applications must explicitly select
+and secure any downstream connection. Caption text can still contain private
+screen content, so review/minimize/redact it before sharing.
+Each snapshot includes the current frame's events plus a rolling history of at
+most 20 pixel-derived events (`visual_perception.recent_events`) so a consumer
+can reason about recent changes without receiving the frame stream. This is a
+short event buffer, not durable task memory or proof of semantic understanding.
+
+```python
+from forge.vision.capture import ScreenCapture
+from forge.vision.desktop_context import Win32DesktopContextProvider
+from forge.vision.pipeline import ScreenVision
+
+vision = ScreenVision(
+    capture=ScreenCapture().open(),
+    desktop_context=Win32DesktopContextProvider(),
+)
+try:
+    observation = vision.observe()
+    # Pass this structured evidence to the application's existing LLM call.
+finally:
+    vision.stop()
+```
+
+The Win32 provider is opt-in. Its count means visible, titled, top-level
+windows; titles, process names/IDs, and bounds are labeled as OS context and
+are not AVCS visual recognition. A process name may be unavailable when Windows
+does not permit querying it. Without a provider, `desktop_context.status` is
+`not_configured`. Capture and OS enumeration errors are surfaced to the caller.
+
+The reflex pixel description reports coarse visual structure and change.
+Motion alone cannot tell whether a moving scene is a game or a video. The
+optional local VLM may produce richer captions, including guesses or visible
+text, but those captions are not verified facts. The returned interpretation
+guidance asks downstream language models to preserve those uncertainties. This
+is an observation input contract, not evidence of an integrated LLM provider
+or reliable desktop activity recognition.

@@ -1,0 +1,56 @@
+[
+  {
+    "configuration": "Trained V2, 1 Thread, predict_point, 50 Warmup",
+    "threads": 1,
+    "use_predict_point": true,
+    "warmup_iterations": 50,
+    "p50_ms": 357.01,
+    "p95_ms": 560.34,
+    "min_ms": 226.29
+  },
+  {
+    "configuration": "Trained V2, 1 Thread, forward_with_presence, 50 Warmup",
+    "threads": 1,
+    "use_predict_point": false,
+    "warmup_iterations": 50,
+    "p50_ms": 332.85,
+    "p95_ms": 484.07,
+    "min_ms": 216.23
+  },
+  {
+    "configuration": "Trained V2, 2 Threads, predict_point, 50 Warmup",
+    "threads": 2,
+    "use_predict_point": true,
+    "warmup_iterations": 50,
+    "p50_ms": 214.63,
+    "p95_ms": 273.47,
+    "min_ms": 185.25
+  },
+  {
+    "configuration": "Trained V2, 4 Threads, predict_point, 50 Warmup",
+    "threads": 4,
+    "use_predict_point": true,
+    "warmup_iterations": 50,
+    "p50_ms": 167.53,
+    "p95_ms": 236.87,
+    "min_ms": 115.8
+  },
+  {
+    "configuration": "Trained V2, 4 Threads, forward_with_presence, 5 Warmup (Exp B Setup)",
+    "threads": 4,
+    "use_predict_point": false,
+    "warmup_iterations": 5,
+    "p50_ms": 168.99,
+    "p95_ms": 399.95,
+    "min_ms": 119.42
+  },
+  {
+    "configuration": "Random Init, 4 Threads, forward_with_presence, 5 Warmup",
+    "threads": 4,
+    "use_predict_point": false,
+    "warmup_iterations": 5,
+    "p50_ms": 164.47,
+    "p95_ms": 233.6,
+    "min_ms": 130.39
+  }
+]

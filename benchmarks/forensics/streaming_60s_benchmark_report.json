@@ -1,0 +1,44 @@
+{
+  "benchmark": "AVCS 60-Second Real-Time Desktop Streaming Benchmark",
+  "checkpoint": "runs/weights/candidates/candidate_m3_highres_v2.pt",
+  "duration_seconds": 60.42,
+  "pipeline_architecture": "Asynchronous Pipelined (Threaded Capture -> Non-blocking Ring Queue -> Neural Inference)",
+  "frames_captured": 664,
+  "frames_processed": 233,
+  "frames_dropped": 427,
+  "drop_rate_pct": 64.31,
+  "mean_queue_depth": 3.82,
+  "max_queue_depth": 4,
+  "throughput": {
+    "capture_fps": 10.99,
+    "inference_fps": 3.86,
+    "sustained_e2e_fps": 3.86
+  },
+  "latencies_ms": {
+    "capture": {
+      "p50": 80.52,
+      "p95": 106.77,
+      "max": 284.98
+    },
+    "inference": {
+      "p50": 247.78,
+      "p95": 373.63,
+      "max": 801.19
+    },
+    "capture_to_prediction_e2e": {
+      "p50": 561.88,
+      "p95": 741.73,
+      "max": 1086.07
+    }
+  },
+  "system_resources": {
+    "mean_cpu_percent": 286.4,
+    "max_cpu_percent": 433.6,
+    "peak_ram_rss_mb": 342.1
+  },
+  "temporal_integrity": {
+    "monotonic_sequence_violations": 0,
+    "frame_timestamps_present": true,
+    "provenance_verified": true
+  }
+}

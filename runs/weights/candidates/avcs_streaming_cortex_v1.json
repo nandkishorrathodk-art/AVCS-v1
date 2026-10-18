@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "checkpoint_file": "runs/weights/candidates/avcs_streaming_cortex_v1.pt",
+  "sha256": "418c541e97b93615eccccd3cf488efaded84cd25f0384b865e3f5022c8c6032d",
+  "parameter_count": 501612,
+  "architecture": "StreamingVisualCortexV1",
+  "created_at": "2026-10-18T16:07:32.689132+00:00",
+  "qualification_metadata": {
+    "soak_test_ticks": 1000,
+    "achieved_fps": 95.41,
+    "p50_latency_ms": 9.74,
+    "p95_latency_ms": 17.43,
+    "memory_rss_flatline": true,
+    "temporal_mode": "convgru",
+    "feature_dim": 48,
+    "hidden_dim": 64,
+    "latent_dim": 96,
+    "clean_random_initialization": true,
+    "legacy_weights_loaded": false,
+    "zero_raw_persistence": true,
+    "zero_coordinate_leakage": true,
+    "stage_b_benchmark": {
+      "status": "PASSED",
+      "online_mean_loss": 0.43746918910428095,
+      "frozen_mean_loss": 0.5375777859436838,
+      "latent_variance": 1.0103670358657837,
+      "variance_guard_passed": true,
+      "mean_gradient_norm": 0.6433569600707606,
+      "frozen_drift": 0.0
+    }
+  }
+}

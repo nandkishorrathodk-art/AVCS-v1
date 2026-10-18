@@ -1,13 +1,24 @@
 # AVCS Developer SDK Quickstart Guide (`avcs-sdk`)
 
 [![PyPI version](https://img.shields.io/badge/pypi-0.2.0-blue.svg)](https://pypi.org/project/avcs-sdk/)
-[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-green.svg)](https://github.com/Praxis-Neural/AVCS)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-26%20passed-brightgreen.svg)](tests/)
+[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-green.svg)](https://github.com/Parth-labs-in/AVCS)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 
-**AVCS (Artificial Visual Cortex for Screens)** is a real-time, non-generative biological visual perception foundation engine and Developer SDK for screen AI agents, autonomous RPA, and computer-use automation.
+**AVCS (Artificial Visual Cortex System)** is an experimental Python research SDK and framework for screen visual perception, temporal visual modeling, and closed-loop motor experiments. It includes modular neural model architectures, in-memory desktop capture, and empirical evaluation harnesses.
 
-Instead of sending 2-megabyte desktop screenshots every few seconds to a remote cloud LLM at \$0.03 per image, AVCS runs locally at **30+ FPS ($\le 12\text{ ms}$ GPU / $\le 45\text{ ms}$ CPU)**, giving AI agents human-like continuous ocular perception.
+> **Grounding safety boundary:** natural-language `look_at()` currently uses an
+> untrained, randomly initialized grounder. It may be used for experimental
+> gaze/foveal inspection only; its coordinate is not a validated semantic
+> target. `ScreenEye` and `HumanEyeClient` therefore reject natural-language
+> targets in motor-action methods. `ScreenEye.click_target()` and
+> `type_into()` fail closed; click-on-arrival also requires an explicit
+> normalized `(x, y)` coordinate and cannot default to the current fixation.
+> `HumanEyeClient` likewise rejects string targets in `click`, `move_to`,
+> `click_and_verify`, `type_into`, and `type_and_verify`. Explicit coordinates
+> are caller-supplied motor targets, not proof that AVCS identified a semantic
+> control. Both SDKs require real desktop capture by default; tests must opt
+> into `SyntheticScreen` explicitly, and capture failure is not replaced with
+> synthetic pixels.
 
 ---
 
@@ -31,19 +42,19 @@ pip install avcs-sdk[desktop]
 ```python
 from avcs import ScreenEye
 
-# 1. Initialize continuous biological vision (30 FPS)
+# 1. Initialize the experimental screen-perception loop (30 FPS target)
 eye = ScreenEye(fps=30)
 eye.start()
 
-# 2. Wait until page loads or animations settle
+# 2. Check the model's current stability estimate
 if eye.wait_until_stable():
-    # 3. Locate interactive buttons without asking a cloud VLM
-    buttons = eye.clickable_hotspots()
-    print("Detected clickable UI buttons:", buttons)
+    # 3. Inspect affordance candidates. These are not verified controls.
+    candidates = eye.clickable_hotspots()
+    print("Unvalidated clickable candidates:", candidates)
 
-    # 4. Gaze at target without hardcoded (x, y) coordinates
+    # 4. Experimental gaze estimate only; it is not safe to use for motor input.
     target_x, target_y = eye.look_at("Submit Order")
-    print(f"Ocular gaze locked at: ({target_x:.3f}, {target_y:.3f})")
+    print(f"Unvalidated gaze estimate: ({target_x:.3f}, {target_y:.3f})")
 
 eye.stop()
 ```
@@ -52,47 +63,60 @@ eye.stop()
 
 ## 3. The 5 Core Developer Patterns
 
-### Pattern 1: Language Grounding Without Hardcoded Coordinates
-Never hardcode pixel coordinates like `(1042, 680)`. Screen resolutions, DPI scaling, and responsive CSS change constantly. Direct the foveal gaze using natural language goals:
+### Pattern 1: Experimental Language Gaze Inspection
+The current natural-language gaze grounder is randomly initialized and has no
+validated trained semantic grounding. `look_at()` can be inspected
+experimentally, but its returned coordinate must not drive input actions:
 
 ```python
 from avcs import ScreenEye
 
 eye = ScreenEye()
 
-# The model routes retinal focus directly onto the semantic target
+# Experimental gaze/fovea estimate only; not a validated semantic target.
 gaze_pos = eye.look_at("Confirm Payment")
 print(f"Target normalized coordinates: {gaze_pos}")
 ```
 
+Both SDKs block language-grounded motor actions until a validated grounding
+model is available. For coordinate-based tests or controlled use, pass an
+explicit normalized coordinate, for example
+`client.click(target=(0.5, 0.5))` or
+`eye.steer_hand_physical(target_gaze=(0.5, 0.5), click_on_arrival=True)`.
+A supplied coordinate is not evidence that AVCS understood the target.
+
 ---
 
-### Pattern 2: Animation & Loading Settle Gating (`wait_until_stable`)
-Traditional computer-use bots fail when clicking while a page is still transitioning or rendering. `wait_until_stable` monitors predictive coding free-energy to detect visual transitions:
+### Pattern 2: Stability Estimate (`wait_until_stable`)
+`wait_until_stable` reports the current model's stability/surprise estimate.
+It does not detect page-load completion or prove that a screen is safe to
+interact with:
 
 ```python
 from avcs import ScreenEye
 
 eye = ScreenEye()
 
-# Blocks until animations, skeleton loaders, and scrolling finish
+# Returns the model's estimate; not a page-load or task-success guarantee.
 is_settled = eye.wait_until_stable(timeout=3.0)
 if is_settled:
-    print("Screen is completely still; safe to interact.")
+    print("Model reports a stable screen.")
 else:
-    print("Screen timed out while still animating.")
+    print("No stable estimate before timeout.")
 ```
 
 ---
 
-### Pattern 3: Closed-Loop Hand-Eye Motor Servoing (`steer_hand`)
-Avoid sudden instantaneous cursor teleportation that triggers bot-detection. AVCS uses closed-loop visual servoing governed by Fitts' Law velocity curves:
+### Pattern 3: Coordinate-Based Servoing (`steer_hand`)
+Servoing can demonstrate smooth motion to a supplied coordinate; it does not
+validate that the coordinate corresponds to a semantic target. Do not feed the
+untrained language-gaze estimate into motor control:
 
 ```python
 from avcs import ScreenEye
 
 eye = ScreenEye()
-target = eye.look_at("Login Button")
+target = (0.5, 0.5)  # Explicit normalized coordinate, not a semantic detection.
 
 # Current cursor position in normalized screen space
 cursor = (0.2, 0.3)
@@ -100,52 +124,55 @@ cursor = (0.2, 0.3)
 while True:
     velocity, contact_acquired = eye.steer_hand(current_cursor=cursor, target_gaze=target)
     if contact_acquired:
-        print("Contact acquired! Cursor is precisely on target.")
+        print("The servoing controller reports its alignment threshold was reached.")
         break
     
-    # Update cursor with physical velocity step
+    # Update the simulated cursor estimate with a velocity step
     vx, vy = velocity
     cursor = (cursor[0] + vx * 0.016, cursor[1] + vy * 0.016)
 ```
 
 ---
 
-### Pattern 4: Zero-Latency Reactive Event Hooks (`@eye.on_surprise`)
-AVCS's V-JEPA predictive coding engine predicts what the next video frame should look like. When unexpected events occur (such as modal popups, error toasts, or CAPTCHAs), a surprise event is fired within milliseconds:
+### Pattern 4: Surprise-Threshold Event Hooks (`@eye.on_surprise`)
+The callback reports that the current perception pipeline's surprise score
+crossed a configured threshold. It does not classify the cause as a modal,
+error, CAPTCHA, or other semantic event, and callback latency is not guaranteed:
 
 ```python
 from avcs import ScreenEye, CortexState
 
 eye = ScreenEye(fps=30)
 
-# Fire alert only when high-surprise anomalies occur (e.g. error modals)
+# Receive a threshold signal; inspect the screen independently before acting.
 @eye.on_surprise(threshold=0.45)
 def handle_unexpected_event(state: CortexState):
-    print(f"ALERT: Screen anomaly detected! Surprise score: {state.surprise_score:.3f}")
-    print(f"Current UI category: {state.primary_category}")
+    print(f"Surprise threshold crossed: {state.surprise_score:.3f}")
 
 eye.start()
 ```
 
 ---
 
-### Pattern 5: Action Affordance Extraction (`clickable_hotspots`)
-The dorsal affordance stream outputs dense $32\times32$ probability maps for actionable UI controls (`clickable`, `typeable`, `scrollable`):
+### Pattern 5: Affordance Candidate Maps (`clickable_hotspots`)
+These methods return model-scored spatial candidates for affordance classes.
+They are not verified controls or evidence that an element is clickable/typeable;
+checkpoint loading and real-UI performance must be assessed separately:
 
 ```python
 from avcs import ScreenEye
 
 eye = ScreenEye()
 
-# Get all interactive buttons ranked by confidence: [(x, y, confidence), ...]
+# Get model-scored candidates: [(x, y, score), ...]
 clickables = eye.clickable_hotspots()
 for x, y, conf in clickables:
-    print(f"Button candidate at ({x:.2f}, {y:.2f}) with confidence {conf:.2%}")
+    print(f"Unvalidated candidate at ({x:.2f}, {y:.2f}) with score {conf:.2%}")
 
-# Get all text fields ready for typing
+# Typeable-class candidates, not verified text fields
 typeables = eye.typeable_hotspots()
 for x, y, conf in typeables:
-    print(f"Input field at ({x:.2f}, {y:.2f}) with confidence {conf:.2%}")
+    print(f"Unvalidated candidate at ({x:.2f}, {y:.2f}) with score {conf:.2%}")
 ```
 
 ---
@@ -165,18 +192,13 @@ with ScreenEye(fps=25) as eye:
 
 ---
 
-## 5. Performance Benchmarks
+## 5. Performance Measurements
 
-Measured on a standard consumer laptop (4 CPU cores, unoptimized PyTorch):
-
-| Metric | Measured Value | Target Budget | Margin |
-| :--- | :--- | :--- | :--- |
-| **Model Parameters** | **1.12M** | $< 5.0\text{M}$ | **4.5x headroom** |
-| **Single-Tick Latency (CPU)** | **$\sim 45 - 85\text{ ms}$** | $\le 85\text{ ms}$ | **On budget** |
-| **Single-Tick Latency (GPU)** | **$\sim 8 - 18\text{ ms}$** | $\le 25\text{ ms}$ | **2x headroom** |
-| **Streaming Throughput** | **$30+\text{ FPS}$** | $\ge 25\text{ FPS}$ | **Exceeded** |
-| **Affordance Loss (Trained)** | **$0.000$** | $\le 0.05$ | **100% converged** |
-| **Memory Footprint** | **$\sim 28\text{ MB}$** | $< 100\text{ MB}$ | **3.5x headroom** |
+No general latency, throughput, memory, or real-UI accuracy claim is made here.
+Performance depends on the selected capture source, checkpoint, hardware, and
+workload. Record the exact command, environment, warm-up, sample count, and
+result artifact before publishing a benchmark. Synthetic-input timing is not
+evidence of live desktop task performance.
 
 ---
 
@@ -184,14 +206,18 @@ Measured on a standard consumer laptop (4 CPU cores, unoptimized PyTorch):
 
 The `avcs-sdk` package installs two turnkey CLI utilities:
 
-### 1. Real Desktop Screen Diversity Benchmark
-Run the POC-7 benchmark across simulated environments (VS Code, Chrome, Excel, Notion, PowerShell):
+### 1. Perception Benchmark CLI
+Run the repository benchmark harness. Check its output for the selected
+capture source; fixture/synthetic runs measure pipeline behavior, not
+real-application task success:
 ```bash
 avcs-benchmark
 ```
 
-### 2. Live Visual HUD Dashboard Server
-Launch the real-time ocular stream with foveal gaze crosshair and dorsal affordance heatmaps at `http://localhost:8899`:
+### 2. Visual HUD Dashboard Server
+Launch the perception HUD at `http://localhost:8899`. Confirm the selected
+capture source and checkpoint in the output; a running stream is not proof of
+validated grounding or task completion:
 ```bash
 avcs-hud --stream --fps 30 --port 8899
 ```
@@ -231,6 +257,5 @@ class ScreenEye:
 
 ## 8. License
 
-Distributed under the **Apache-2.0 License**. See [LICENSE](LICENSE) for details.  
-Built with pride by the **Praxis Neural** research team.
-
+Distributed under the **Apache-2.0 License**. See [LICENSE.md](../LICENSE.md) for details.
+Built by **Parth Labs**.

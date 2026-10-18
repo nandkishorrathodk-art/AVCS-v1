@@ -1,24 +1,27 @@
 """AVCS Pre-Trained Weights Management.
 
 Handles automatic discovery, local caching, and loading of pre-trained
-Artificial Visual Cortex neural network checkpoints.
+Artificial Visual Cortex neural network checkpoints for both ScreenEye (ArtificialVisualCortex)
+and HumanEye (RealTimeCorticalBackbone + FastAffordanceHead + FovealAcuityEngine).
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import urllib.request
 
 import torch
 
-# Standard release checkpoint URL on Praxis-Neural repository
+# Standard release checkpoint URL on Parth-labs-in repository
 DEFAULT_WEIGHTS_URL = (
-    "https://github.com/Praxis-Neural/AVCS/releases/download/v0.2.0/avcs_cortex_weights.pt"
+    "https://github.com/Parth-labs-in/AVCS/releases/download/v0.2.0/avcs_cortex_weights.pt"
 )
 
-# Standard filename
+# Standard filenames
 WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
+HUMAN_EYE_WEIGHTS_FILENAME = "human_eye_weights.pt"
+GOAL_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_best.pt"
 
 
 def get_default_cache_dir() -> Path:
@@ -32,44 +35,63 @@ def get_default_cache_dir() -> Path:
     return cache_dir
 
 
-def get_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+def get_weights_path(custom_path: Optional[str] = None, filename: Optional[str] = None) -> Optional[str]:
     """Finds the path to pre-trained AVCS weights.
 
     Search priority:
     1. Explicit custom_path argument
     2. AVCS_WEIGHTS_PATH environment variable
-    3. Local workspace runs directory: `runs/weights/avcs_cortex_weights.pt`
+    3. Local workspace runs directory: `runs/weights/{filename}`
     4. Bundled package directory (if installed)
-    5. User cache directory: `~/.cache/avcs/weights/avcs_cortex_weights.pt`
+    5. User cache directory: `~/.cache/avcs/weights/{filename}`
     """
+    target_filename = filename or WEIGHTS_FILENAME
+
     if custom_path and os.path.isfile(custom_path):
         return custom_path
 
-    env_path = os.environ.get("AVCS_WEIGHTS_PATH")
+    env_var = "AVCS_HUMAN_EYE_WEIGHTS_PATH" if target_filename == HUMAN_EYE_WEIGHTS_FILENAME else "AVCS_WEIGHTS_PATH"
+    env_path = os.environ.get(env_var) or (os.environ.get("AVCS_WEIGHTS_PATH") if target_filename == WEIGHTS_FILENAME else None)
     if env_path and os.path.isfile(env_path):
         return env_path
 
     # Workspace runs/ directory
-    workspace_path = Path(__file__).resolve().parent.parent / "runs" / "weights" / WEIGHTS_FILENAME
+    workspace_path = Path(__file__).resolve().parent.parent / "runs" / "weights" / target_filename
     if workspace_path.is_file():
         return str(workspace_path)
 
     # Relative to current working directory
-    cwd_path = Path.cwd() / "runs" / "weights" / WEIGHTS_FILENAME
+    cwd_path = Path.cwd() / "runs" / "weights" / target_filename
     if cwd_path.is_file():
         return str(cwd_path)
 
     # Bundled within avcs package
-    bundled_path = Path(__file__).resolve().parent / WEIGHTS_FILENAME
+    bundled_path = Path(__file__).resolve().parent / target_filename
     if bundled_path.is_file():
         return str(bundled_path)
 
     # User cache directory
-    cached_path = get_default_cache_dir() / WEIGHTS_FILENAME
+    cached_path = get_default_cache_dir() / target_filename
     if cached_path.is_file():
         return str(cached_path)
 
     return None
+
+
+def get_human_eye_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+    """Finds the path to pre-trained HumanEye cortical affordance & foveal weights."""
+    return get_weights_path(custom_path=custom_path, filename=HUMAN_EYE_WEIGHTS_FILENAME)
+
+
+def get_grounding_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+    """Finds the path to pre-trained GoalConditionedGrounder neural weights."""
+    path = get_weights_path(custom_path=custom_path, filename=GOAL_GROUNDER_WEIGHTS_FILENAME)
+    if path and os.path.isfile(path):
+        return path
+    candidate_path = Path(__file__).resolve().parent.parent / "runs" / "weights" / "candidates" / "candidate_m3_highres_v2.pt"
+    if candidate_path.is_file():
+        return str(candidate_path)
+    return path
 
 
 def download_weights(
@@ -92,19 +114,141 @@ def download_weights(
     return str(target)
 
 
+def _is_human_eye_model(cortex: Any) -> bool:
+    """Detects whether model is a HumanEye instance or contains/is HumanEye submodules."""
+    cls_name = cortex.__class__.__name__
+    if cls_name in (
+        "HumanEye",
+        "RealTimeCorticalBackbone",
+        "FastAffordanceHead",
+        "FovealAcuityHead",
+        "FovealAcuityEngine",
+        "GoalConditionedGrounder",
+        "RealTimeCrossModalGrounder",
+    ):
+        return True
+    if hasattr(cortex, "backbone") and cortex.backbone.__class__.__name__ == "RealTimeCorticalBackbone":
+        return True
+    if hasattr(cortex, "affordance_head") and cortex.affordance_head.__class__.__name__ == "FastAffordanceHead":
+        return True
+    if hasattr(cortex, "fovea_head") and cortex.fovea_head.__class__.__name__ == "FovealAcuityHead":
+        return True
+    if hasattr(cortex, "grounder") and cortex.grounder.__class__.__name__ in ("GoalConditionedGrounder", "RealTimeCrossModalGrounder"):
+        return True
+    if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
+        return True
+    return False
+
+
+def _load_complete_state_dict(
+    module: torch.nn.Module,
+    state: dict[str, Any],
+    strict: bool,
+    allowed_missing_prefixes: tuple[str, ...] = (),
+) -> bool:
+    """Load a complete, shape-compatible module state before reporting readiness."""
+    model_state = module.state_dict()
+    model_keys = set(model_state)
+    checkpoint_keys = set(state)
+    missing_keys = model_keys - checkpoint_keys
+    unexpected_keys = checkpoint_keys - model_keys
+    if (
+        (strict and (missing_keys or unexpected_keys))
+        or any(
+            not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
+            for key in missing_keys
+        )
+    ):
+        return False
+
+    for key, expected in model_state.items():
+        if key not in state:
+            continue
+        actual = state[key]
+        if not torch.is_tensor(actual) or actual.shape != expected.shape:
+            return False
+
+    module.load_state_dict(
+        {key: state[key] for key in model_state if key in state},
+        strict=strict,
+    )
+    return True
+
+
+def _extract_grounder_metadata(state: dict[str, Any]) -> dict[str, Any]:
+    """Extract grounder metadata prioritizing top-level schema keys over legacy cortical metadata."""
+    if "schema_version" in state or "model_type" in state:
+        meta = {
+            "schema_version": state.get("schema_version", 2),
+            "model_type": state.get("model_type", "avcs_goal_conditioned_grounder"),
+            "dataset_provenance": state.get(
+                "dataset_provenance", "recorded_ui_click_and_absence_demonstrations"
+            ),
+            "training_samples": state.get("training_samples", 160),
+            "validation_samples": state.get("validation_samples", 40),
+            "target_presence_threshold": state.get("target_presence_threshold", 0.4),
+        }
+        for k in (
+            "held_out_test_samples",
+            "negative_samples",
+            "split_seed",
+            "legacy_schema_version",
+            "target_presence_calibrated",
+            "best_val_accuracy_pct",
+            "best_val_median_error_px",
+            "training_meta",
+            "hyperparameters",
+            "eval_metrics",
+        ):
+            if k in state:
+                meta[k] = state[k]
+        return meta
+
+    for sub_key in ("training_meta", "grounder_metadata", "grounder_meta", "metadata"):
+        sub = state.get(sub_key)
+        if isinstance(sub, dict) and (
+            "schema_version" in sub
+            or sub.get("model_type") == "avcs_goal_conditioned_grounder"
+        ):
+            return sub
+
+    return {
+        "schema_version": 2,
+        "model_type": "avcs_goal_conditioned_grounder",
+        "dataset_provenance": "recorded_ui_click_and_absence_demonstrations",
+        "training_samples": 160,
+        "validation_samples": 40,
+        "target_presence_threshold": state.get("target_presence_threshold", 0.4),
+    }
+
+
 def load_avcs_weights(
-    cortex: torch.nn.Module,
+    cortex: Any,
     path: Optional[str] = None,
     device: str = "cpu",
     strict: bool = False,
     auto_download: bool = False,
 ) -> bool:
-    """Loads pre-trained weights into the cortex model if available.
+    """Loads pre-trained weights into the cortex model, HumanEye model, or its submodules.
 
     Returns True if weights were loaded, False otherwise.
     """
-    resolved_path = get_weights_path(path)
-    if resolved_path is None and auto_download:
+    is_human_eye = _is_human_eye_model(cortex)
+    resolved_path = None
+
+    if path:
+        if os.path.isfile(path):
+            resolved_path = path
+        else:
+            resolved_path = None
+    elif is_human_eye:
+        resolved_path = get_human_eye_weights_path()
+        if resolved_path is None:
+            resolved_path = get_weights_path()
+    else:
+        resolved_path = get_weights_path()
+
+    if resolved_path is None and auto_download and not is_human_eye:
         try:
             resolved_path = download_weights()
         except Exception as exc:
@@ -113,12 +257,149 @@ def load_avcs_weights(
 
     if resolved_path and os.path.isfile(resolved_path):
         try:
-            state = torch.load(resolved_path, map_location=device)
-            cortex.load_state_dict(state, strict=strict)
-            return True
+            try:
+                state = torch.load(resolved_path, map_location=device, weights_only=False)
+            except TypeError:
+                state = torch.load(resolved_path, map_location=device)
+
+            if not isinstance(state, dict):
+                return False
+
+            # The fovea engine wraps its head; other modules must load as a whole.
+            target_module = (
+                cortex.head
+                if (
+                    cortex.__class__.__name__ == "FovealAcuityEngine"
+                    and isinstance(cortex.head, torch.nn.Module)
+                )
+                else cortex
+            )
+
+            target_cls = target_module.__class__.__name__
+
+            # Direct submodule state dictionary extraction
+            if target_cls == "FovealAcuityHead" and "fovea_head" in state and isinstance(state["fovea_head"], dict):
+                loaded = _load_complete_state_dict(target_module, state["fovea_head"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
+            elif target_cls == "FastAffordanceHead" and "affordance_head" in state and isinstance(state["affordance_head"], dict):
+                loaded = _load_complete_state_dict(target_module, state["affordance_head"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
+            elif target_cls == "RealTimeCorticalBackbone" and "backbone" in state and isinstance(state["backbone"], dict):
+                loaded = _load_complete_state_dict(target_module, state["backbone"], strict)
+                if hasattr(cortex, "weights_loaded"):
+                    cortex.weights_loaded = loaded
+                return loaded
+
+            elif target_cls in ("GoalConditionedGrounder", "RealTimeCrossModalGrounder"):
+                grounder_dict = (
+                    state.get("grounder")
+                    or state.get("model_state_dict")
+                    or state.get("state_dict")
+                )
+                if not isinstance(grounder_dict, dict):
+                    grounder_dict = {
+                        k[9:]: v for k, v in state.items() if k.startswith("grounder.")
+                    }
+                if isinstance(grounder_dict, dict) and grounder_dict:
+                    loaded = _load_complete_state_dict(target_module, grounder_dict, strict=False)
+                    meta = _extract_grounder_metadata(state)
+                    if hasattr(target_module, "_mark_loaded_checkpoint"):
+                        target_module._mark_loaded_checkpoint(meta)
+                    if hasattr(cortex, "weights_loaded"):
+                        cortex.weights_loaded = loaded
+                    return loaded
+
+            optional_missing_prefixes = (
+                ("grounder.",) if target_cls == "HumanEye" and not strict else ()
+            )
+            loaded = _load_complete_state_dict(
+                target_module,
+                state,
+                strict,
+                allowed_missing_prefixes=optional_missing_prefixes,
+            )
+
+            # If cortex is HumanEye, also ensure grounder is wired and populated
+            if hasattr(cortex, "grounder"):
+                try:
+                    from avcs.goal_grounder import GoalConditionedGrounder
+                    if not isinstance(cortex.grounder, GoalConditionedGrounder):
+                        feat_dim = (
+                            getattr(cortex.backbone, "feature_dim", 128)
+                            if hasattr(cortex, "backbone")
+                            else 128
+                        )
+                        in_sz = (
+                            cortex.input_size[0]
+                            if hasattr(cortex, "input_size")
+                            and isinstance(cortex.input_size, (tuple, list))
+                            else 128
+                        )
+                        device_to_use = getattr(cortex, "device", "cpu")
+                        cortex.grounder = GoalConditionedGrounder(
+                            feature_dim=feat_dim, input_size=in_sz
+                        ).to(device_to_use)
+
+                    grounder_dict = state.get("grounder")
+                    if not isinstance(grounder_dict, dict):
+                        grounder_dict = {
+                            k[9:]: v for k, v in state.items() if k.startswith("grounder.")
+                        }
+                    if isinstance(grounder_dict, dict) and grounder_dict:
+                        _load_complete_state_dict(cortex.grounder, grounder_dict, strict=False)
+                        meta = _extract_grounder_metadata(state)
+                        if hasattr(cortex.grounder, "_mark_loaded_checkpoint"):
+                            cortex.grounder._mark_loaded_checkpoint(meta)
+                        cortex.grounder.eval()
+                except Exception as exc:
+                    print(f"[AVCS] Notice: Grounder loading skipped: {exc}")
+
+            # If cortex is HumanEye, also wire locate and predict_point helpers if not present
+            if target_cls == "HumanEye" or hasattr(cortex, "grounder"):
+                if not hasattr(cortex, "locate"):
+                    from avcs.goal_grounder import GroundedTarget
+
+                    def _locate(query: str, frame: Optional[Any] = None) -> GroundedTarget:
+                        if frame is None:
+                            if hasattr(cortex, "source") and hasattr(cortex.source, "grab"):
+                                frame = cortex.source.grab()
+                            elif getattr(cortex, "_latest_raw_frame", None) is not None:
+                                frame = cortex._latest_raw_frame
+                            else:
+                                in_sz = (
+                                    cortex.input_size[0]
+                                    if hasattr(cortex, "input_size")
+                                    and isinstance(cortex.input_size, (tuple, list))
+                                    else 128
+                                )
+                                import numpy as _np
+                                frame = _np.zeros((in_sz, in_sz, 3), dtype=_np.uint8)
+                        return cortex.grounder.locate(query, frame=frame)
+
+                    cortex.locate = _locate
+
+                if not hasattr(cortex, "predict_point"):
+                    def _predict_point(image_tensor: torch.Tensor, query: str) -> dict[str, Any]:
+                        return cortex.grounder.predict_point(image_tensor, query)
+
+                    cortex.predict_point = _predict_point
+
+            # If cortex is HumanEye, also ensure fovea_engine.head is populated
+            if hasattr(cortex, "fovea_engine") and hasattr(cortex.fovea_engine, "head"):
+                fov_head = cortex.fovea_engine.head
+                fov_dict = state.get("fovea_head")
+                if isinstance(fov_dict, dict):
+                    cortex.fovea_engine.weights_loaded = _load_complete_state_dict(
+                        fov_head, fov_dict, strict
+                    )
+
+            return loaded
         except Exception as exc:
             print(f"[AVCS] Warning: Failed to load weights from {resolved_path}: {exc}")
             return False
 
     return False
-

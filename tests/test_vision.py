@@ -11,13 +11,22 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 
 import numpy as np
+import pytest
 import torch
 
-from forge.vision.capture import FrameSource, ScreenCapture, SyntheticScreen, open_capture
+from forge.vision.capture import (
+    FrameSource,
+    ScreenCapture,
+    SyntheticScreen,
+    ThreadedScreenCapture,
+    open_capture,
+)
 from forge.vision.dashboard import render_dashboard
 from forge.vision.describer import HeuristicDescriber
+from forge.vision.desktop_context import DesktopWindow
 from forge.vision.encoder import (
     SCENE_TYPES,
     SceneUnderstandingModel,
@@ -334,6 +343,126 @@ def test_pipeline_step_and_stats():
     assert s["tick_p50_ms"] >= s["reflex_p50_ms"] * 0.9
 
 
+def test_slow_subscriber_does_not_block_reflex_loop():
+    import threading
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    vis = ScreenVision(capture=SyntheticScreen(), target_fps=60)
+    vis.on_state(lambda _state: (entered.set(), release.wait(timeout=2.0)))
+    vis.start()
+    try:
+        assert entered.wait(timeout=2.0)
+        time.sleep(0.15)
+        assert vis.stats.frames >= 2
+    finally:
+        release.set()
+        vis.stop()
+
+
+def test_capture_failures_are_logged_and_retried(caplog):
+    import time
+
+    class BrokenCapture:
+        def grab(self):
+            raise OSError("capture device unavailable")
+
+    vis = ScreenVision(capture=BrokenCapture())
+    vis.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while "capture device unavailable" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "AVCS screen capture failed; retrying" in caplog.text
+        assert "capture device unavailable" in caplog.text
+    finally:
+        vis.stop()
+
+
+def test_screenvision_observe_separates_pixels_from_optional_os_context():
+    class TestDesktopContext:
+        def snapshot(self):
+            return {
+                "source": "test_os",
+                "status": "ok",
+                "count": 2,
+                "windows": [
+                    {"title": "Game - example", "is_foreground": True},
+                    {"title": "Other window", "is_foreground": False},
+                ],
+            }
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        desktop_context=TestDesktopContext(),
+        understanding=None,
+    )
+    observation = vis.observe()
+
+    assert json.loads(json.dumps(observation))["schema_version"] == (
+        "avcs.desktop_observation.v1"
+    )
+    assert observation["schema_version"] == "avcs.desktop_observation.v1"
+    assert observation["frame"]["capture_backend"] == "SyntheticScreen"
+    assert observation["frame"]["freshness"] == "fresh"
+    assert observation["visual_perception"]["source"] == "avcs_pixels"
+    assert observation["visual_perception"]["description"]
+    assert any(
+        "does not identify whether content is a game or a video" in item
+        for item in observation["visual_perception"]["limitations"]
+    )
+    assert observation["desktop_context"]["source"] == "test_os"
+    assert observation["desktop_context"]["count"] == 2
+    assert "windows" not in observation["visual_perception"]
+    assert observation["motor_action_authorized"] is False
+
+
+def test_screenvision_observe_marks_os_context_unconfigured():
+    observation = ScreenVision(capture=SyntheticScreen()).observe()
+
+    assert observation["desktop_context"] == {
+        "status": "not_configured",
+        "source": None,
+    }
+
+
+def test_desktop_window_keeps_os_identity_and_pixel_sources_distinct():
+    window = DesktopWindow(
+        handle=12,
+        title="Example window",
+        process_id=34,
+        process_name="example.exe",
+        process_name_status="ok",
+        bounds=(10, 20, 300, 400),
+        is_foreground=True,
+    )
+
+    assert window.to_dict() == {
+        "handle": 12,
+        "title": "Example window",
+        "process_id": 34,
+        "process_name": "example.exe",
+        "process_name_status": "ok",
+        "bounds": [10, 20, 300, 400],
+        "is_foreground": True,
+    }
+
+
+def test_screenvision_observe_surfaces_os_context_errors():
+    class BrokenDesktopContext:
+        def snapshot(self):
+            raise OSError("window enumeration failed")
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        desktop_context=BrokenDesktopContext(),
+    )
+
+    with pytest.raises(OSError, match="window enumeration failed"):
+        vis.observe()
+
+
 def test_model_describer_uses_model_output_not_fallback():
     from forge.vision.describer import ModelDescriber
     from forge.vision.scenes import sample_states
@@ -379,6 +508,158 @@ def test_pipeline_threaded_loop_runs_and_describes():
         vis.stop()
     assert vis.stats.frames > 5, "threaded loop should have perceived several frames"
     assert descriptions, "loop should have described at least one frame"
+
+
+def test_screenvision_local_vlm_caption_uses_rgb_frame_and_reports_provenance():
+    class LocalVLM:
+        name = "vlm"
+
+        def __init__(self):
+            self.frames = []
+
+        def describe(self, state, understanding, events):
+            return "coarse fallback"
+
+        def describe_frame(self, frame, state, understanding, events):
+            self.frames.append(frame.copy())
+            return "A locally observed window; app identity uncertain."
+
+    frame = np.zeros((48, 64, 3), dtype=np.uint8)
+    frame[0, 0] = [17, 83, 201]
+    capture = FrameSource(lambda: frame)
+    describer = LocalVLM()
+    vis = ScreenVision(capture=capture, describer=describer, understanding=None)
+
+    observation = vis.observe()
+    caption = observation["visual_perception"]["local_semantic_caption"]
+
+    assert caption["text"] == "A locally observed window; app identity uncertain."
+    assert caption["source"] == "local_vision_model"
+    assert caption["frame_sequence"] == observation["frame"]["sequence"]
+    assert caption["status"] == "ready"
+    assert caption["verified"] is False
+    assert describer.frames[0][0, 0].tolist() == [17, 83, 201]
+    assert "image" not in observation["visual_perception"]
+    assert "frame_pixels" not in observation
+
+
+def test_screenvision_local_vlm_errors_are_explicit():
+    class BrokenLocalVLM:
+        name = "vlm"
+
+        def describe(self, state, understanding, events):
+            return "coarse fallback"
+
+        def describe_frame(self, frame, state, understanding, events):
+            raise RuntimeError("local caption model failed")
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        describer=BrokenLocalVLM(),
+        understanding=None,
+    )
+
+    caption = vis.observe()["visual_perception"]["local_semantic_caption"]
+
+    assert caption["status"] == "error"
+    assert caption["text"] is None
+    assert caption["error"] == "local caption model failed"
+
+
+def test_screenvision_threaded_caption_receives_frame_outside_reflex_loop():
+    import threading
+
+    class LocalVLM:
+        name = "vlm"
+
+        def __init__(self):
+            self.called = threading.Event()
+            self.release = threading.Event()
+
+        def describe(self, state, understanding, events):
+            return "coarse fallback"
+
+        def describe_frame(self, frame, state, understanding, events):
+            self.called.set()
+            self.release.wait(1.0)
+            return "local caption"
+
+    describer = LocalVLM()
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        describer=describer,
+        understanding=None,
+        target_fps=30.0,
+        describe_every_s=0.05,
+    )
+    second_frame_processed = threading.Event()
+    processed_frames = []
+
+    def on_state(_state):
+        processed_frames.append(None)
+        if len(processed_frames) >= 2:
+            second_frame_processed.set()
+
+    vis.on_state(on_state)
+    vis.start()
+    try:
+        assert describer.called.wait(1.0), (
+            "caption worker should receive a captured frame"
+        )
+        assert second_frame_processed.wait(1.0), (
+            "reflex should keep processing while captioning"
+        )
+        caption = vis.observe(wait_timeout_s=0.0)["visual_perception"][
+            "local_semantic_caption"
+        ]
+        assert caption["status"] == "pending"
+        assert caption["text"] is None
+    finally:
+        describer.release.set()
+        vis.stop()
+
+
+def test_screenvision_observation_subscriber_receives_text_only_json():
+    import queue
+
+    vis = ScreenVision(
+        capture=SyntheticScreen(),
+        understanding=None,
+        target_fps=30.0,
+    )
+    observations = queue.Queue()
+    vis.on_observation(observations.put)
+    vis.start()
+    try:
+        observation = observations.get(timeout=2.0)
+    finally:
+        vis.stop()
+
+    assert observation["schema_version"] == "avcs.desktop_observation.v1"
+    assert observation["payload_policy"] == "text_only_no_frame_or_embedding"
+    assert observation["frame"]["sequence"] >= 0
+    assert observation["visual_perception"]["description"]
+    assert "image_b64" not in observation
+    assert "frame_pixels" not in observation
+    assert "visual_embedding" not in observation
+    assert isinstance(json.dumps(observation), str)
+
+
+def test_screenvision_observation_keeps_bounded_visual_event_history():
+    base = _static_frame()
+    frames = [base if index % 2 == 0 else 255 - base for index in range(24)]
+    capture = FrameSource(lambda: frames.pop(0))
+    vis = ScreenVision(capture=capture, understanding=None)
+
+    for _ in range(24):
+        vis.step()
+    observation = vis.observe()
+
+    history = observation["visual_perception"]["recent_events"]
+    assert 0 < len(history) <= 20
+    assert all(event["kind"] == "scene_change" for event in history)
+    assert "events" in observation["visual_perception"]
+    assert observation["visual_perception"]["events"]
 
 
 def test_state_serialises_to_json():
@@ -429,6 +710,25 @@ def test_screen_capture_reports_unavailable_without_display():
     # We do not assert it is unavailable (a CI box may have a display), only
     # that the probe itself never raises and returns a bool.
     assert isinstance(ScreenCapture.available(), bool)
+
+
+def test_threaded_capture_returns_frame_and_sequence_atomically():
+    capture = ThreadedScreenCapture(
+        SyntheticScreen(width=80, height=60),
+        target_fps=120,
+    ).open()
+    try:
+        frame1, sequence1 = capture.grab_with_sequence()
+        deadline = time.monotonic() + 1.0
+        frame2, sequence2 = frame1, sequence1
+        while sequence2 <= sequence1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+            frame2, sequence2 = capture.grab_with_sequence()
+
+        assert sequence2 > sequence1
+        assert not np.array_equal(frame1, frame2)
+    finally:
+        capture.close()
 
 
 def test_scene_generator_is_deterministic_and_advances():

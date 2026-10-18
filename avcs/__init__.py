@@ -1,48 +1,238 @@
-"""AVCS: Artificial Visual Cortex for Screens (Official Developer SDK).
+"""Public AVCS SDK surface with lazy imports for optional subsystems."""
 
-Real-Time Non-Generative Biological Visual Perception Foundation for Screen AI Agents.
-"""
 from __future__ import annotations
 
-from forge.vision.cortex.sdk import ScreenEye
-from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
-from forge.vision.cortex.config import CortexConfig
-from forge.vision.cortex.core.servoing import (
-    VisualServoingEngine as VisualServoingController,
-    VisualMotorState as MotorServoState,
-)
-from forge.vision.cortex.core import (
-    AFFORDANCE_CLASSES,
-    UI_CATEGORIES,
-    STABILITY_STATES,
-    RetinalFoveation,
-    CorticalBackbone,
-    DorsalAffordanceStream,
-    VentralSemanticStream,
-    PredictiveCodingEngine,
-)
-from forge.vision.capture import open_capture, ScreenCapture, SyntheticScreen
-from avcs.weights import (
-    download_weights,
-    get_weights_path,
-    load_avcs_weights,
-)
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
-__version__ = "0.2.0"
-__author__ = "Praxis Neural"
+try:
+    __version__ = version("avcs-system1")
+except PackageNotFoundError:
+    __version__ = "1.0.0rc1"
+__author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "AVCSController": ("avcs.control.controller", "AVCSController"),
+    "ActionOutcome": ("avcs.control.controller", "ActionOutcome"),
+    "ActionResult": ("avcs.control.controller", "ActionResult"),
+    "ScreenObservation": ("avcs.control.controller", "ScreenObservation"),
+    "SceneObservation": ("avcs.observation", "SceneObservation"),
+    "EntitySummary": ("avcs.observation", "EntitySummary"),
+    "VisualObservationEngine": ("avcs.observation", "VisualObservationEngine"),
+    "System2Turn": ("avcs.control.controller", "System2Turn"),
+    "SubstepTrace": ("avcs.control.controller", "SubstepTrace"),
+    "GoalExecutionResult": ("avcs.control.controller", "GoalExecutionResult"),
+    "GoalConditionedGrounder": (
+        "avcs.perception.goal_grounder",
+        "GoalConditionedGrounder",
+    ),
+    "GroundingPrediction": ("avcs.perception.goal_grounder", "GroundingPrediction"),
+    "load_grounding_checkpoint": (
+        "avcs.perception.goal_grounder",
+        "load_grounding_checkpoint",
+    ),
+    "get_grounding_weights_path": ("avcs.weights", "get_grounding_weights_path"),
+    "AVCS": ("avcs.sdk", "AVCS"),
+    "HumanEye": ("avcs.perception.human_eye", "HumanEye"),
+    "HumanEyeState": ("avcs.perception.human_eye", "HumanEyeState"),
+    "HumanEyeClient": ("avcs.sdk", "HumanEyeClient"),
+    "UnfocusedInputElementError": ("avcs.sdk", "UnfocusedInputElementError"),
+    "UnvalidatedGroundingError": (
+        "forge.vision.cortex.sdk",
+        "UnvalidatedGroundingError",
+    ),
+    "eye": ("avcs.sdk", "eye"),
+    "capture_desktop_observation": (
+        "avcs.runtime.observe",
+        "capture_desktop_observation",
+    ),
+    "synthesize_natural_language_report": (
+        "avcs.runtime.observe",
+        "synthesize_natural_language_report",
+    ),
+    "MovingObject": ("avcs.perception.human_eye", "MovingObject"),
+    "MagnocellularMotionEngine": (
+        "avcs.perception.human_eye",
+        "MagnocellularMotionEngine",
+    ),
+    "RealTimeCorticalBackbone": (
+        "avcs.perception.human_eye",
+        "RealTimeCorticalBackbone",
+    ),
+    "FastAffordanceHead": ("avcs.perception.human_eye", "FastAffordanceHead"),
+    "SmoothPursuitTracker": ("avcs.perception.human_eye", "SmoothPursuitTracker"),
+    "VisualFocusDetector": ("avcs.perception.focus", "VisualFocusDetector"),
+    "VisualFocusState": ("avcs.perception.focus", "VisualFocusState"),
+    "UnifiedCortex2M": ("avcs.perception.cortex_2m", "UnifiedCortex2M"),
+    "HumanEye2M": ("avcs.perception.cortex_2m", "HumanEye2M"),
+    "CorticalBackbone2M": ("avcs.perception.cortex_2m", "CorticalBackbone2M"),
+    "AffordanceHead2M": ("avcs.perception.cortex_2m", "AffordanceHead2M"),
+    "VentralStream2M": ("avcs.perception.cortex_2m", "VentralStream2M"),
+    "LanguageGrounder2M": ("avcs.perception.cortex_2m", "LanguageGrounder2M"),
+    "UNIVERSAL_APP_CATEGORIES": (
+        "avcs.perception.cortex_2m",
+        "UNIVERSAL_APP_CATEGORIES",
+    ),
+    "UNIVERSAL_AFFORDANCE_CLASSES": (
+        "avcs.perception.cortex_2m",
+        "UNIVERSAL_AFFORDANCE_CLASSES",
+    ),
+    "LanguageGazeGrounder": ("avcs.perception.grounding", "LanguageGazeGrounder"),
+    "FovealAcuityEngine": ("avcs.perception.grounding", "FovealAcuityEngine"),
+    "FovealAcuityHead": ("avcs.perception.grounding", "FovealAcuityHead"),
+    "GroundingResult": ("avcs.perception.grounding", "GroundingResult"),
+    "FovealInspection": ("avcs.perception.grounding", "FovealInspection"),
+    "VisualEvent": ("avcs.perception.events", "VisualEvent"),
+    "VisualEventStreamer": ("avcs.perception.events", "VisualEventStreamer"),
+    "VisualEventType": ("avcs.perception.events", "VisualEventType"),
+    "UIMLTree": ("avcs.memory", "UIMLTree"),
+    "UIMLElement": ("avcs.memory", "UIMLElement"),
+    "BoundingBox": ("avcs.memory", "BoundingBox"),
+    "VisualDiff": ("avcs.memory", "VisualDiff"),
+    "VisualMemorySnapshot": ("avcs.memory", "VisualMemorySnapshot"),
+    "VisualMemoryManager": ("avcs.memory", "VisualMemoryManager"),
+    "SemanticSceneTreeExtractor": ("avcs.memory", "SemanticSceneTreeExtractor"),
+    "PersistentUIRegistry": ("avcs.memory", "PersistentUIRegistry"),
+    "VisualDiffEngine": ("avcs.memory", "VisualDiffEngine"),
+    "AffordanceType": ("avcs.memory", "AffordanceType"),
+    "EntityLifecycle": ("avcs.memory", "EntityLifecycle"),
+    "NeuromuscularServoingController": (
+        "avcs.control.servoing",
+        "NeuromuscularServoingController",
+    ),
+    "NeuromuscularServoingResult": (
+        "avcs.control.servoing",
+        "NeuromuscularServoingResult",
+    ),
+    "NeuromuscularTrajectoryPoint": (
+        "avcs.control.servoing",
+        "NeuromuscularTrajectoryPoint",
+    ),
+    "VisualRippleVerifier": ("avcs.control.verifier", "VisualRippleVerifier"),
+    "VerificationResult": ("avcs.control.verifier", "VerificationResult"),
+    "VerificationStatus": ("avcs.control.verifier", "VerificationStatus"),
+    "IPCPerceptionFrame": ("avcs.runtime.ipc", "IPCPerceptionFrame"),
+    "SharedMemoryBroadcaster": ("avcs.runtime.ipc", "SharedMemoryBroadcaster"),
+    "SharedMemoryReader": ("avcs.runtime.ipc", "SharedMemoryReader"),
+    "EnterpriseLicensingServer": ("avcs.auth.server", "EnterpriseLicensingServer"),
+    "ScreenEye": ("forge.vision.cortex.sdk", "ScreenEye"),
+    "ArtificialVisualCortex": ("forge.vision.cortex.model", "ArtificialVisualCortex"),
+    "CortexConfig": ("forge.vision.cortex.config", "CortexConfig"),
+    "CortexState": ("forge.vision.cortex.model", "CortexState"),
+    "VisualServoingController": (
+        "forge.vision.cortex.core.servoing",
+        "VisualServoingEngine",
+    ),
+    "MotorServoState": ("forge.vision.cortex.core.servoing", "VisualMotorState"),
+    "AFFORDANCE_CLASSES": ("forge.vision.cortex.core", "AFFORDANCE_CLASSES"),
+    "UI_CATEGORIES": ("forge.vision.cortex.core", "UI_CATEGORIES"),
+    "STABILITY_STATES": ("forge.vision.cortex.core", "STABILITY_STATES"),
+    "RetinalFoveation": ("forge.vision.cortex.core", "RetinalFoveation"),
+    "CorticalBackbone": ("forge.vision.cortex.core", "CorticalBackbone"),
+    "DorsalAffordanceStream": ("forge.vision.cortex.core", "DorsalAffordanceStream"),
+    "VentralSemanticStream": ("forge.vision.cortex.core", "VentralSemanticStream"),
+    "PredictiveCodingEngine": ("forge.vision.cortex.core", "PredictiveCodingEngine"),
+    "open_capture": ("forge.vision.capture", "open_capture"),
+    "ScreenCapture": ("forge.vision.capture", "ScreenCapture"),
+    "SyntheticScreen": ("forge.vision.capture", "SyntheticScreen"),
+    "get_weights_path": ("avcs.weights", "get_weights_path"),
+    "get_human_eye_weights_path": ("avcs.weights", "get_human_eye_weights_path"),
+    "load_avcs_weights": ("avcs.weights", "load_avcs_weights"),
+    "download_weights": ("avcs.weights", "download_weights"),
+    "NeuroPacket": ("avcs.stream", "NeuroPacket"),
+    "NeuroStreamBus": ("avcs.stream", "NeuroStreamBus"),
+    "RealTimeNeuroStreamer": ("avcs.stream", "RealTimeNeuroStreamer"),
+    "GameReflexController": ("avcs.stream", "GameReflexController"),
+    "BaseAVCSDriver": ("avcs.drivers", "BaseAVCSDriver"),
+    "StepResult": ("avcs.drivers", "StepResult"),
+    "AnthropicAVCSDriver": ("avcs.drivers", "AnthropicAVCSDriver"),
+    "OpenAIAVCSDriver": ("avcs.drivers", "OpenAIAVCSDriver"),
+    "OllamaAVCSDriver": ("avcs.drivers", "OllamaAVCSDriver"),
+    "AVCSMCPServer": ("avcs.mcp", "AVCSMCPServer"),
+    "run_mcp_server": ("avcs.mcp", "run_mcp_server"),
+    "launch_gui": ("avcs.gui", "launch_gui"),
+    "AVCSDesktopApp": ("avcs.gui", "AVCSDesktopApp"),
+    "AVCSSystem1V1": ("avcs.perception.system1_v1", "AVCSSystem1V1"),
+    "VisualStateObservation": ("avcs.perception.visual_state", "VisualStateObservation"),
+    "load_system1": ("avcs.perception.system1_v1", "load_system1"),
+}
+
 __all__ = [
-    # Developer SDK Class
+    "AVCSController",
+    "ActionOutcome",
+    "ActionResult",
+    "ScreenObservation",
+    "SceneObservation",
+    "EntitySummary",
+    "VisualObservationEngine",
+    "System2Turn",
+    "SubstepTrace",
+    "GoalExecutionResult",
+    "GoalConditionedGrounder",
+    "GroundingPrediction",
+    "load_grounding_checkpoint",
+    "get_grounding_weights_path",
+    "AVCS",
+    "HumanEye",
+    "HumanEyeState",
+    "HumanEyeClient",
+    "UnfocusedInputElementError",
+    "UnvalidatedGroundingError",
+    "eye",
+    "capture_desktop_observation",
+    "synthesize_natural_language_report",
+    "MovingObject",
+    "MagnocellularMotionEngine",
+    "RealTimeCorticalBackbone",
+    "FastAffordanceHead",
+    "SmoothPursuitTracker",
+    "VisualFocusDetector",
+    "VisualFocusState",
+    "UnifiedCortex2M",
+    "HumanEye2M",
+    "CorticalBackbone2M",
+    "AffordanceHead2M",
+    "VentralStream2M",
+    "LanguageGrounder2M",
+    "UNIVERSAL_APP_CATEGORIES",
+    "UNIVERSAL_AFFORDANCE_CLASSES",
+    "LanguageGazeGrounder",
+    "FovealAcuityEngine",
+    "FovealAcuityHead",
+    "GroundingResult",
+    "FovealInspection",
+    "VisualEvent",
+    "VisualEventStreamer",
+    "VisualEventType",
+    "UIMLTree",
+    "UIMLElement",
+    "BoundingBox",
+    "VisualDiff",
+    "VisualMemorySnapshot",
+    "VisualMemoryManager",
+    "SemanticSceneTreeExtractor",
+    "PersistentUIRegistry",
+    "VisualDiffEngine",
+    "AffordanceType",
+    "EntityLifecycle",
+    "NeuromuscularServoingController",
+    "NeuromuscularServoingResult",
+    "NeuromuscularTrajectoryPoint",
+    "VisualRippleVerifier",
+    "VerificationResult",
+    "VerificationStatus",
+    "IPCPerceptionFrame",
+    "SharedMemoryBroadcaster",
+    "SharedMemoryReader",
+    "EnterpriseLicensingServer",
     "ScreenEye",
-    # Core Neural Model & State
     "ArtificialVisualCortex",
     "CortexConfig",
     "CortexState",
-    # Motor Servoing
     "VisualServoingController",
     "MotorServoState",
-    # Ontologies & Streams
     "AFFORDANCE_CLASSES",
     "UI_CATEGORIES",
     "STABILITY_STATES",
@@ -51,15 +241,42 @@ __all__ = [
     "DorsalAffordanceStream",
     "VentralSemanticStream",
     "PredictiveCodingEngine",
-    # Capture Utilities
     "open_capture",
     "ScreenCapture",
     "SyntheticScreen",
-    # Checkpoint & Weights Management
     "get_weights_path",
+    "get_human_eye_weights_path",
     "load_avcs_weights",
     "download_weights",
-    # Metadata
+    "NeuroPacket",
+    "NeuroStreamBus",
+    "RealTimeNeuroStreamer",
+    "GameReflexController",
+    "BaseAVCSDriver",
+    "StepResult",
+    "AnthropicAVCSDriver",
+    "OpenAIAVCSDriver",
+    "OllamaAVCSDriver",
+    "AVCSMCPServer",
+    "run_mcp_server",
+    "launch_gui",
+    "AVCSDesktopApp",
+    "AVCSSystem1V1",
+    "VisualStateObservation",
+    "load_system1",
     "__version__",
 ]
 
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

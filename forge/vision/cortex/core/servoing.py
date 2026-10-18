@@ -68,24 +68,25 @@ class VisualServoingEngine(nn.Module):
         # Contact check: has cursor entered the foveal target basin?
         contact = dist <= self.foveal_contact_radius
 
-        if dist < 1e-6 or contact:
+        if dist < 1e-6:
             vx, vy = 0.0, 0.0
         else:
-            # Fitts' Law dynamics: fast ballistic motion when far,
-            # smooth damped deceleration when approaching target
             unit_x = dx / dist
             unit_y = dy / dist
 
-            # Dynamic speed profile: proportional to distance, capped at max_speed
-            speed = min(self.max_speed, dist * 3.5)
-            # Smooth deceleration when entering vicinity
-            if dist < 0.15:
-                speed *= (dist / 0.15) ** self.damping
-            # Maintain minimum terminal speed so cursor reliably enters contact basin
-            speed = max(0.12, speed)
-
-            vx = unit_x * speed
-            vy = unit_y * speed
+            if dist > self.foveal_contact_radius:
+                # Approach Zone: Fitts' law ballistic velocity tapering into foveal basin
+                # Hermite smoothstep blend for minimum jerk deceleration
+                t = min(1.0, max(0.0, (dist - self.foveal_contact_radius) / 0.15))
+                blend = t * t * (3.0 - 2.0 * t)  # C1 smooth deceleration
+                speed = 0.04 + (self.max_speed - 0.04) * blend
+                speed = min(self.max_speed, speed * (dist * 3.5))
+                vx = unit_x * speed
+                vy = unit_y * speed
+            else:
+                # Foveal Basin Docking: Target contact acquired
+                vx = 0.0
+                vy = 0.0
 
         return VisualMotorState(
             gaze_fixation=(gx, gy),

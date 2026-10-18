@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import List, Optional, Protocol, Tuple
+from typing import Callable, List, Optional, Protocol, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe, SafetyBreakoutException
 
@@ -40,6 +40,27 @@ class OSCursorDriver(Protocol):
     def double_click(self, button: str = "left", interval: float = 0.08) -> None:
         ...
 
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+    ) -> None:
+        ...
+
+    def press_key(self, key: str, hold_duration: float = 0.02) -> None:
+        ...
+
+    def key_down(self, key: str) -> None:
+        ...
+
+    def key_up(self, key: str) -> None:
+        ...
+
+    def press_hotkey(self, *keys: str) -> None:
+        ...
+
 
 class VirtualCursorDriver:
     """In-memory simulated cursor driver for headless testing and CI."""
@@ -55,10 +76,25 @@ class VirtualCursorDriver:
         self.failsafe = CornerBreakoutFailSafe(enabled=failsafe)
         self.click_history: List[Tuple[float, float, str]] = []
         self.trajectory_history: List[Tuple[float, float]] = [(self._norm_x, self._norm_y)]
+        self.typed_history: List[str] = []
+        self.key_history: List[str] = []
+        self.held_keys: Set[str] = set()
+        self.mock_foreground_window: Optional[str] = None
+
+    def set_foreground_window(self, title: Optional[str]) -> None:
+        self.mock_foreground_window = title
+
+    def get_foreground_window(self) -> Optional[str]:
+        return self.mock_foreground_window
 
     @property
     def screen_size(self) -> Tuple[int, int]:
         return self._screen_size
+
+    def _check_failsafe(self) -> None:
+        px, py = self.get_position_pixels()
+        w, h = self._screen_size
+        self.failsafe.check(px, py, w, h)
 
     def get_position_pixels(self) -> Tuple[int, int]:
         w, h = self._screen_size
@@ -92,12 +128,77 @@ class VirtualCursorDriver:
         px, py = self.get_position_pixels()
         self.move_to_pixels(px + dx, py + dy)
 
+    def mouse_down(self, button: str = "left") -> None:
+        self._check_failsafe()
+        self.click_history.append((self._norm_x, self._norm_y, f"{button}_down"))
+
+    def mouse_up(self, button: str = "left") -> None:
+        self.click_history.append((self._norm_x, self._norm_y, f"{button}_up"))
+
     def click(self, button: str = "left", hold_duration: float = 0.02) -> None:
+        self._check_failsafe()
         self.click_history.append((self._norm_x, self._norm_y, button))
 
     def double_click(self, button: str = "left", interval: float = 0.08) -> None:
         self.click(button=button)
         self.click(button=button)
+
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+        focus_check_fn: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        self._check_failsafe()
+        if focus_check_fn is not None and not focus_check_fn():
+            from avcs.perception.focus import FocusLostError
+            raise FocusLostError("Focus lost prior to typing.")
+
+        if clear_first:
+            active_win = (self.mock_foreground_window or "").lower()
+            is_terminal = any(term in active_win for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
+            if is_terminal:
+                self.key_history.append("ctrl+u")
+            else:
+                self.key_history.append("ctrl+a")
+                self.key_history.append("backspace")
+
+        if focus_check_fn is not None:
+            from avcs.perception.focus import FocusLostError
+            for idx, ch in enumerate(text):
+                if not focus_check_fn():
+                    raise FocusLostError(f"Focus lost mid-typing at character index {idx} ('{ch}').")
+        self.typed_history.append(text)
+        if press_enter:
+            self.key_history.append("enter")
+
+    def key_down(self, key: str) -> None:
+        self._check_failsafe()
+        k = str(key).lower().strip()
+        self.held_keys.add(k)
+        self.key_history.append(f"{k}_down")
+
+    def key_up(self, key: str) -> None:
+        k = str(key).lower().strip()
+        self.held_keys.discard(k)
+        self.key_history.append(f"{k}_up")
+
+    def press_key(self, key: str, hold_duration: float = 0.02) -> None:
+        self._check_failsafe()
+        self.key_history.append(key)
+
+    def press_hotkey(self, *keys: str) -> None:
+        self._check_failsafe()
+        self.key_history.append("+".join(str(k) for k in keys))
+
+    def panic_release(self) -> None:
+        self.held_keys.clear()
+
+    def close(self) -> None:
+        self.panic_release()
+
 
 
 def get_default_driver(force_virtual: bool = False, failsafe: bool = True) -> OSCursorDriver:

@@ -39,10 +39,15 @@ class AVCSInferenceEngine:
         self.on_state = on_state
         self.on_surprise = on_surprise
 
-        self._running = False
+        self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._infer_lock = threading.Lock()
         self._latest_state: Optional[CortexState] = None
+
+    @property
+    def _running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and not self._stop_event.is_set()
 
     @property
     def latest_state(self) -> Optional[CortexState]:
@@ -50,40 +55,47 @@ class AVCSInferenceEngine:
             return self._latest_state
 
     def step(self, frame: Optional[np.ndarray] = None) -> CortexState:
-        """Executes a single perception step."""
-        if frame is None:
-            frame = self.source.grab()
+        """Executes a single perception step thread-safely."""
+        with self._infer_lock:
+            if frame is None:
+                frame = self.source.grab()
 
-        state = self.cortex.perceive(frame, device=self.device)
+            state = self.cortex.perceive(frame, device=self.device)
 
-        with self._lock:
-            self._latest_state = state
+            with self._lock:
+                self._latest_state = state
 
-        if self.on_state:
-            self.on_state(state)
+            if self.on_state:
+                try:
+                    self.on_state(state)
+                except Exception as e:
+                    print(f"[AVCS] State callback error: {e}")
 
-        if self.on_surprise and (state.surprise_score > 0.5 or state.stability_state == "surprise_event"):
-            self.on_surprise(state)
+            if self.on_surprise:
+                try:
+                    self.on_surprise(state)
+                except Exception as e:
+                    print(f"[AVCS] Surprise callback error: {e}")
 
-        return state
+            return state
 
     def start(self) -> None:
         """Starts asynchronous perception thread."""
-        if self._running:
+        if self._thread and self._thread.is_alive():
             return
-        self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
-        """Stops perception thread."""
-        self._running = False
+        """Stops perception thread with responsive event signaling."""
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
 
     def _loop(self) -> None:
-        while self._running:
+        while not self._stop_event.is_set():
             t0 = time.perf_counter()
             try:
                 self.step()
@@ -93,5 +105,5 @@ class AVCSInferenceEngine:
             elapsed = time.perf_counter() - t0
             sleep_time = max(0.0, self.interval - elapsed)
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                self._stop_event.wait(timeout=sleep_time)
 

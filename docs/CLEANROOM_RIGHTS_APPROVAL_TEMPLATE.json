@@ -1,0 +1,12 @@
+{
+  "schema": "avcs.cleanroom.rights-approval.v1",
+  "dataset_manifest_sha256": "abde4338a1fa4c30d1c349036efa392f144c457150fb1c393ac2b0081f9669d1",
+  "permissions": {
+    "internal_training": "UNRESOLVED",
+    "commercial_inference": "UNRESOLVED",
+    "public_weight_redistribution": "UNRESOLVED",
+    "source_dataset_redistribution": "UNRESOLVED"
+  },
+  "signer_key_fingerprint_sha256": "",
+  "signature_ed25519_base64": ""
+}

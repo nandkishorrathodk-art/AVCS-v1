@@ -5,6 +5,7 @@ RPA engineers, and computer-use automation systems.
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -14,6 +15,17 @@ import torch
 from forge.vision.capture import open_capture
 from forge.vision.cortex.inference.engine import AVCSInferenceEngine
 from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
+
+
+class UnvalidatedGroundingError(RuntimeError):
+    """Raised when an unvalidated language-grounding estimate is used for motor input."""
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if "validated trained semantic grounding is unavailable" not in base:
+            return f"{base} (validated trained semantic grounding is unavailable)"
+        return base
+
 
 
 class ScreenEye:
@@ -43,7 +55,11 @@ class ScreenEye:
     ) -> None:
         self.fps = fps
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.source = source or open_capture()
+        self.source = (
+            source
+            if source is not None
+            else open_capture(prefer_real=True, allow_synthetic_fallback=False)
+        )
         self.cortex = ArtificialVisualCortex().to(self.device).eval()
 
         self.weights_loaded: bool = False
@@ -59,6 +75,7 @@ class ScreenEye:
         self._change_callbacks: List[Callable[[CortexState], None]] = []
         self._surprise_callbacks: List[Tuple[float, Callable[[CortexState], None]]] = []
         self._affordance_callbacks: List[Tuple[str, float, Callable[[CortexState], None]]] = []
+        self._drivers: dict[bool, Any] = {}
 
         self.engine = AVCSInferenceEngine(
             cortex=self.cortex,
@@ -68,6 +85,28 @@ class ScreenEye:
             on_state=self._dispatch_state,
             on_surprise=self._dispatch_surprise,
         )
+
+    def _get_driver(self, force_virtual: bool = False) -> Any:
+        if force_virtual not in self._drivers:
+            from forge.vision.cortex.motor import get_default_driver
+            self._drivers[force_virtual] = get_default_driver(force_virtual=force_virtual)
+        return self._drivers[force_virtual]
+
+    @staticmethod
+    def _validate_motor_target(target: Tuple[float, float]) -> Tuple[float, float]:
+        if (
+            not isinstance(target, tuple)
+            or len(target) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 1.0
+                for value in target
+            )
+        ):
+            raise ValueError("Motor target must be a finite normalized (x, y) pair within [0.0, 1.0].")
+        return float(target[0]), float(target[1])
 
     def start(self) -> ScreenEye:
         """Starts real-time background perception stream."""
@@ -102,19 +141,37 @@ class ScreenEye:
             time.sleep(poll_interval)
         return False
 
-    def look_at(self, query: str) -> Tuple[float, float]:
-        """Directs the foveal gaze to lock onto the target element."""
-        dummy_text = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device)
-        frame = self.source.grab()
-        state = self.cortex.perceive(frame, text_embedding=dummy_text, device=self.device)
-        target = state.query_target or state.fixation
-        # Update retinal gaze fixation
-        self.cortex.retina.update_fixation(target_fixation=target)
-        return target
+    def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
+        """Returns an experimental, unvalidated normalized gaze estimate."""
+        from avcs.goal_grounder import ByteQueryEncoder, encode_queries
+        if not hasattr(self, "_query_encoder") or self._query_encoder is None:
+            self._query_encoder = ByteQueryEncoder(output_dim=self.cortex.cfg.latent_dim).to(self.device)
+            self._query_encoder.eval()
 
-    def locate(self, query: str) -> Tuple[float, float]:
-        """Alias for look_at: returns normalized (x, y) target coordinates."""
-        return self.look_at(query)
+        clean_q = query.strip() if isinstance(query, str) else ""
+        if not clean_q:
+            clean_q = " "
+        encoded_bytes = clean_q.encode("utf-8")
+        if len(encoded_bytes) > 96:
+            clean_q = encoded_bytes[:96].decode("utf-8", errors="ignore") or " "
+
+        tokens = encode_queries([clean_q]).to(self.device)
+        with torch.inference_mode():
+            text_emb = self._query_encoder(tokens)
+            text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
+
+        with self.engine._lock:
+            if frame is None:
+                frame = self.source.grab()
+            state = self.cortex.perceive(frame, text_embedding=text_emb, device=self.device)
+            target = state.query_target or state.fixation
+            # Update retinal gaze fixation
+            self.cortex.retina.update_fixation(target_fixation=target)
+            return target
+
+    def locate(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
+        """Alias for look_at: returns an experimental gaze estimate, not a grounded target."""
+        return self.look_at(query, frame=frame)
 
     def steer_hand(
         self,
@@ -127,7 +184,11 @@ class ScreenEye:
             (motor_velocity: (vx, vy), contact_acquired: bool)
         Steers the hand toward the gaze point without calculating absolute pixel jumps.
         """
-        gaze = target_gaze or self.cortex.retina.current_fixation
+        gaze = (
+            self._validate_motor_target(target_gaze)
+            if target_gaze is not None
+            else self.cortex.retina.current_fixation
+        )
         motor_state = self.cortex.servoing.compute_motor_flow(
             gaze_target=gaze,
             current_cursor=current_cursor,
@@ -153,10 +214,17 @@ class ScreenEye:
         Uses closed-loop Fitts' Law velocity curves with zero coordinate jumping.
         Features emergency corner breakout safety abort.
         """
+        if target_gaze is not None:
+            target_gaze = self._validate_motor_target(target_gaze)
+        if click_on_arrival and target_gaze is None:
+            raise UnvalidatedGroundingError(
+                "A click requires an explicit normalized (x, y) coordinate; "
+                "the current fixation is not validated grounding."
+            )
         from forge.vision.cortex.motor import HandEyeServoingController, get_default_driver
         driver = get_default_driver(force_virtual=force_virtual)
         controller = HandEyeServoingController(driver=driver)
-        gaze = target_gaze or self.cortex.retina.current_fixation
+        gaze = target_gaze if target_gaze is not None else self.cortex.retina.current_fixation
         return controller.servo_to(
             target_gaze=gaze,
             timeout_seconds=timeout_seconds,
@@ -164,6 +232,66 @@ class ScreenEye:
             speed_factor=speed_factor,
             realtime=realtime,
         )
+
+    def click_target(
+        self,
+        query: str,
+        button: str = "left",
+        timeout_seconds: float = 1.5,
+        force_virtual: bool = False,
+        realtime: bool = False,
+    ) -> bool:
+        """Rejects semantic motor actions until a validated grounding model is available."""
+        raise UnvalidatedGroundingError(
+            "Natural-language targets cannot drive motor actions: validated trained "
+            "semantic grounding is unavailable. Use an explicit normalized (x, y) coordinate."
+        )
+
+    def type_text(
+        self,
+        text: str,
+        key_delay_ms: int = 10,
+        clear_first: bool = False,
+        press_enter: bool = False,
+        force_virtual: bool = False,
+    ) -> None:
+        """Types text via the OS hardware or virtual keyboard driver."""
+        driver = self._get_driver(force_virtual=force_virtual)
+        driver.type_text(
+            text=text,
+            key_delay_ms=key_delay_ms,
+            clear_first=clear_first,
+            press_enter=press_enter,
+        )
+
+    def press_key(self, key: str, force_virtual: bool = False) -> None:
+        """Presses and releases a single key via keyboard driver."""
+        driver = self._get_driver(force_virtual=force_virtual)
+        driver.press_key(key)
+
+    def press_hotkey(self, *keys: str, force_virtual: bool = False) -> None:
+        """Presses and releases a hotkey combination via keyboard driver."""
+        driver = self._get_driver(force_virtual=force_virtual)
+        driver.press_hotkey(*keys)
+
+    def type_into(
+        self,
+        query: str,
+        text: str,
+        clear_first: bool = True,
+        press_enter: bool = True,
+        force_virtual: bool = False,
+    ) -> bool:
+        """Locates an input field, clicks it to gain focus, and types text."""
+        success = self.click_target(query=query, force_virtual=force_virtual)
+        if success:
+            self.type_text(
+                text=text,
+                clear_first=clear_first,
+                press_enter=press_enter,
+                force_virtual=force_virtual,
+            )
+        return success
 
     def get_affordances(self, action_type: str = "clickable") -> List[Tuple[float, float, float]]:
         """Returns list of normalized (x, y, confidence) points for interactive controls."""
@@ -220,13 +348,28 @@ class ScreenEye:
 
     def on_affordance(
         self,
-        action_type: str = "clickable",
+        action_type: Any = "clickable",
         min_confidence: float = 0.5,
-    ) -> Callable[[Callable[[CortexState], None]], Callable[[CortexState], None]]:
-        """Decorator to trigger callbacks when specific interactive affordances appear."""
+    ) -> Any:
+        """Decorator to trigger callbacks when specific interactive affordances appear.
+
+        Supports both bare and parameterized styles:
+        >>> @eye.on_affordance
+        ... def on_click(state): ...
+        >>> @eye.on_affordance(action_type="typeable", min_confidence=0.6)
+        ... def on_input(state): ...
+        """
+        if callable(action_type):
+            # Bare decorator: @eye.on_affordance
+            self._affordance_callbacks.append(("clickable", min_confidence, action_type))
+            return action_type
+
+        act_type = str(action_type)
+
         def decorator(cb: Callable[[CortexState], None]) -> Callable[[CortexState], None]:
-            self._affordance_callbacks.append((action_type, min_confidence, cb))
+            self._affordance_callbacks.append((act_type, min_confidence, cb))
             return cb
+
         return decorator
 
     def _dispatch_state(self, state: CortexState) -> None:
@@ -249,16 +392,30 @@ class ScreenEye:
 
     def _dispatch_surprise(self, state: CortexState) -> None:
         for thresh, cb in self._surprise_callbacks:
-            if state.surprise_score >= thresh:
+            if state.surprise_score >= thresh or state.stability_state == "surprise_event":
                 try:
                     cb(state)
                 except Exception as e:
                     print(f"[ScreenEye] Surprise callback error: {e}")
 
+    def close(self) -> None:
+        """Closes ScreenEye and releases capture and motor resources."""
+        self.stop()
+        if hasattr(self.source, "close"):
+            try:
+                self.source.close()
+            except Exception:
+                pass
+        for driver in list(self._drivers.values()):
+            if hasattr(driver, "close"):
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+        self._drivers.clear()
+
     def __enter__(self) -> ScreenEye:
         return self.start()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.stop()
-
-
+        self.close()

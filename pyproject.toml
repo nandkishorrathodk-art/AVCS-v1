@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "avcs-sdk"
 version = "0.2.0"
-description = "Artificial Visual Cortex for Screens (AVCS): Non-generative, real-time biological visual perception foundation engine and SDK for screen AI agents."
+description = "Real-Time Biological Artificial Visual Cortex System (AVCS - System 1: Eyes + Hands) for Autonomous Computer Use."
 readme = "README.md"
 authors = [
-    { name = "Praxis Neural", email = "research@praxisneural.ai" },
+    { name = "Parth Labs", email = "contact@parthlabs.in" },
 ]
 license = "Apache-2.0"
 classifiers = [
@@ -42,6 +42,7 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.22.0",
     "Pillow>=9.0.0",
+    "cryptography>=44.0.0",
 ]
 
 [project.optional-dependencies]
@@ -52,20 +53,45 @@ dev = [
     "pytest>=7.0.0",
     "wheel",
 ]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "requests>=2.31.0",
+]
+client = [
+    "requests>=2.31.0",
+]
 
 [project.urls]
-Homepage = "https://github.com/Praxis-Neural/AVCS"
-Documentation = "https://github.com/Praxis-Neural/AVCS/tree/main/docs"
-Repository = "https://github.com/Praxis-Neural/AVCS.git"
-Issues = "https://github.com/Praxis-Neural/AVCS/issues"
+Homepage = "https://github.com/Parth-labs-in/AVCS"
+Documentation = "https://github.com/Parth-labs-in/AVCS/tree/main/docs"
+Repository = "https://github.com/Parth-labs-in/AVCS.git"
+Issues = "https://github.com/Parth-labs-in/AVCS/issues"
 
 [project.scripts]
 avcs-benchmark = "avcs.benchmark:main"
 avcs-hud = "avcs.dashboard:main"
+avcs-gui = "avcs.gui:launch_gui"
+avcs-pilot = "avcs_pilot.runner:main"
+avcs-m7-validate = "avcs_m7_validation.runner:main"
+avcs-audit-evidence = "avcs_m7_validation.evidence_auditor:main"
+avcs-record-demo = "avcs.training.demo_recorder:main"
+avcs-train-grounder = "avcs.training.train_grounder:main"
+avcs-evaluate-grounder = "avcs.training.evaluate_grounder:main"
+avcs-observe = "avcs.observe:main"
+avcs-demo = "avcs.demo_system2:main"
+avcs-train-ui-grounder = "avcs.training.train_ui_grounder:main"
+avcs-benchmark-grounder = "benchmarks.run_ui_grounding_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["avcs*", "forge*"]
+include = ["adapters*", "avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]
+avcs_m7_validation = ["py.typed"]
+avcs_pilot = ["py.typed"]
+avcs_sdk = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

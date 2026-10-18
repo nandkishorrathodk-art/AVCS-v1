@@ -44,7 +44,11 @@ def test_pathguard_rejects_symlink_escape(sandbox):
     """The classic bypass: a symlink pointing outside the sandbox."""
     outside = os.path.realpath(tempfile.mkdtemp())
     link = os.path.join(sandbox, "escape")
-    os.symlink(outside, link)
+    try:
+        os.symlink(outside, link)
+    except OSError:
+        os.rmdir(outside)
+        pytest.skip("Symlink creation requires elevated privileges or Developer Mode on Windows")
     guard = PathGuard([sandbox])
     with pytest.raises(ScopeDenial) as exc:
         guard.resolve(os.path.join(link, "victim"))

@@ -196,8 +196,13 @@ class ArtificialVisualCortex(nn.Module):
         cat_conf = float(cat_probs[cat_idx].item())
 
         text_dense = float(out["text_density"][0].item())
-        stability = decode_stability(out["stability_logits"])
         surprise = max(0.0, min(1.0, float(out["surprise_score"].mean().item())))
+        stability = decode_stability(
+            out["stability_logits"],
+            surprise_score=surprise,
+            prev_state=getattr(self.predictive, "current_state", None),
+        )
+        self.predictive.current_state = stability
 
         # 4. Extract Top Action Hotspots (Clickable / Typeable)
         hotspots: List[Tuple[float, float, str, float]] = []

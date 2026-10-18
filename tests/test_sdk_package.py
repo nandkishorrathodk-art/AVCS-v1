@@ -1,7 +1,12 @@
 """Unit tests for the official AVCS Developer SDK Package (avcs-sdk)."""
+
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
+from pathlib import Path
+
 import pytest
 import numpy as np
 
@@ -26,6 +31,45 @@ def test_avcs_import_and_metadata():
     assert "VisualServoingController" in avcs.__all__
     assert "SyntheticScreen" in avcs.__all__
     assert "load_avcs_weights" in avcs.__all__
+
+
+def test_all_root_exports_resolve_lazily():
+    assert set(avcs.__all__) == set(avcs._EXPORTS) | {"__version__"}
+    for name in avcs.__all__:
+        assert hasattr(avcs, name), name
+
+
+def test_package_import_is_lightweight_and_does_not_mutate_search_path():
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; before = list(sys.path); import avcs; "
+                "assert sys.path == before; "
+                "assert 'torch' not in sys.modules; "
+                "assert not any(name == 'forge' or name.startswith('forge.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_legacy_core_paths_reexport_the_new_package_modules():
+    from avcs.human_eye import HumanEye as LegacyHumanEye
+    from avcs.perception.human_eye import HumanEye
+    from avcs.controller import AVCSController as LegacyController
+    from avcs.control.controller import AVCSController
+
+    assert LegacyHumanEye is HumanEye
+    assert LegacyController is AVCSController
 
 
 def test_screen_eye_initialization_with_pretrained_weights():
@@ -147,14 +191,18 @@ def test_screen_eye_hand_eye_servoing():
     current_cursor = (0.1, 0.1)
     target_gaze = (0.8, 0.8)
 
-    (vx, vy), contact = eye.steer_hand(current_cursor=current_cursor, target_gaze=target_gaze)
+    (vx, vy), contact = eye.steer_hand(
+        current_cursor=current_cursor, target_gaze=target_gaze
+    )
     assert vx > 0.0  # Must steer right
     assert vy > 0.0  # Must steer down
     assert contact is False
 
     # When hand is on target
     aligned_cursor = (0.801, 0.802)
-    _, aligned_contact = eye.steer_hand(current_cursor=aligned_cursor, target_gaze=target_gaze)
+    _, aligned_contact = eye.steer_hand(
+        current_cursor=aligned_cursor, target_gaze=target_gaze
+    )
     assert aligned_contact is True
     assert eye.is_aligned(aligned_cursor, target_gaze=target_gaze) is True
 
@@ -175,8 +223,69 @@ def test_screen_eye_look_at_and_locate():
     assert len(loc) == 2
 
 
+def test_sdk_does_not_act_on_unauthorized_grounder_candidate(monkeypatch):
+    from types import SimpleNamespace
+
+    from avcs.sdk import HumanEyeClient
+    from forge.vision.cortex.sdk import UnvalidatedGroundingError
+
+    client = HumanEyeClient(source="synthetic", force_virtual_motor=True)
+    client._grounder = SimpleNamespace(
+        is_trained=True,
+        predict=lambda frame, query: SimpleNamespace(
+            action_authorized=False,
+            candidate_point_norm=(0.25, 0.75),
+            peak_probability=0.99,
+        ),
+    )
+    clicked = []
+    monkeypatch.setattr(
+        client.motor_driver, "click", lambda button: clicked.append(button)
+    )
+    try:
+        with pytest.raises(UnvalidatedGroundingError, match="not action-authorized"):
+            client.click("Save button")
+        assert clicked == []
+    finally:
+        client.close()
+
+
 def test_weights_auto_discovery():
     """Verify weights discovery locates runs/weights/avcs_cortex_weights.pt."""
     weights_path = get_weights_path()
     assert weights_path is not None
     assert weights_path.endswith("avcs_cortex_weights.pt")
+
+
+def test_avcs_unified_model_eyes_and_hands():
+    """Verify AVCS exposes both Eyes and Hands on a unified System 1 foundation model."""
+    from avcs import AVCS, HumanEye, NeuromuscularServoingController
+
+    model = AVCS(source="synthetic", force_virtual_motor=True)
+    try:
+        assert isinstance(model.eyes, HumanEye)
+        assert isinstance(model.hands, NeuromuscularServoingController)
+        assert model.weights_loaded is True
+
+        # Test Eyes visual perception
+        state = model.see()
+        assert state is not None
+        assert state.latency_ms >= 0.0
+        assert isinstance(model.eyes.affordances, list)
+
+        # Test Hands motor control
+        servo_res = model.hands.move_to((0.4, 0.6))
+        assert servo_res.success is True
+        assert len(servo_res.trajectory) > 0
+
+        clicked = model.hands.click()
+        assert clicked is True
+
+        # Test typing
+        model.hands.type_text("Hello AVCS", clear_first=True, press_enter=False)
+
+        # Test foveal inspection
+        fovea = model.inspect((0.4, 0.6))
+        assert fovea is not None
+    finally:
+        model.close()

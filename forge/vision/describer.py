@@ -17,12 +17,15 @@ arrangement in which "real-time" and "rich description" coexist on one machine.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional, Protocol
 
 import numpy as np
 
 from forge.vision.encoder import Understanding
 from forge.vision.scene import SceneEvent, SceneState
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class Describer(Protocol):
@@ -133,7 +136,7 @@ class VLMDescriber:
         from transformers import AutoModelForVision2Seq, AutoProcessor  # noqa: F401
 
         self.processor = AutoProcessor.from_pretrained(model_name)
-        self.model = AutoModelForVision2Seq.from_pretrained(model_name)
+        self.model = AutoModelForVision2Seq.from_pretrained(model_name).to(device)
         self.model.eval()
         self.device = device
 
@@ -141,14 +144,23 @@ class VLMDescriber:
     def try_load(model_name: str = "HuggingFaceTB/SmolVLM-256M-Instruct") -> Optional["VLMDescriber"]:
         try:
             return VLMDescriber(model_name=model_name)
-        except Exception:
+        except Exception as exc:
+            _LOGGER.warning("Local VLM captioner unavailable: %s", exc)
             return None
 
-    def caption(self, frame: np.ndarray, prompt: str = "Describe what is happening on this computer screen.") -> str:
+    def caption(
+        self,
+        frame: np.ndarray,
+        prompt: str = (
+            "Describe the visible computer screen. Report app or activity names "
+            "only when visually identifiable; otherwise say unknown. Do not infer "
+            "hidden state or claim an action succeeded."
+        ),
+    ) -> str:
         from PIL import Image
         import torch
 
-        img = Image.fromarray(frame[:, :, ::-1] if frame.shape[-1] == 3 else frame)
+        img = Image.fromarray(frame)
         messages = [
             {
                 "role": "user",
@@ -157,13 +169,22 @@ class VLMDescriber:
         ]
         text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
         inputs = self.processor(text=text, images=[img], return_tensors="pt")
+        inputs = inputs.to(self.device)
         with torch.no_grad():
             out = self.model.generate(**inputs, max_new_tokens=64)
         return self.processor.batch_decode(out, skip_special_tokens=True)[0].strip()
 
+    def describe_frame(
+        self,
+        frame: np.ndarray,
+        state: SceneState,
+        understanding: Optional[Understanding],
+        events: list[SceneEvent],
+    ) -> str:
+        """Run the optional semantic captioner on one locally captured RGB frame."""
+        return self.caption(frame)
+
     def describe(
         self, state: SceneState, understanding: Optional[Understanding], events: list[SceneEvent]
     ) -> str:  # pragma: no cover - needs weights
-        # The frame is not carried on the state; the pipeline calls caption()
-        # directly when it has the pixels.  This satisfies the protocol shape.
-        return HeuristicDescriber().describe(state, understanding, events)
+        return ModelDescriber().describe(state, understanding, events)

@@ -1,0 +1,311 @@
+"""Repository-backed AVCS Backend Adapter.
+
+Binds the public AVCS Python SDK to the internal AVCS ActionBroker, HumanEye,
+CaptureAdapter, and Verifier runtime without bypassing safety gates or oracle separation.
+"""
+from __future__ import annotations
+
+import asyncio
+import platform
+import time
+from typing import Any, List, Optional, Sequence, Set
+
+from avcs.action_broker import (
+    ActionBroker,
+    ActionClass as RepoActionClass,
+    ActionRequest as RepoActionRequest,
+    ActionResult as RepoActionResult,
+    ActionSafetyController,
+    ActionStatus as RepoActionStatus,
+)
+from avcs.capture_adapter import (
+    BaseCaptureAdapter,
+    InteractiveSyntheticCaptureAdapter,
+    SyntheticCaptureAdapter,
+)
+from avcs.human_eye import HumanEye, HumanEyeState
+from avcs_sdk.backend import AVCSBackend
+from avcs_sdk.errors import (
+    BackendActionError,
+    BackendContractError,
+    ClientNotConnectedError,
+    DispatchState,
+    ObservationNotKnownError,
+    StaleTargetError,
+)
+from avcs_sdk.models import (
+    ActionClass,
+    ActionKind,
+    ActionRequest,
+    ActionResult,
+    ActionStatus,
+    NormalizedPoint,
+    Observation,
+    RiskLevel,
+    Target,
+    VerificationEvidence,
+)
+from forge.vision.cortex.motor.driver import VirtualCursorDriver
+
+
+class RepositoryAVCSBackend:
+    """Production runtime backend implementation connecting SDK to ActionBroker."""
+
+    def __init__(
+        self,
+        broker: Optional[ActionBroker] = None,
+        eye: Optional[HumanEye] = None,
+        capture: Optional[BaseCaptureAdapter] = None,
+        driver: Optional[Any] = None,
+        safety_controller: Optional[ActionSafetyController] = None,
+        trusted_auth_tokens: Optional[Set[str]] = None,
+        settle_delay_s: float = 0.001,
+    ) -> None:
+        self.broker = broker
+        self.eye = eye
+        self.capture = capture
+        self.driver = driver
+        self.safety_controller = safety_controller
+        self.trusted_auth_tokens = trusted_auth_tokens if trusted_auth_tokens is not None else set()
+        self.settle_delay_s = settle_delay_s
+
+        self._connected = False
+        self._last_observation: Optional[Observation] = None
+        self._last_eye_state: Optional[HumanEyeState] = None
+
+    async def connect(self) -> None:
+        """Initializes sensory capture and the bounded action broker."""
+        if self._connected:
+            return
+
+        if self.capture is None:
+            self.capture = InteractiveSyntheticCaptureAdapter().open()
+
+        if self.eye is None:
+            self.eye = HumanEye(source=self.capture, threaded_capture=False)
+
+        if self.driver is None:
+            self.driver = VirtualCursorDriver()
+
+        if self.safety_controller is None:
+            self.safety_controller = ActionSafetyController(allow_destructive=False)
+
+        if self.broker is None:
+            self.broker = ActionBroker(
+                eye=self.eye,
+                driver=self.driver,
+                safety_controller=self.safety_controller,
+                settle_delay_s=self.settle_delay_s,
+            )
+
+        self._connected = True
+
+    async def close(self) -> None:
+        """Releases capture sessions and hardware drivers."""
+        if not self._connected:
+            return
+        if self.capture and hasattr(self.capture, "close"):
+            try:
+                self.capture.close()
+            except Exception:
+                pass
+        self._connected = False
+        self._last_observation = None
+        self._last_eye_state = None
+
+    async def observe(self) -> Observation:
+        """Captures a fresh screen frame and returns a normalized observation snapshot."""
+        if not self._connected or self.broker is None:
+            raise ClientNotConnectedError("RepositoryAVCSBackend is not connected.")
+
+        eye_state = await asyncio.to_thread(self.broker.observe)
+        self._last_eye_state = eye_state
+
+        if self.capture and hasattr(self.capture, "get_geometry"):
+            geo = self.capture.get_geometry()
+            w, h = geo.virtual_width, geo.virtual_height
+        else:
+            w, h = 1920, 1080
+
+        obs_id = f"obs-{time.time_ns()}"
+        now = time.time()
+        frame_fingerprint = f"frame-{eye_state.frame_index}-{int(eye_state.timestamp * 1000)}"
+
+        obs = Observation(
+            observation_id=obs_id,
+            captured_at=now,
+            width=w,
+            height=h,
+            active_window="DesktopActiveWindow",
+            coordinate_space="normalized_virtual_desktop",
+            frame_fingerprint=frame_fingerprint,
+        )
+        self._last_observation = obs
+        return obs
+
+    async def find_targets(self, description: str, observation: Observation) -> Sequence[Target]:
+        """Return no candidates until semantic target grounding is implemented."""
+        if not self._connected or self.broker is None:
+            raise ClientNotConnectedError("RepositoryAVCSBackend is not connected.")
+
+        if self._last_observation is None or observation.observation_id != self._last_observation.observation_id:
+            raise StaleTargetError("Observation is not the current frame.")
+        return []
+
+    async def execute(self, request: ActionRequest) -> ActionResult:
+        """Translate supported SDK requests without overstating observed outcomes."""
+        if not self._connected or self.broker is None:
+            raise ClientNotConnectedError("RepositoryAVCSBackend is not connected.")
+
+        # 1. Resolve normalized coordinates
+        if request.point is not None:
+            tx, ty = request.point.x, request.point.y
+        elif request.target is not None:
+            center = request.target.bounds.center
+            tx, ty = center.x, center.y
+        else:
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.BLOCKED,
+                duration_ms=0.0,
+                error_code="TARGET_REQUIRED",
+                message="Action requires an explicit target; the screen center is never used implicitly.",
+                attempt_count=0,
+            )
+
+        # 2. Map ActionKind to broker action_type
+        kind_map = {
+            ActionKind.CLICK: "click",
+            ActionKind.DOUBLE_CLICK: "double_click",
+            ActionKind.TYPE_TEXT: "type",
+            ActionKind.PRESS_KEY: "press_key",
+        }
+        repo_action_type = kind_map.get(request.kind)
+        if repo_action_type is None:
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.BLOCKED,
+                duration_ms=0.0,
+                error_code="UNSUPPORTED_ACTION",
+                message=f"Action kind {request.kind.value!r} is not supported by the repository backend.",
+                attempt_count=0,
+            )
+
+        if request.kind in (ActionKind.TYPE_TEXT, ActionKind.PRESS_KEY):
+            try:
+                focus_state = await asyncio.to_thread(
+                    self.eye.verify_focus, target_point=(tx, ty)
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                return ActionResult(
+                    action_id=request.action_id,
+                    status=ActionStatus.BLOCKED,
+                    duration_ms=0.0,
+                    error_code="FOCUS_VERIFICATION_FAILED",
+                    message=f"Keyboard action blocked because focus could not be verified: {exc}",
+                    attempt_count=0,
+                )
+            if not getattr(focus_state, "is_focused", False):
+                return ActionResult(
+                    action_id=request.action_id,
+                    status=ActionStatus.BLOCKED,
+                    duration_ms=0.0,
+                    error_code="FOCUS_NOT_VERIFIED",
+                    message="Keyboard action blocked because the target has no verified visual focus.",
+                    attempt_count=0,
+                )
+
+        # 3. Map ActionClass
+        class_map = {
+            ActionClass.IDEMPOTENT: RepoActionClass.IDEMPOTENT,
+            ActionClass.CONDITIONAL: RepoActionClass.CONDITIONALLY_REPEATABLE,
+            ActionClass.NON_IDEMPOTENT: RepoActionClass.NON_IDEMPOTENT,
+        }
+        repo_action_class = class_map.get(request.action_class, RepoActionClass.NON_IDEMPOTENT)
+
+        # 4. Enforce Risk & Authorization
+        authorized = True
+        if request.risk == RiskLevel.HIGH:
+            repo_action_class = RepoActionClass.HIGH_RISK
+            if not request.authorization_ref or request.authorization_ref not in self.trusted_auth_tokens:
+                authorized = False
+
+        text_content: Optional[str] = None
+        if request.kind == ActionKind.TYPE_TEXT:
+            text_content = request.text
+        elif request.kind == ActionKind.PRESS_KEY:
+            text_content = request.key
+
+        timeout_ms = min(request.timeout_s * 1000.0, 60000.0)
+
+        # 6. Build repository action request
+        repo_req = RepoActionRequest(
+            action_type=repo_action_type,
+            target_coord=(tx, ty),
+            action_class=repo_action_class,
+            action_id=request.action_id,
+            text_content=text_content,
+            timeout_ms=timeout_ms,
+            authorized=authorized,
+        )
+
+        started = time.perf_counter()
+        try:
+            repo_res: RepoActionResult = await asyncio.to_thread(self.broker.execute, repo_req)
+        except Exception as exc:
+            raise BackendActionError(
+                f"ActionBroker raised unexpected exception during execution: {exc}",
+                dispatch_state=DispatchState.MAY_HAVE_DISPATCHED,
+                error_code="BROKER_EXECUTION_EXCEPTION",
+            ) from exc
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        # 7. A prose postcondition is not proof of the requested application state.
+        if request.expected_postcondition and repo_res.status != RepoActionStatus.BLOCKED:
+            status = ActionStatus.AMBIGUOUS
+            evidence = VerificationEvidence(
+                verified=False,
+                method="action_broker_visual_reaction_only",
+                observed_at=time.time(),
+                details={
+                    "evidence": repo_res.evidence,
+                    "requested_postcondition": request.expected_postcondition,
+                },
+            )
+        elif repo_res.status == RepoActionStatus.CONFIRMED:
+            evidence = VerificationEvidence(
+                verified=True,
+                method="action_broker_visual_reaction",
+                observed_at=time.time(),
+                details={
+                    "evidence": repo_res.evidence,
+                    "optical_ripple_energy": str(repo_res.optical_ripple_energy),
+                    "photometric_delta": str(repo_res.photometric_delta),
+                },
+            )
+            status = ActionStatus.CONFIRMED
+        elif repo_res.status == RepoActionStatus.BLOCKED:
+            status = ActionStatus.BLOCKED
+            evidence = None
+        elif repo_res.status == RepoActionStatus.AMBIGUOUS:
+            status = ActionStatus.AMBIGUOUS
+            evidence = VerificationEvidence(
+                verified=False,
+                method="action_broker_ripple_and_postcondition",
+                observed_at=time.time(),
+                details={"evidence": repo_res.evidence},
+            )
+        else:
+            status = ActionStatus.FAILED
+            evidence = None
+
+        return ActionResult(
+            action_id=request.action_id,
+            status=status,
+            duration_ms=round(elapsed_ms, 3),
+            evidence=evidence,
+            error_code=repo_res.error_category,
+            message=repo_res.evidence,
+            attempt_count=repo_res.recovery_attempts,
+        )

@@ -1,0 +1,31 @@
+{
+  "benchmark_timestamp": "2026-10-18T05:27:41.615157+00:00",
+  "checkpoint_file": "runs/weights/candidates/avcs_system1_v1.pt",
+  "checkpoint_sha256": "c30eb0686da96eb6f67981021bcb646b60b3ed6b050927ee97085e59ee6125a4",
+  "model_architecture": "AVCSSystem1V1",
+  "total_parameters": 1663564,
+  "integration_results": {
+    "known_control_handling_pct": 80.0,
+    "absent_target_safe_halt_pct": 100.0,
+    "coordinate_injection_rejection_pct": 100.0,
+    "stale_observation_rejection_pct": 100.0,
+    "provider_error_recovered": true,
+    "zero_pixel_leakage_verified": true
+  },
+  "latency_profile_ms": {
+    "step_p50": 23.8,
+    "step_p95": 62.26,
+    "perception_p50": 18.52,
+    "perception_p95": 56.85,
+    "provider_p50": 5.19,
+    "provider_p95": 5.42
+  },
+  "gates": {
+    "coordinate_injection_rejection_100": true,
+    "stale_frame_rejection_100": true,
+    "absent_target_safe_halt_ge_90": true,
+    "zero_pixel_leakage": true,
+    "shadow_mode_inhibition_verified": true,
+    "fail_closed_action_authorized_invariant": true
+  }
+}
