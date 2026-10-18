@@ -101,7 +101,7 @@ In live testing on the operator's actual 1920×1200 physical display, four criti
 * **The Problem:** `HumanEye`'s ventral scene category head was trained on synthetic UI templates across only 8 broad classes (`browser_webpage`, `code_editor`, `terminal`, `settings_panel`, `media_player`, `document`, `desktop_canvas`, `modal_dialog`).
 * **The Reality:** When exposed to a real-world dark-mode VS Code IDE window with split editors, terminal tabs, and file trees, the model became confused: it predicted `browser_webpage` with only **50.1% confidence** and flagged 49.9% uncertainty (*"Visual layout appears ambiguous or unclassified"*).
 
-### Roadblock 3: The "Insaan Ki Tarha Speech" Illusion
+### Roadblock 3: The "Human-Like Speech" Illusion
 * **The Problem:** System 1 has no generative language model inside it.
 * **The Reality:** The generated observations (e.g. *"Display is active. Primary context: Browser Webpage (stable)..."*) are **deterministic Python string templates** slotting in predicted hotspot counts and category labels. There is no conversational reasoning in System 1.
 

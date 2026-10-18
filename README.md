@@ -34,7 +34,7 @@ Strip away all marketing, hype, and academic sugar-coating. Here is the exact te
 
 ---
 
-## 2. What Problems Does This Model Actually Solve? (Kis Kis Problem Ko Solve Karta Hai)
+## 2. What Problems Does This Model Actually Solve? (Industry Bottlenecks Solved)
 
 This model was engineered to solve 6 specific, fatal bottlenecks that plague existing computer-use AI agents:
 
@@ -64,7 +64,7 @@ This model was engineered to solve 6 specific, fatal bottlenecks that plague exi
 
 ---
 
-## 3. The Breakthrough: How the Model Works & What Makes It Powerful (Achhi Baatein & Flow Diagrams)
+## 3. Architecture & Breakthroughs: How the Model Works (Pipeline & Flowcharts)
 
 Despite the clear limitations in arbitrary text reading and abstract reasoning, **what has been built in System 1 is an extraordinary, foundational engineering achievement**.
 
@@ -87,7 +87,7 @@ Despite the clear limitations in arbitrary text reading and abstract reasoning, 
 ```mermaid
 flowchart TD
     subgraph Operator["Operator / User Layer"]
-        User["Operator (Nandkishor Sir)"]
+        User["Operator (User / Client)"]
     end
 
     subgraph System2["System 2 — Cognitive Brain & Speech (Cloud/Local VLM)"]
@@ -221,7 +221,7 @@ When the **System 2 Cognitive VLM Bridge** is wired up with this **System 1 Visu
 
 ---
 
-## 4. Where Does This Model Fail? (Model Kaha Fail Ho Raha Hai — Zero Sugar-Coating)
+## 4. Where Does This Model Fail? (Current Limitations & Failure Modes — Zero Sugar-Coating)
 
 In live testing on the operator's actual 1920×1200 physical display, the model's hard limits and failure modes were exposed directly:
 
@@ -244,7 +244,7 @@ In live testing on the operator's actual 1920×1200 physical display, the model'
 * **The Reality:** When tested on the operator's live 1920×1200 desktop running **Visual Studio Code** in dark mode, the model predicted `browser_webpage` with only **50.1% confidence** and flagged 49.9% uncertainty (*"Visual layout appears ambiguous or unclassified"*).
 * **Why it fails:** `HumanEye`'s ventral scene category head was trained on synthetic UI templates across only 8 broad classes (`browser_webpage`, `code_editor`, `terminal`, `settings_panel`, `media_player`, `document`, `desktop_canvas`, `modal_dialog`). Real-world IDEs with split panes, dark backgrounds, terminal tabs, and file trees look ambiguous to its small 16×16 spatial feature grid.
 
-### Failure 3: The "Insaan Ki Tarha Speech" Illusion
+### Failure 3: The "Human-Like Speech" Illusion
 * **The Reality:** **System 1 does NOT possess conversational intelligence and does not speak like an AI.**
 * **Why it fails:** There is NO language model inside System 1. The emitted natural language text:
   > *"Display is active. Primary context: Browser Webpage (stable). Visible interactive controls: 2 clickables in center, 1 clickable in footer... Visual layout appears ambiguous or unclassified."*  
