@@ -477,10 +477,10 @@ class InteractiveSyntheticCaptureAdapter(SyntheticCaptureAdapter):
         super().__init__(width=width, height=height)
         self._motion_patch: Optional[Tuple[int, int, int]] = None
 
-    def trigger_motion(self, x: float, y: float) -> None:
+    def trigger_motion(self, x: float, y: float, radius: int = 16) -> None:
         px = int(round(x * (self.width - 1)))
         py = int(round(y * (self.height - 1)))
-        self._motion_patch = (px, py, 32)
+        self._motion_patch = (px, py, radius)
 
     def grab(self) -> np.ndarray:
         self._tick += 1

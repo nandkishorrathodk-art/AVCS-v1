@@ -1,0 +1,12 @@
+{
+  "schema": "avcs.cleanroom.rights-trust.v1",
+  "trusted_signers": [
+    {
+      "key_id": "nandkishor-rathod-2026",
+      "principal": "Nandkishor Rathod <contact@parthlabs.in>",
+      "authority_reference": "Sole Rights Holder & Executive Authority, Parth Labs",
+      "ed25519_public_key_base64": "kCqELcPxniog3FaC9pyNZijsNNRwD7ClRfSVgglv2nc=",
+      "fingerprint_sha256": "8d515e2939b8168188c798c9fce6a835a5587d34b3d36b8ba018231e7869d11f"
+    }
+  ]
+}

@@ -44,9 +44,15 @@ MOTION_TILE = 0.03        # tile motion above this counts as "moving"
 
 def to_gray(frame: np.ndarray) -> np.ndarray:
     """RGB uint8 -> float luminance in [0, 1]."""
+    if frame.ndim == 2:
+        return frame / 255.0 if frame.dtype == np.uint8 else frame.astype(np.float32)
+    if frame.dtype == np.uint8:
+        return (
+            frame[..., 0].astype(np.float32) * (0.299 / 255.0)
+            + frame[..., 1].astype(np.float32) * (0.587 / 255.0)
+            + frame[..., 2].astype(np.float32) * (0.114 / 255.0)
+        )
     f = frame.astype(np.float32)
-    if f.ndim == 2:
-        return f / 255.0
     return (0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]) / 255.0
 
 

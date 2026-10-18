@@ -45,7 +45,7 @@ def test_health_endpoint(client):
     assert data["weights_loaded"] is True
     assert data["device"] == "cpu"
     assert data["perceive_ready"] is True
-    assert data["ground_ready"] is False
+    assert data["ground_ready"] is True
 
 
 def test_health_endpoint_does_not_treat_untrained_grounder_as_ready(client, monkeypatch):

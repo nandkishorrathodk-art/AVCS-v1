@@ -47,6 +47,49 @@ class ActionStatus(str, enum.Enum):
 
 
 @dataclass(frozen=True)
+class PostconditionSpec:
+    """Formal specification of an expected visual postcondition."""
+    postcondition_type: str = "any"  # "optical_ripple", "text_change", "state_transition", "window_launch", "custom"
+    target_coord: Optional[Tuple[float, float]] = None
+    target_region: Optional[Tuple[float, float, float, float]] = None
+    expected_text: Optional[str] = None
+    min_ripple_threshold: float = 0.015
+    min_photometric_delta: float = 0.035
+    timeout_ms: float = 1500.0
+    predicate: Optional[Callable[[HumanEyeState, HumanEyeState], bool]] = None
+
+
+@dataclass(frozen=True)
+class VerificationDetail:
+    """Detailed visual verification evidence formatted for System 2 privacy boundary."""
+    status: str
+    verified: bool
+    optical_ripple_energy: float
+    photometric_delta: float
+    surprise_pulse: float
+    state_transition_detected: bool
+    causal_summary: str
+    recovery_attempts: int
+    elapsed_ms: float
+    fresh_frame_sequence: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Encapsulated representation: zero raw coordinates or tensors."""
+        return {
+            "status": self.status,
+            "verified": self.verified,
+            "optical_ripple_energy": round(self.optical_ripple_energy, 4),
+            "photometric_delta": round(self.photometric_delta, 4),
+            "surprise_pulse": round(self.surprise_pulse, 4),
+            "state_transition_detected": self.state_transition_detected,
+            "causal_summary": self.causal_summary,
+            "recovery_attempts": self.recovery_attempts,
+            "elapsed_ms": round(self.elapsed_ms, 2),
+            "fresh_frame_sequence": self.fresh_frame_sequence,
+        }
+
+
+@dataclass(frozen=True)
 class ActionRequest:
     """Bounded, validated interaction request."""
     action_type: str                                       # "click", "double_click", "type", "press_key"
@@ -54,7 +97,7 @@ class ActionRequest:
     action_class: ActionClass = ActionClass.NON_IDEMPOTENT
     action_id: str = field(default_factory=lambda: f"act_{uuid.uuid4().hex[:10]}")
     text_content: Optional[str] = None
-    expected_postcondition: Optional[Callable[[HumanEyeState, HumanEyeState], bool]] = None
+    expected_postcondition: Optional[Any] = None          # Callable or PostconditionSpec
     precondition_validator: Optional[Callable[[HumanEyeState], bool]] = None
     authorized: bool = False                               # Required true for HIGH_RISK actions
     target_window_title: Optional[str] = None
@@ -75,10 +118,29 @@ class ActionResult:
     photometric_delta: float
     recovery_attempts: int
     error_category: Optional[str] = None
+    verification_detail: Optional[VerificationDetail] = None
 
     @property
     def is_confirmed(self) -> bool:
         return self.status == ActionStatus.CONFIRMED
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Encapsulated System 2 representation (zero raw coordinates or tensors)."""
+        return {
+            "action_id": self.action_id,
+            "status": self.status.value,
+            "action_type": self.action_type,
+            "elapsed_ms": round(self.elapsed_ms, 2),
+            "evidence": self.evidence,
+            "optical_ripple_energy": round(self.optical_ripple_energy, 4),
+            "photometric_delta": round(self.photometric_delta, 4),
+            "recovery_attempts": self.recovery_attempts,
+            "error_category": self.error_category,
+            "is_confirmed": self.is_confirmed,
+            "verification_detail": (
+                self.verification_detail.to_dict() if self.verification_detail else None
+            ),
+        }
 
 
 class ActionSafetyController:
@@ -228,6 +290,7 @@ class ActionBroker:
             )
 
         # 3. Dispatch Physical Input to OS
+        pre_seq = getattr(self.eye.source, "sequence_number", getattr(self.eye, "frame_count", 0))
         tx, ty = request.target_coord
         dispatch_error: Optional[Exception] = None
         try:
@@ -272,9 +335,9 @@ class ActionBroker:
         if self.settle_delay_s > 0:
             time.sleep(min(self.settle_delay_s, max(0.0, deadline - time.perf_counter())))
 
-        # 4. Capture Post-State & Verify Outcome
+        # 4. Capture Post-State & Verify Outcome (Strictly fresh frame S > S_pre)
         try:
-            post_state = self.eye.observe()
+            post_state = self.eye.observe(min_sequence=pre_seq)
         except Exception as exc:
             elapsed = (time.perf_counter() - t0) * 1000.0
             return ActionResult(
@@ -316,18 +379,22 @@ class ActionBroker:
             pre_local = self.verifier.calculate_local_ripple(request.target_coord, pre_state.motion_field)
             photo_delta = abs(ripple_energy - pre_local)
 
-        # 5. Semantic Postcondition Evaluation
-        postcondition_passed = False
-        if request.expected_postcondition is not None:
-            try:
-                postcondition_passed = request.expected_postcondition(pre_state, post_state)
-            except Exception as exc:
-                print(f"[ActionBroker] Postcondition evaluation exception: {exc}")
-                postcondition_passed = False
-
         # Structural UI transition detected
         diff = post_state.visual_diff
         structural_change = bool(diff and (diff.added_elements or diff.removed_ids or diff.modified_elements))
+
+        # 5. Semantic Postcondition Evaluation
+        postcondition_passed = False
+        if request.expected_postcondition is not None:
+            postcondition_passed = self._evaluate_postcondition(
+                request.expected_postcondition,
+                pre_state,
+                post_state,
+                request.target_coord,
+                ripple_energy,
+                photo_delta,
+                structural_change,
+            )
 
         # Decision Logic: Determine Terminal State
         status = ActionStatus.FAILED
@@ -410,10 +477,15 @@ class ActionBroker:
                     break
 
                 if request.expected_postcondition is not None:
-                    try:
-                        passed = request.expected_postcondition(pre_retry, post_retry)
-                    except Exception:
-                        passed = False
+                    passed = self._evaluate_postcondition(
+                        request.expected_postcondition,
+                        pre_retry,
+                        post_retry,
+                        (rx, ry),
+                        retry_ripple,
+                        photo_delta,
+                        bool(post_retry.visual_diff and (post_retry.visual_diff.added_elements or post_retry.visual_diff.removed_ids)),
+                    )
                     if passed:
                         status = ActionStatus.CONFIRMED
                         evidence_msg = f"Recovered via interior micro-jitter ({ox:+.3f}, {oy:+.3f}) and verified semantic postcondition."
@@ -427,6 +499,23 @@ class ActionBroker:
                         break
 
         elapsed = (time.perf_counter() - t0) * 1000.0
+        v_detail = VerificationDetail(
+            status=status.value,
+            verified=status == ActionStatus.CONFIRMED,
+            optical_ripple_energy=ripple_energy,
+            photometric_delta=photo_delta,
+            surprise_pulse=float(getattr(post_state, "surprise_score", 0.0)),
+            state_transition_detected=structural_change,
+            causal_summary=evidence_msg,
+            recovery_attempts=recovery_attempts,
+            elapsed_ms=elapsed,
+            fresh_frame_sequence=(
+                getattr(post_state, "frame_sequence", None)
+                or getattr(post_state, "frame_index", None)
+                or getattr(getattr(self, "eye", None), "source", None)
+                and getattr(self.eye.source, "sequence_number", None)
+            ),
+        )
         return ActionResult(
             action_id=request.action_id,
             status=status,
@@ -438,7 +527,52 @@ class ActionBroker:
             photometric_delta=photo_delta,
             recovery_attempts=recovery_attempts,
             error_category=None if status == ActionStatus.CONFIRMED else status.value.upper(),
+            verification_detail=v_detail,
         )
+
+    def _evaluate_postcondition(
+        self,
+        expected: Any,
+        pre_state: HumanEyeState,
+        post_state: HumanEyeState,
+        target_coord: Tuple[float, float],
+        ripple_energy: float,
+        photo_delta: float,
+        structural_change: bool,
+    ) -> bool:
+        if expected is None:
+            return False
+        if isinstance(expected, PostconditionSpec):
+            if expected.predicate is not None:
+                try:
+                    return bool(expected.predicate(pre_state, post_state))
+                except Exception:
+                    return False
+            ptype = expected.postcondition_type
+            if ptype == "optical_ripple":
+                tc = expected.target_coord or target_coord
+                r = self.verifier.calculate_local_ripple(tc, post_state.motion_field)
+                return r >= expected.min_ripple_threshold
+            elif ptype == "text_change":
+                return photo_delta >= expected.min_photometric_delta or bool(
+                    post_state.visual_diff and (post_state.visual_diff.modified_elements or post_state.visual_diff.added_elements)
+                )
+            elif ptype == "state_transition":
+                return structural_change
+            elif ptype == "window_launch":
+                return structural_change or getattr(post_state, "surprise_score", 0.0) > 0.3
+            else:
+                return (
+                    ripple_energy >= expected.min_ripple_threshold
+                    or photo_delta >= expected.min_photometric_delta
+                    or structural_change
+                )
+        elif callable(expected):
+            try:
+                return bool(expected(pre_state, post_state))
+            except Exception:
+                return False
+        return False
 
     def _dispatch_input(self, request: ActionRequest, x: float, y: float) -> None:
         """Dispatches concrete mouse/keyboard events through cursor driver."""

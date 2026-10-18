@@ -1,0 +1,60 @@
+{
+  "benchmark_timestamp": "2026-10-18T06:30:37.335710+00:00",
+  "checkpoint_file": "runs/weights/candidates/avcs_system1_v1.pt",
+  "checkpoint_sha256": "c30eb0686da96eb6f67981021bcb646b60b3ed6b050927ee97085e59ee6125a4",
+  "model_architecture": "AVCSSystem1V1",
+  "total_parameters": 1663564,
+  "evaluation_dataset": {
+    "held_out_frames": 40,
+    "negative_frames": 30,
+    "total_ground_truth_targets": 316,
+    "total_word_test_crops": 316
+  },
+  "spatial_proposer": {
+    "overall_recall_pct": 71.84,
+    "small_target_recall_pct": 70.27,
+    "medium_target_recall_pct": 81.9,
+    "large_target_recall_pct": 60.67,
+    "precision_pct": 59.49,
+    "category_accuracy_pct": 77.5,
+    "proposals_per_frame": 12.7,
+    "negative_screen_false_proposals": 45,
+    "latency_p50_ms": 10.53,
+    "latency_p95_ms": 15.37
+  },
+  "query_grounding": {
+    "top1_accuracy_pct": 87.97,
+    "point_in_box_accuracy_pct": 89.87,
+    "centroid_pixel_error_median": 1.7,
+    "centroid_pixel_error_p95": 16.14,
+    "negative_query_rejection_pct": 100.0,
+    "blank_screen_false_positives": 0
+  },
+  "word_recognition": {
+    "top1_accuracy_pct": 59.49,
+    "top3_accuracy_pct": 79.75,
+    "mean_cer_pct": 35.58
+  },
+  "temporal_perception": {
+    "verified": true,
+    "flow_energy_on_change": 1.4145,
+    "mean_motion_on_change": 0.0473
+  },
+  "cpu_performance": {
+    "latency_e2e_p50_ms": 169.19,
+    "latency_e2e_p95_ms": 216.87,
+    "sustained_fps": 5.9,
+    "peak_rss_mb": 258.7
+  },
+  "gates": {
+    "spatial_recall_ge_70": true,
+    "small_target_recall_ge_70": true,
+    "grounding_accuracy_ge_85": true,
+    "blank_screen_fp_is_zero": true,
+    "negative_query_rejection_ge_90": true,
+    "word_top1_ge_50": true,
+    "word_top3_ge_75": true,
+    "pure_pixel_compliance": true,
+    "fail_closed_authorization": true
+  }
+}

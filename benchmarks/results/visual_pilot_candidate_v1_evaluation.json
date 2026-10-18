@@ -1,0 +1,97 @@
+{
+  "checkpoint": "runs/weights/candidates/candidate_m3_visual_pilot_v1.pt",
+  "sha256": "f22fdaf327c041d429c41c0bc34f45d1912a268e8d901c426106db446d8dc6bf",
+  "parameters": 337651,
+  "category_accuracy_pct": 95.0,
+  "macro_f1": 0.9479,
+  "affordance_accuracy_pct": 95.17,
+  "region_recall_pct": 46.52,
+  "mean_region_iou": 0.359,
+  "element_kind_accuracy_pct": 88.44,
+  "negative_fp_count": 74,
+  "negative_screens_tested": 30,
+  "latency_p50_ms": 9.0,
+  "latency_p95_ms": 10.61,
+  "confusion_matrix": {
+    "desktop_canvas": {
+      "desktop_canvas": 5,
+      "editor_code": 0,
+      "browser_webpage": 0,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "editor_code": {
+      "desktop_canvas": 0,
+      "editor_code": 5,
+      "browser_webpage": 0,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "browser_webpage": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 5,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "terminal_shell": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 0,
+      "terminal_shell": 5,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "modal_dialog": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 0,
+      "terminal_shell": 0,
+      "modal_dialog": 5,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "form_input": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 0,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 5,
+      "media_playback": 0,
+      "settings_panel": 0
+    },
+    "media_playback": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 0,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 5,
+      "settings_panel": 0
+    },
+    "settings_panel": {
+      "desktop_canvas": 0,
+      "editor_code": 0,
+      "browser_webpage": 2,
+      "terminal_shell": 0,
+      "modal_dialog": 0,
+      "form_input": 0,
+      "media_playback": 0,
+      "settings_panel": 3
+    }
+  }
+}

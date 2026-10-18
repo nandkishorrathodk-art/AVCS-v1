@@ -1,0 +1,12 @@
+{
+  "schema": "avcs.cleanroom.rights-approval.v1",
+  "dataset_manifest_sha256": "0a8fccbceb115307edff1863628680c725756bd613ff4fa63e7122f614fb97d0",
+  "permissions": {
+    "internal_training": "GRANTED",
+    "commercial_inference": "DENIED",
+    "public_weight_redistribution": "DENIED",
+    "source_dataset_redistribution": "DENIED"
+  },
+  "signer_key_fingerprint_sha256": "8d515e2939b8168188c798c9fce6a835a5587d34b3d36b8ba018231e7869d11f",
+  "signature_ed25519_base64": "vcZ1SU+1ZtxFni+y0a7v8F/ZiMojb23fyQZLBRPoPll3SKVXIQ8fCm0EnXdeaHcpljOv/LJ/069DvXeYsDeyBA=="
+}

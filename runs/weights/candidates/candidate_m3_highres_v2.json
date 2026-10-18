@@ -1,0 +1,20 @@
+{
+  "experiment_id": "AVCS-CANDIDATE-M3-HR-V2",
+  "source_checkpoint": "runs/weights/candidates/candidate_m3_highres_v1.pt",
+  "architecture": "GoalConditionedGrounder_CorticalBackbone2M_FPN_CalibratedPresence",
+  "total_parameters": 1354050,
+  "target_presence_threshold": 0.55,
+  "measured_metrics_test_held_out": {
+    "top_1_accuracy_pct": 91.77,
+    "hits": "290/316",
+    "median_centroid_error_px": 1.78,
+    "mean_centroid_error_px": 4.41,
+    "p95_centroid_error_px": 16.07,
+    "mean_iou": 0.301,
+    "ungroundable_query_rejection_pct": 96.5,
+    "blank_screen_fp_count": 9,
+    "blank_screen_total": 30,
+    "center_collapse_detected": false,
+    "passed_acceptance_gates": false
+  }
+}

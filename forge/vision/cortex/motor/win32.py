@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import random
 import time
 from ctypes import wintypes
-from typing import List, Set, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe
 
@@ -464,44 +465,70 @@ class Win32CursorDriver:
         clear_first: bool = False,
         press_enter: bool = False,
         literal_mode: bool = False,
+        focus_check_fn: Optional[Callable[[], bool]] = None,
+        jitter_ms: int = 10,
     ) -> None:
         """Types string directly into active focus using SendInput Unicode events.
 
         Args:
             text: Text string to type.
             key_delay_ms: Inter-character delay in ms (default 25ms to satisfy modern WinUI/TSF event loops).
-            clear_first: Select all (Ctrl+A) and delete before typing.
+            clear_first: Select all (Ctrl+A) and delete before typing, guarded against terminals.
             press_enter: Press Enter after finishing typing.
             literal_mode: When True, prevents interpreting escape characters (e.g. \\n, \\t) as Enter/Tab.
+            focus_check_fn: Optional predicate queried before and mid-typing; aborts immediately if focus lost.
+            jitter_ms: Inter-keystroke cadence variation in ms (biological cadence).
         """
         self.check_hardware_failsafe()
-        if clear_first:
-            self.press_hotkey("ctrl", "a")
-            time.sleep(0.04)
-            self.press_key("backspace")
-            time.sleep(0.04)
+        if focus_check_fn is not None and not focus_check_fn():
+            from avcs.perception.focus import FocusLostError
+            raise FocusLostError("Active window or focus lost prior to typing.")
 
-        delay_sec = max(0.0, key_delay_ms / 1000.0)
+        if clear_first:
+            # Terminal Protection Guard
+            is_terminal = False
+            try:
+                hwnd = self.user32.GetForegroundWindow()
+                if hwnd:
+                    length = self.user32.GetWindowTextLengthW(hwnd)
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    self.user32.GetWindowTextW(hwnd, buf, length + 1)
+                    title = buf.value.lower()
+                    is_terminal = any(term in title for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
+            except Exception:
+                pass
+
+            if is_terminal:
+                self.press_hotkey("ctrl", "u")
+            else:
+                self.press_hotkey("ctrl", "a")
+                time.sleep(0.04)
+                self.press_key("backspace")
+                time.sleep(0.04)
+
         if literal_mode:
-            for ch in text:
-                self.check_hardware_failsafe()
-                self.type_char(ch)
-                if delay_sec > 0:
-                    time.sleep(delay_sec)
+            chars_to_type = text
         else:
-            normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
-            for ch in normalized_text:
-                self.check_hardware_failsafe()
-                if ch == "\n":
-                    self.press_key(VK_RETURN)
-                elif ch == "\t":
-                    self.press_key(VK_TAB)
-                elif ch == "\b":
-                    self.press_key(VK_BACK)
-                else:
-                    self.type_char(ch)
-                if delay_sec > 0:
-                    time.sleep(delay_sec)
+            chars_to_type = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        for idx, ch in enumerate(chars_to_type):
+            self.check_hardware_failsafe()
+            if focus_check_fn is not None and not focus_check_fn():
+                from avcs.perception.focus import FocusLostError
+                raise FocusLostError(f"Active window or focus lost mid-typing at character index {idx} ('{ch}').")
+
+            if not literal_mode and ch == "\n":
+                self.press_key(VK_RETURN)
+            elif not literal_mode and ch == "\t":
+                self.press_key(VK_TAB)
+            elif not literal_mode and ch == "\b":
+                self.press_key(VK_BACK)
+            else:
+                self.type_char(ch)
+
+            # Biological cadence delay with jitter
+            char_delay = max(0.005, (key_delay_ms + random.uniform(-jitter_ms, jitter_ms)) / 1000.0)
+            time.sleep(char_delay)
 
         if press_enter:
             time.sleep(0.04)

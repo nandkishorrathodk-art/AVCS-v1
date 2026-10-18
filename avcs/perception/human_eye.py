@@ -98,6 +98,13 @@ class HumanEyeState:
     def is_overlay(self) -> bool:
         return self.stability == "overlay"
 
+    @property
+    def scene_observation(self) -> Any:
+        """Returns a privacy-preserving SceneObservation for System 2."""
+        from avcs.observation import VisualObservationEngine
+        engine = VisualObservationEngine()
+        return engine.generate(self)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "frame_index": self.frame_index,
@@ -559,12 +566,14 @@ class HumanEye(nn.Module):
         weights_path: Optional[str] = None,
         affordance_action_type: str = "all",
         affordance_top_k: int = 5,
+        bus: Optional[Any] = None,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
         self.input_size = input_size
         self.affordance_action_type = affordance_action_type
         self.affordance_top_k = affordance_top_k
+        self.stream_bus = bus
 
         # Optimize CPU threads for real-time biological visual cortex throughput
         # Empirical measurement: 1 thread avoids OpenMP barrier synchronization thrashing
@@ -710,11 +719,41 @@ class HumanEye(nn.Module):
             # Saccade gaze directly to target coordinate
             self.pursuit.update(detected_target=res.target_coord)
 
+            # Broadcast saccade telemetry packet
+            if self.stream_bus is not None:
+                try:
+                    from avcs.stream.neuro_stream import NeuroPacket
+                    saccade_pkt = NeuroPacket(
+                        timestamp=time.time(),
+                        seq=self.frame_count,
+                        fixation=res.target_coord,
+                        motor_flow=(0.0, 0.0),
+                        contact_acquired=True,
+                        primary_category=f"grounding:{query}",
+                        stability_state="tracking",
+                        surprise_score=0.0,
+                        inference_ms=res.latency_ms,
+                        action_hotspots=[(res.target_coord[0], res.target_coord[1], query, res.confidence)],
+                    )
+                    self.stream_bus.publish(saccade_pkt)
+                except Exception:
+                    pass
+
             # Inspect high-acuity central fovea
             if inspect and f is not None:
                 self._last_foveal_inspection = self.fovea_engine.inspect(f, res.target_coord)
 
             return res
+
+    def attach_stream_bus(self, bus: Any) -> None:
+        """Attaches a 60 FPS NeuroStreamBus for real-time telemetry publishing."""
+        with self._lock:
+            self.stream_bus = bus
+
+    def detach_stream_bus(self) -> None:
+        """Detaches the active telemetry bus."""
+        with self._lock:
+            self.stream_bus = None
 
     def unlock_target(self) -> None:
         """Unlocks active target and resumes autonomous motion tracking."""
@@ -807,28 +846,60 @@ class HumanEye(nn.Module):
         """Emits ultra-compact multi-turn LLM agent prompt (<300 tokens, >93% token savings)."""
         return self.memory.get_context_prompt(max_delta_turns=max_delta_turns)
 
+    def capture_fresh_frame(
+        self,
+        min_sequence: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> Tuple[np.ndarray, int]:
+        """Captures a fresh frame strictly after min_sequence from source."""
+        if hasattr(self.source, "grab_with_sequence"):
+            return self.source.grab_with_sequence(min_sequence=min_sequence, timeout=timeout)
+        frame = self.source.grab()
+        seq = getattr(self.source, "sequence_number", self.frame_count)
+        return frame, seq
+
     @torch.inference_mode()
     def observe(
         self,
         frame: Optional[np.ndarray] = None,
         lock_target: Optional[Tuple[float, float]] = None,
         current_cursor: Optional[Tuple[float, float]] = None,
+        *,
+        frame_sequence: Optional[int] = None,
+        min_sequence: Optional[int] = None,
     ) -> HumanEyeState:
         """Executes a single end-to-end real-time visual perception tick (<15ms, >60 FPS)."""
         with self._lock:
-            return self._observe_unlocked(frame=frame, lock_target=lock_target, current_cursor=current_cursor)
+            return self._observe_unlocked(
+                frame=frame,
+                lock_target=lock_target,
+                current_cursor=current_cursor,
+                frame_sequence=frame_sequence,
+                min_sequence=min_sequence,
+            )
 
     def _observe_unlocked(
         self,
         frame: Optional[np.ndarray] = None,
         lock_target: Optional[Tuple[float, float]] = None,
         current_cursor: Optional[Tuple[float, float]] = None,
+        frame_sequence: Optional[int] = None,
+        min_sequence: Optional[int] = None,
     ) -> HumanEyeState:
         t0 = time.perf_counter()
 
-        # 1. Grab raw visual frame
+        # 1. Grab raw visual frame (sequence synchronized if min_sequence specified)
         if frame is None:
-            frame = self.source.grab()
+            if min_sequence is not None and hasattr(self.source, "grab_with_sequence"):
+                frame, seq = self.source.grab_with_sequence(min_sequence=min_sequence)
+                if frame_sequence is None:
+                    frame_sequence = seq
+            elif hasattr(self.source, "grab_with_sequence"):
+                frame, seq = self.source.grab_with_sequence()
+                if frame_sequence is None:
+                    frame_sequence = seq
+            else:
+                frame = self.source.grab()
 
         self.frame_count += 1
 
@@ -1002,7 +1073,33 @@ class HumanEye(nn.Module):
         )
         self._last_state = state
 
-        # 7. Zero-Latency Surprise Reflex Dispatch
+        # 7. Publish to real-time telemetry bus
+        if self.stream_bus is not None:
+            try:
+                from avcs.stream.neuro_stream import NeuroPacket
+                source_seq = (
+                    frame_sequence
+                    if frame_sequence is not None
+                    else getattr(self.source, "frame_sequence", None)
+                )
+                pkt = NeuroPacket(
+                    timestamp=state.timestamp,
+                    seq=self.frame_count,
+                    fixation=state.gaze_fixation,
+                    motor_flow=state.motor_flow,
+                    contact_acquired=state.contact_acquired,
+                    primary_category=state.primary_category,
+                    stability_state=state.stability,
+                    surprise_score=state.surprise_score,
+                    inference_ms=state.latency_ms,
+                    action_hotspots=list(state.affordance_hotspots or []),
+                    source_frame_sequence=source_seq,
+                )
+                self.stream_bus.publish(pkt)
+            except Exception:
+                pass
+
+        # 8. Zero-Latency Surprise Reflex Dispatch
         for thresh, cb in self._surprise_callbacks:
             if surprise >= thresh:
                 try:
@@ -1044,6 +1141,14 @@ class HumanEye(nn.Module):
     def see(self, frame: Optional[np.ndarray] = None) -> HumanEyeState:
         """Biological visual perception alias for observe()."""
         return self.observe(frame=frame)
+
+    def observe_scene(self, frame: Optional[np.ndarray] = None) -> Any:
+        """Executes perception and returns an allowlisted SceneObservation."""
+        state = self.observe(frame=frame)
+        if not hasattr(self, "_observation_engine"):
+            from avcs.observation import VisualObservationEngine
+            self._observation_engine = VisualObservationEngine()
+        return self._observation_engine.generate(state, frame=frame)
 
     def inspect(
         self,

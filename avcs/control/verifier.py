@@ -169,6 +169,7 @@ class VisualRippleVerifier:
         target: Tuple[float, float],
         pre_state: HumanEyeState,
         settle_ms: float = 60.0,
+        min_sequence: Optional[int] = None,
     ) -> VerificationResult:
         """Verifies if an action produced a physical optical ripple or UI state transition."""
         t0 = time.perf_counter()
@@ -177,8 +178,8 @@ class VisualRippleVerifier:
         if settle_ms > 0:
             time.sleep(settle_ms / 1000.0)
 
-        # Perceive current screen state
-        post_state = self.eye.observe()
+        # Perceive current screen state (strictly fresh frame if min_sequence specified)
+        post_state = self.eye.observe(min_sequence=min_sequence)
 
         # 1. Local Optical Flow Ripple
         ripple_energy = self.calculate_local_ripple(target, post_state.motion_field)
@@ -353,6 +354,7 @@ class VisualRippleVerifier:
                 )
 
         # Tier 1: Primary Action Execution
+        pre_seq = getattr(getattr(self.eye, "source", None), "sequence_number", getattr(self.eye, "frame_count", 0))
         pre_state = self.eye.observe()
         self._move_cursor(tx, ty)
 
@@ -368,7 +370,7 @@ class VisualRippleVerifier:
             elif text_content:
                 raise RuntimeError("Cursor driver does not support text entry.")
 
-        res = self.verify_action(f"{action_type}@{target}", target, pre_state)
+        res = self.verify_action(f"{action_type}@{target}", target, pre_state, min_sequence=pre_seq)
         if res.is_successful:
             return res
 

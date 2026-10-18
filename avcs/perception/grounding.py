@@ -207,10 +207,12 @@ class FovealAcuityEngine:
         load_weights: bool = True,
         weights_path: Optional[str] = None,
         refine_subpixel: bool = True,
+        fovea_patch_size: int = 128,
     ) -> None:
         self.device = torch.device(device)
         self.radius_frac = fovea_radius_frac
         self.input_size = input_size
+        self.patch_size = fovea_patch_size
         self.refine_subpixel = refine_subpixel
         self.head = FovealAcuityHead().to(self.device).eval()
         self.weights_loaded: bool = False
@@ -325,26 +327,34 @@ class FovealAcuityEngine:
         frame: np.ndarray,
         centroid: Tuple[float, float],
     ) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
-        """Extracts high-resolution un-downsampled foveal crop around fixation point."""
+        """Extracts high-resolution un-downsampled foveal crop around fixation point.
+
+        Guarantees:
+        1. Aspect-ratio preservation: extracts a strictly square patch (default 128x128).
+        2. Boundary safety: clamps window within screen canvas with zero artificial padding.
+        3. 1:1 pixel sampling from native frame with zero spatial downsampling artifacts.
+        """
         H, W = frame.shape[:2]
         # Fast path if frame is already a foveal element crop centered at (0.5, 0.5)
         if (H, W) == self.input_size and abs(centroid[0] - 0.5) < 1e-4 and abs(centroid[1] - 0.5) < 1e-4:
             return frame, (0.0, 0.0, 1.0, 1.0)
 
         cx, cy = centroid
-        px = int(cx * W)
-        py = int(cy * H)
+        px = int(round(cx * W))
+        py = int(round(cy * H))
 
-        rw = int(min(96, max(24, int(W * self.radius_frac))))
-        rh = int(min(96, max(24, int(H * self.radius_frac))))
+        # Fixed physical patch size (default 128x128, bounded by frame size)
+        S = min(getattr(self, "patch_size", 128), W, H)
+        r = S // 2
 
-        x1 = max(0, px - rw)
-        y1 = max(0, py - rh)
-        x2 = min(W, px + rw)
-        y2 = min(H, py + rh)
+        # Boundary clamping: ensure window stays strictly within [0, W] and [0, H]
+        x1 = max(0, min(W - S, px - r))
+        y1 = max(0, min(H - S, py - r))
+        x2 = x1 + S
+        y2 = y1 + S
 
         crop = frame[y1:y2, x1:x2]
-        norm_crop_box = (x1 / W, y1 / H, x2 / W, y2 / H)
+        norm_crop_box = (x1 / float(W), y1 / float(H), x2 / float(W), y2 / float(H))
         return crop, norm_crop_box
 
     @torch.inference_mode()

@@ -1,0 +1,27 @@
+{
+  "experiment_id": "AVCS-CANDIDATE-M3-HR-V1",
+  "source_checkpoint": "runs\\weights\\goal_grounder_best.pt.prev",
+  "architecture": "GoalConditionedGrounder_CorticalBackbone2M_FPN",
+  "total_parameters": 1354050,
+  "input_size": [
+    256,
+    256
+  ],
+  "heatmap_size": [
+    128,
+    128
+  ],
+  "grid_stride": 2,
+  "measured_metrics_test_held_out": {
+    "top_1_accuracy_pct": 86.08,
+    "hits": "272/316",
+    "median_centroid_error_px": 2.07,
+    "mean_centroid_error_px": 4.54,
+    "p95_centroid_error_px": 15.88,
+    "mean_iou": 0.301,
+    "ungroundable_query_rejection_pct": 100.0,
+    "blank_screen_fp_count": 1,
+    "blank_screen_total": 30,
+    "center_collapse_detected": false
+  }
+}

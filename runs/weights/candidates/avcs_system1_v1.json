@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "checkpoint_file": "runs/weights/candidates/avcs_system1_v1.pt",
+  "sha256": "c30eb0686da96eb6f67981021bcb646b60b3ed6b050927ee97085e59ee6125a4",
+  "parameter_count": 1663564,
+  "architecture": "AVCSSystem1V1",
+  "created_at": "2026-10-18T05:15:50.387918+00:00",
+  "training_metadata": {
+    "epochs": 3,
+    "batch_size": 16,
+    "lr": 0.0005,
+    "best_val_loss": 0.8749,
+    "total_training_time_s": 13.45,
+    "history": [
+      {
+        "epoch": 1,
+        "train_loss": 1.0505,
+        "val_loss": 0.9149
+      },
+      {
+        "epoch": 2,
+        "train_loss": 0.9701,
+        "val_loss": 0.8929
+      },
+      {
+        "epoch": 3,
+        "train_loss": 0.9114,
+        "val_loss": 0.8749
+      }
+    ]
+  }
+}

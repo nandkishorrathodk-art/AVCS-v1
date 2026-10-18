@@ -6,7 +6,12 @@ from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 import numpy as np
 from PIL import Image
@@ -374,7 +379,12 @@ class UIGroundingBenchmarkRunner:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run UI Grounding Held-Out Benchmark")
     parser.add_argument("--manifest", type=str, default="datasets/ui_grounding/manifest.json")
-    parser.add_argument("--checkpoint", type=str, default="runs/weights/goal_grounder_best.pt")
+    default_ckpt = (
+        "runs/weights/human_eye_weights.pt"
+        if Path("runs/weights/human_eye_weights.pt").is_file()
+        else "runs/weights/goal_grounder_best.pt"
+    )
+    parser.add_argument("--checkpoint", type=str, default=default_ckpt)
     parser.add_argument("--split", type=str, default="test_held_out")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--threshold", type=float, default=0.35)
@@ -394,10 +404,41 @@ def main() -> None:
         return
 
     from avcs.goal_grounder import GoalConditionedGrounder
-    model = GoalConditionedGrounder(feature_dim=192).to(args.device)
+    from avcs.weights import _extract_grounder_metadata
+
     ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=True)
-    state = ckpt.get("model_state_dict", ckpt)
+    if "grounder" in ckpt:
+        state = ckpt["grounder"]
+    elif "model_state_dict" in ckpt:
+        state = ckpt["model_state_dict"]
+    else:
+        state = ckpt
+
+    if not any(k.startswith("visual_encoder.") for k in state.keys()) and any(
+        k.startswith("grounder.") for k in state.keys()
+    ):
+        state = {k[9:] if k.startswith("grounder.") else k: v for k, v in state.items()}
+
+    stem_weight = state.get("visual_encoder.stem.conv.weight")
+    proj_weight = state.get("visual_encoder.proj.conv.weight")
+    if proj_weight is not None:
+        feature_dim = proj_weight.shape[0]
+    elif stem_weight is not None and stem_weight.shape[0] >= 64:
+        feature_dim = stem_weight.shape[0]
+    else:
+        hp = ckpt.get("hyperparameters", {}) if isinstance(ckpt.get("hyperparameters"), dict) else {}
+        feature_dim = (
+            ckpt.get("feature_dim")
+            or hp.get("feature_dim")
+            or (hp.get("backbone", {}).get("feature_dim") if isinstance(hp.get("backbone"), dict) else None)
+            or 128
+        )
+
+    meta = _extract_grounder_metadata(ckpt)
+    model = GoalConditionedGrounder(feature_dim=feature_dim).to(args.device)
     model.load_state_dict(state, strict=False)
+    if meta:
+        model._mark_loaded_checkpoint(meta)
     model.eval()
 
     print(f"Evaluating {ckpt_path} on split '{args.split}'...")

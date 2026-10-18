@@ -15,9 +15,53 @@ import collections
 import dataclasses
 import math
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+
+class FocusLostError(RuntimeError):
+    """Raised when active window or visual focus is lost during text typing."""
+    pass
+
+
+class UnverifiedFocusError(RuntimeError):
+    """Raised when focus cannot be confirmed prior to an authorized typing action."""
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class FocusVerificationResult:
+    """Consolidated outcome of the dual-condition typing focus gate."""
+    verified: bool
+    confidence: float
+    os_window_verified: bool
+    visual_focus_verified: bool
+    active_window_title: Optional[str] = None
+    expected_window_title: Optional[str] = None
+    caret_detected: bool = False
+    caret_blinking: bool = False
+    focus_ring_detected: bool = False
+    caret_coord: Optional[Tuple[float, float]] = None
+    target_region: Optional[Tuple[float, float, float, float]] = None
+    reason: str = ""
+    latency_ms: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Encapsulated System 2 representation (zero raw coordinates or tensors)."""
+        return {
+            "verified": self.verified,
+            "confidence": round(self.confidence, 3),
+            "os_window_verified": self.os_window_verified,
+            "visual_focus_verified": self.visual_focus_verified,
+            "active_window_title": self.active_window_title,
+            "expected_window_title": self.expected_window_title,
+            "caret_detected": self.caret_detected,
+            "caret_blinking": self.caret_blinking,
+            "focus_ring_detected": self.focus_ring_detected,
+            "reason": self.reason,
+            "latency_ms": round(self.latency_ms, 2),
+        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,12 +224,21 @@ class VisualFocusDetector:
     def verify_focus(
         self,
         frame: np.ndarray,
-        target_point: Tuple[float, float],
+        target_point: Optional[Tuple[float, float]] = None,
         reference_frame: Optional[np.ndarray] = None,
+        *,
+        target_region: Optional[Tuple[float, float, float, float]] = None,
     ) -> VisualFocusState:
         """Evaluates whether target input element visually possesses keyboard focus (<2ms)."""
         t0 = time.perf_counter()
         H, W = frame.shape[:2]
+
+        if target_point is None:
+            if target_region is not None:
+                x1_r, y1_r, x2_r, y2_r = target_region
+                target_point = ((x1_r + x2_r) / 2.0, (y1_r + y2_r) / 2.0)
+            else:
+                target_point = (0.5, 0.5)
 
         crop, (x1, y1, x2, y2) = self.crop_patch(frame, target_point)
         if crop.size == 0:

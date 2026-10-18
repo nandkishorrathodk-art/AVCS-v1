@@ -1,89 +1,72 @@
-# AVCS — Honest Model Specification & Brutal Engineering Reality
+# AVCS — Honest Model Specification, Live Findings & System Roadmap
 
 ## 1. The Raw Reality: What This Model Actually Is
 
 Strip away all marketing, hype, and academic sugar-coating. Here is the unvarnished truth of what this model is:
 
-* **It is NOT an LLM, VLM, or thinking AI:** It has no general intelligence, no reasoning, no concept of time, and zero memory of what happened a second ago.
-* **It is a microscopic 1.35M-parameter CNN compass:** Modern vision models (Claude 3.5 Sonnet, GPT-4o, Qwen-2-VL) are 7 Billion to 70 Billion parameters. This model is **1,354,050 parameters (~5.5 MB file)**.
-* **Its entire job is simple coordinate guessing:** It takes a 256×256 thumbnail of the desktop, takes a short query string (e.g. *"close button"*), and outputs a 64×64 heatmap guessing `(x, y)` coordinates.
-* **Who does the real work?**  
-  * **Planning & Thinking:** Handled 100% by **System 2 (External LLM)**.
-  * **Safety, Error Handling, & Verification:** Handled 100% by **Python code (`VisualRippleVerifier`, `ControlKernel`)**.
-  * **The Model:** Acts only as a dumb, fast visual pointer (a mathematical cursor compass).
+* **It is NOT an LLM, VLM, or thinking conversational AI:** It has no general intelligence, cannot reason, and cannot generate free-form conversational text.
+* **It is a microscopic ~501,612-parameter (0.5M) ConvGRU reflex model:** Modern vision-language models (Claude 3.5 Sonnet, GPT-4o, Gemini) are 10 Billion to 100+ Billion parameters. This model is **~2.1 MB in weight size**.
+* **Its entire job is low-latency visual reflex and motor coordination:**
+  1. Captures live desktop frames at 95–100 FPS on a 4-core CPU without GPU.
+  2. Tracks temporal motion, visual diffs, and unexpected pop-ups (surprise score) via ConvGRU recurrence.
+  3. Detects high-contrast interactive hotspots (buttons, input fields).
+  4. Executes smooth biological mouse trajectories (5th-order minimum-jerk kinematics) without exposing coordinate numbers.
+  5. Verifies click postconditions via optical ripple deltas.
+* **Who does the real cognitive work?**  
+  * **Reading arbitrary text, code, or user input:** Requires **System 2 (External VLM / LLM)**.
+  * **Planning, Reasoning, & Natural Dialogue:** Requires **System 2**.
+  * **Safety, Error Handling, & Verification:** Handled 100% by deterministic code (`ControlKernel`, `VisualRippleVerifier`, permissions).
+  * **System 1 (This Model):** Acts purely as the biological retina, visual reflex arc, and motor hands.
 
 ---
 
-## 2. The 5 Brutal Flaws & Bottlenecks (No Sugar-Coating)
+## 2. Live Desktop Test Findings (October 18, 2026)
 
-### Flaw 1: The Model is Legally Blind (256×256 Resolution Blur)
-* Real displays are **1920×1080** or 4K. The model forces the desktop into a **256×256 pixel thumbnail**.
-* At this resolution, standard 10–12px system text or small 16×16 icons become **3 to 4 blurry grey pixels**.
-* The model **cannot read text** (Zero OCR). It only matches fuzzy visual blobs and shapes. If two buttons have similar shapes or icons, it has zero ability to distinguish them without high-res foveal cropping.
+Tested live on the operator's actual 1920×1200 physical display with active dark-themed windows:
 
-### Flaw 2: The Softmax Hallucination Trap (Clicks on Blank Screens)
-* Neural networks use a spatial `softmax` over the 64×64 grid. By mathematical definition, **softmax probabilities must sum to 1.0 (100%)**.
-* If the screen is a completely blank solid color or empty wallpaper and you query *"click save button"*, the model **cannot output "nothing" on its own**. It will pick a random pixel of background noise and claim with confidence that the button is there.
-* *Reality in code:* This is why Gate 4 failed on blank screens (2 false positive clicks). A separate target-presence classifier and calibrated abstention loss are strictly required to stop it from clicking into the void.
-
-### Flaw 3: Synthetic Training Bias (It Has Never Seen the Real World)
-* The model was trained almost entirely on **procedurally drawn Python graphics** (rectangles, synthetic buttons, basic Tkinter/Pillow mockups).
-* It has **not** been trained on dirty, complex real-world enterprise software (SAP, Salesforce, custom Electron/WPF apps, dark-mode themes, canvas elements).
-* On clean synthetic benchmarks, it achieves ~90.8% accuracy. On an unseen, cluttered, real-world enterprise screen, its raw accuracy will drop significantly unless constrained by code.
-
-### Flaw 4: Zero Memory & Zero Context (Stateless Reflex)
-* Each frame is processed in total isolation.
-* If a click causes an unexpected error popup (*"Session Expired"*, *"Access Denied"*), the model does not know what happened. It will keep searching for its original target or click blindly unless Python code halts motor execution.
-
-### Flaw 5: Scaling Parameter Myth (More Params Won't Magically Fix This)
-* The repository's own measured facts proved that scaling parameters from 2.7M to 31M actually made the planner **worse** (Semantic rate dropped 56.7% → 10.0%).
-* Simply making this network larger does not solve the grounding problem. Data quality, spatial calibration, and closed-loop verification are what keep it functioning.
+1. **Resolution & Capture:** Real frame shape `(1200, 1920, 3)` grabbed at ~100 FPS with zero GDI handle leaks.
+2. **Category Classification Reality:**
+   - Predicted `browser_webpage` with only **50.1% confidence** (49.9% uncertainty) on a VS Code editor window.
+   - *Why?* The category head was trained on synthetic layouts with basic templates; complex real-world IDEs (file trees, terminal tabs, dark-mode code editors) exceed its 8-category synthetic training.
+3. **Arbitrary Text Reading Reality:**
+   - **System 1 CANNOT read arbitrary text or sentences typed by the user.**
+   - By clean-room design, all external OCR engines (Tesseract, EasyOCR, PaddleOCR) and Windows UIAutomation trees are strictly prohibited.
+   - The visual patch classifier (`PixelWordRecognizer`) has a closed vocabulary of **exactly 131 functional UI action words** (`Save`, `Run`, `Cancel`, `Close`, `Terminal`, `Settings`, etc.).
+   - Any free-form text, notes, code syntax, or sentences are outside its closed vocabulary and cannot be read without System 2.
+4. **"Natural Dialogue" Reality:**
+   - Observations emitted by System 1 (e.g., *"Display is active. Primary context: Browser Webpage (stable)..."*) are **deterministic Python string templates** slotting in predicted categories and hotspot counts, not generative natural language.
 
 ---
 
-## 3. Division of Labor: Who Actually Does What?
+## 3. Division of Labor: System 1 vs System 2
 
-To make this system work without delusions, duties are strictly separated:
-
-| Responsibility | Who Owns It | Why |
+| Capability | System 1 (This Local Model) | System 2 (External VLM / LLM) |
 | :--- | :--- | :--- |
-| **High-level Goal & Strategy** | **System 2 (Cloud LLM)** | Decides *what* needs to be done (e.g. "open notepad, write test, close without saving"). The local model cannot think. |
-| **Coarse Target Guessing** | **AVCS Model (`GoalConditionedGrounder`)** | Fast sub-15ms reflex on CPU. Points the cursor in the rough direction of the visual blob. |
-| **Sub-Pixel Precision** | **Python Foveal Engine (`grounding.py`)** | Takes an uncompressed 1:1 patch around the model's guess to find exact boundaries ($\pm 2\text{ px}$). |
-| **Focus & Typing Security** | **Python Controller (`focus.py`)** | Checks caret blinking (0.8–2.0 Hz). Fails closed if focus is missing. Model cannot verify typing safety. |
-| **Action Containment & Gates** | **Python Kernel (`ControlKernel`)** | Blocks unauthorized mutating operations (`mkdir`, `write`, dangerous clicks). |
-| **Postcondition Verification** | **Python Verifier (`verifier.py`)** | Checks optical delta / window appearance after a click. Never trusts the model's self-reported success. |
+| **Model Size** | ~501,612 params (~2.1 MB) | 10B – 100B+ params |
+| **Execution Hardware** | Local 4-core CPU (<10 ms, ~100 FPS) | Cloud GPU / High-memory host |
+| **Visual Awareness** | Pure pixels, motion deltas, hotspots | High-level semantic scene understanding |
+| **Text Reading** | 131 fixed UI button words only | Arbitrary free-form text, code, sentences |
+| **Speech / Conversation** | Formatted string templates | True natural language reasoning & dialogue |
+| **Motor Execution** | Physical mouse curves & keystrokes | None (never touches coordinates or hardware) |
+| **Verification** | Frame diffs, optical ripples | Logical task postconditions |
 
 ---
 
-## 4. What the Model MUST DO (Strict Requirements)
+## 4. Current Status of Codebase & Checkpoints
 
-1. **Fast CPU Forward Pass:** Must execute in $\le 15\text{ ms}$ on 1 CPU thread (ensuring 60+ FPS real-time reflex).
-2. **Dense Heatmap Prediction:** Must output a normalized 64×64 spatial distribution over the 256×256 canvas.
-3. **Calibrated Presence Score:** Must predict a scalar presence probability $\in [0.0, 1.0]$. If target is absent, score must drop below threshold ($0.50$).
-4. **Hard-Zero Blank Screen False Positives (Gate 4):** Under zero circumstances may the model authorize a click on an empty desktop or blank canvas.
-5. **Fail-Closed Default:** If confidence is low or query is ambiguous, `action_authorized` must evaluate to `False`.
-
----
-
-## 5. What the Model MUST NOT DO (Prohibitions & Anti-Cheating)
-
-* ⛔ **NO Cheating with OCR:** Do NOT import Tesseract, EasyOCR, PaddleOCR, or Windows OCR.
-* ⛔ **NO Cheating with Accessibility Trees / DOM:** Do NOT query Windows UIAutomation, accessibility APIs, or browser DOM (Selenium/Playwright).
-* ⛔ **NO Hardcoded Coordinates:** Do NOT hardcode button positions in Python scripts.
-* ⛔ **NO Raw Pixel Leakage:** Zero raw RGB frames, screenshots, or embeddings may leave the local machine to System 2.
-* ⛔ **NO Self-Authorization:** The model's raw heatmap must never directly move the hardware mouse without passing through the `ControlKernel` and `VisualRippleVerifier`.
-* ⛔ **NO Overclaiming:** Do NOT report synthetic test passes as "universal computer use solved". Report real numbers from real runs.
+* **Stage A (Live Spatiotemporal Model & Mailbox):** PASSED (38/38 unit tests, 20/20 challenger tests).
+* **Stage B (Dual-Model Frozen Twin Benchmark):** PASSED (+70.37% prediction gain over frozen twin, latent variance 0.9673, 90/90 tests pass).
+* **Packaged Checkpoint:** `runs/weights/candidates/avcs_streaming_cortex_v1.pt` (SHA-256: `418c541e97b93615eccccd3cf488efaded84cd25f0384b865e3f5022c8c6032d`).
+* **Preserved Baselines:** All 24 baseline checkpoints bit-for-bit preserved.
+* **Integrity Audits:** Zero OCR imports, zero DOM inspection, zero raw screenshots saved to disk.
 
 ---
 
-## 6. What Needs to Be Done (The Realistic Action Plan)
+## 5. Roadmap & Next Steps
 
-1. **Fix Blank Screen Rejection (Gate 4):**  
-   Train with calibrated target-absence loss (margin penalty + negative spatial entropy regularization) on solid, gradient, and wallpaper frames so the model outputs near-zero logits on missing targets.
-2. **Foveal Saccade Hand-off:**  
-   Because 256×256 downsampling blinds the model to fine text, enforce that all small targets ($< 32\times32$) must be cropped at 1:1 physical resolution and refined by `FovealAcuityEngine`.
-3. **Strict Verifier-Gated Execution:**  
-   Treat the model as an unreliable advisor. Every click proposed by the model must be verified by `VisualRippleVerifier` against real screen deltas before System 2 is told that progress occurred.
-4. **Natural Model-to-Model Communication:**  
-   System 2 sends plain-language subgoals; System 1 executes substeps locally and reports real, observed visual facts back without robotic coordinate dumps.
+1. **Clean-room System 1 Candidate Packaging:** Freeze and maintain `avcs_streaming_cortex_v1.pt` as the local, pure-pixel sensorimotor reflex layer.
+2. **System 2 VLM Bridge Integration:** Connect the live observation stream to a multimodal language model (Gemini / Claude / local VLM) to handle:
+   - Full-text reading of arbitrary screen content.
+   - Natural language dialogue explaining what is on screen.
+   - High-level task planning that feeds discrete subgoals to System 1.
+3. **No Overclaiming Mandate:** Document all capabilities and limitations truthfully. Never claim System 1 has general vision or language capabilities on its own.

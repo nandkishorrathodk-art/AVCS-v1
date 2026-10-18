@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-__version__ = "0.2.0"
+try:
+    __version__ = version("avcs-system1")
+except PackageNotFoundError:
+    __version__ = "1.0.0rc1"
 __author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 
@@ -14,7 +18,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ActionOutcome": ("avcs.control.controller", "ActionOutcome"),
     "ActionResult": ("avcs.control.controller", "ActionResult"),
     "ScreenObservation": ("avcs.control.controller", "ScreenObservation"),
-    "SceneObservation": ("avcs.control.controller", "SceneObservation"),
+    "SceneObservation": ("avcs.observation", "SceneObservation"),
+    "EntitySummary": ("avcs.observation", "EntitySummary"),
+    "VisualObservationEngine": ("avcs.observation", "VisualObservationEngine"),
     "System2Turn": ("avcs.control.controller", "System2Turn"),
     "SubstepTrace": ("avcs.control.controller", "SubstepTrace"),
     "GoalExecutionResult": ("avcs.control.controller", "GoalExecutionResult"),
@@ -148,6 +154,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "run_mcp_server": ("avcs.mcp", "run_mcp_server"),
     "launch_gui": ("avcs.gui", "launch_gui"),
     "AVCSDesktopApp": ("avcs.gui", "AVCSDesktopApp"),
+    "AVCSSystem1V1": ("avcs.perception.system1_v1", "AVCSSystem1V1"),
+    "VisualStateObservation": ("avcs.perception.visual_state", "VisualStateObservation"),
+    "load_system1": ("avcs.perception.system1_v1", "load_system1"),
 }
 
 __all__ = [
@@ -156,6 +165,8 @@ __all__ = [
     "ActionResult",
     "ScreenObservation",
     "SceneObservation",
+    "EntitySummary",
+    "VisualObservationEngine",
     "System2Turn",
     "SubstepTrace",
     "GoalExecutionResult",
@@ -250,6 +261,9 @@ __all__ = [
     "run_mcp_server",
     "launch_gui",
     "AVCSDesktopApp",
+    "AVCSSystem1V1",
+    "VisualStateObservation",
+    "load_system1",
     "__version__",
 ]
 

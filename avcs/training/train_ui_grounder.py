@@ -228,7 +228,7 @@ def train_epoch(
 
 def train_ui_grounder(
     manifest_path: str = "datasets/ui_grounding/manifest.json",
-    output_dir: str = "runs/weights",
+    output_dir: str = "runs/synthetic_ui_grounder",
     epochs: int = 5,
     batch_size: int = 16,
     learning_rate: float = 1.5e-4,
@@ -417,7 +417,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1.5e-4)
-    parser.add_argument("--output-dir", type=str, default="runs/weights")
+    parser.add_argument("--output-dir", type=str, default="runs/synthetic_ui_grounder")
     args = parser.parse_args()
 
     train_ui_grounder(

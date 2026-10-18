@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Iterator
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
+
+try:
+    from avcs.capture_adapter import Win32GDICaptureAdapter
+except Exception:
+    Win32GDICaptureAdapter = None  # type: ignore
 
 
 class CaptureError(RuntimeError):
@@ -28,6 +33,7 @@ class ScreenCapture:
     def __init__(self, monitor: int = 1) -> None:
         self.monitor = monitor
         self._sct = None
+        self._seq: int = 0
 
     def open(self) -> "ScreenCapture":
         try:
@@ -59,10 +65,19 @@ class ScreenCapture:
         assert self._sct is not None
         shot = self._sct.grab(self._sct.monitors[self.monitor])
         arr = np.asarray(shot)
+        self._seq += 1
         # mss delivers BGRA on Windows/X11; convert to genuine RGB for neural cortex
         if arr.ndim == 3 and arr.shape[-1] >= 3:
             return arr[:, :, 2::-1].copy()
         return arr.copy()
+
+    def grab_with_sequence(self) -> tuple[np.ndarray, int]:
+        """Returns the latest frame and its sequence number."""
+        return self.grab(), self._seq
+
+    @property
+    def sequence_number(self) -> int:
+        return self._seq
 
     def close(self) -> None:
         if self._sct is not None:
@@ -132,6 +147,21 @@ class SyntheticScreen:
         self.tick += 1
         return img
 
+    @property
+    def sequence_number(self) -> int:
+        return self.tick
+
+    def grab_with_sequence(
+        self,
+        min_sequence: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> Tuple[np.ndarray, int]:
+        """Grabs a frame with sequence synchronization, advancing tick if needed."""
+        if min_sequence is not None and self.tick <= min_sequence:
+            self.tick = min_sequence + 1
+        frame = self.grab()
+        return frame, self.tick
+
     def stream(self, count: int, interval: float = 0.0) -> Iterator[np.ndarray]:
         for _ in range(count):
             yield self.grab()
@@ -185,9 +215,13 @@ class Win32FastCapture:
         self._h_screen_dc = None
         self._h_mem_dc = None
         self._h_bitmap = None
+        self._h_old_bitmap = None
         self._bits_ptr = None
         self._mem_view = None
         self._raw_np: Optional[np.ndarray] = None
+        self._raw_flat: Optional[np.ndarray] = None
+        self._rgb_buffer: Optional[np.ndarray] = None
+        self._rgb_flat: Optional[np.ndarray] = None
         self._src_x = 0
         self._src_y = 0
         self._src_w = 0
@@ -196,6 +230,7 @@ class Win32FastCapture:
         self._dst_h = 0
         self._h_desk = None
         self._is_open = False
+        self._seq: int = 0
 
     def open(self) -> "Win32FastCapture":
         if sys.platform != "win32":
@@ -212,7 +247,7 @@ class Win32FastCapture:
         # Ensure process is DPI-aware so GetSystemMetrics returns physical display pixels
         # instead of unscaled virtual screen coordinates (prevents truncation on 125%/150% DPI)
         try:
-            self._user32.SetProcessDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+            self._user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
         except Exception:
             try:
                 ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -232,10 +267,19 @@ class Win32FastCapture:
         except Exception:
             pass
 
-        self._src_w = self._user32.GetSystemMetrics(0)
-        self._src_h = self._user32.GetSystemMetrics(1)
-        self._src_x = 0
-        self._src_y = 0
+        vw = self._user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        vh = self._user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        vx = self._user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        vy = self._user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        if vw == 0 or vh == 0:
+            vx, vy = 0, 0
+            vw = self._user32.GetSystemMetrics(0)
+            vh = self._user32.GetSystemMetrics(1)
+
+        self._src_x = vx
+        self._src_y = vy
+        self._src_w = vw
+        self._src_h = vh
 
         if self.target_size is not None:
             self._dst_w, self._dst_h = self.target_size
@@ -275,6 +319,7 @@ class Win32FastCapture:
         self._h_mem_dc = self._gdi32.CreateCompatibleDC(self._h_screen_dc)
         if not self._h_mem_dc:
             self._user32.ReleaseDC(0, self._h_screen_dc)
+            self._h_screen_dc = None
             raise CaptureError("Failed to create Windows compatible DC")
 
         self._bits_ptr = ctypes.c_void_p()
@@ -290,7 +335,12 @@ class Win32FastCapture:
             self._cleanup_handles()
             raise CaptureError("Failed to allocate Win32 DIBSection")
 
-        self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
+        self._h_old_bitmap = self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
+
+        if self._dst_w != self._src_w or self._dst_h != self._src_h:
+            HALFTONE = 4
+            self._gdi32.SetStretchBltMode(self._h_mem_dc, HALFTONE)
+            self._gdi32.SetBrushOrgEx(self._h_mem_dc, 0, 0, None)
 
         buffer_from_memory = ctypes.pythonapi.PyMemoryView_FromMemory
         buffer_from_memory.restype = ctypes.py_object
@@ -298,13 +348,16 @@ class Win32FastCapture:
 
         self._mem_view = buffer_from_memory(self._bits_ptr, self._dst_w * self._dst_h * 4, 0x200)
         self._raw_np = np.frombuffer(self._mem_view, dtype=np.uint8).reshape((self._dst_h, self._dst_w, 4))
+        self._raw_flat = self._raw_np.reshape(-1, 4)
+        self._rgb_buffer = np.empty((self._dst_h, self._dst_w, 3), dtype=np.uint8)
+        self._rgb_flat = self._rgb_buffer.reshape(-1, 3)
         self._is_open = True
         return self
 
-    def grab(self) -> np.ndarray:
+    def grab(self, copy: bool = True, out: Optional[np.ndarray] = None) -> np.ndarray:
         if not self._is_open:
             self.open()
-        assert self._raw_np is not None
+        assert self._raw_np is not None and self._raw_flat is not None and self._rgb_flat is not None
         SRCCOPY = 0x00CC0020
         if self._dst_w == self._src_w and self._dst_h == self._src_h:
             ret = self._gdi32.BitBlt(
@@ -319,9 +372,6 @@ class Win32FastCapture:
                 SRCCOPY,
             )
         else:
-            HALFTONE = 4
-            self._gdi32.SetStretchBltMode(self._h_mem_dc, HALFTONE)
-            self._gdi32.SetBrushOrgEx(self._h_mem_dc, 0, 0, None)
             ret = self._gdi32.StretchBlt(
                 self._h_mem_dc,
                 0,
@@ -336,12 +386,73 @@ class Win32FastCapture:
                 SRCCOPY,
             )
         if not ret:
-            raise CaptureError("Win32 BitBlt/StretchBlt failed")
+            # Self-healing: refresh screen DC and retry once
+            if self._user32 and self._h_screen_dc:
+                try:
+                    self._user32.ReleaseDC(0, self._h_screen_dc)
+                except Exception:
+                    pass
+            self._h_screen_dc = self._user32.GetDC(0)
+            if self._dst_w == self._src_w and self._dst_h == self._src_h:
+                ret = self._gdi32.BitBlt(
+                    self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                    self._h_screen_dc, self._src_x, self._src_y, SRCCOPY,
+                )
+            else:
+                ret = self._gdi32.StretchBlt(
+                    self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                    self._h_screen_dc, self._src_x, self._src_y,
+                    self._src_w, self._src_h, SRCCOPY,
+                )
+            if not ret:
+                raise CaptureError("Win32 BitBlt/StretchBlt failed")
         self._gdi32.GdiFlush()
-        # 32-bit DIB memory order is BGRA -> convert to RGB via zero-strided copy
-        return self._raw_np[:, :, 2::-1].copy()
+
+        # Fast flat channel assignment (BGRA -> RGB) avoiding full negative-stride copy churn
+        if out is not None:
+            target_flat = out.reshape(-1, 3)
+            target_flat[:, 0] = self._raw_flat[:, 2]
+            target_flat[:, 1] = self._raw_flat[:, 1]
+            target_flat[:, 2] = self._raw_flat[:, 0]
+            result = out
+        elif copy:
+            self._rgb_flat[:, 0] = self._raw_flat[:, 2]
+            self._rgb_flat[:, 1] = self._raw_flat[:, 1]
+            self._rgb_flat[:, 2] = self._raw_flat[:, 0]
+            result = self._rgb_buffer.copy()
+        else:
+            self._rgb_flat[:, 0] = self._raw_flat[:, 2]
+            self._rgb_flat[:, 1] = self._raw_flat[:, 1]
+            self._rgb_flat[:, 2] = self._raw_flat[:, 0]
+            result = self._rgb_buffer
+
+        self._seq += 1
+        return result
+
+    def grab_with_sequence(
+        self,
+        copy: bool = True,
+        out: Optional[np.ndarray] = None,
+        min_sequence: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> tuple[np.ndarray, int]:
+        """Returns the latest frame and its strictly monotonic sequence number."""
+        if min_sequence is not None and self._seq <= min_sequence:
+            self._seq = min_sequence
+        frame = self.grab(copy=copy, out=out)
+        return frame, self._seq
+
+    @property
+    def sequence_number(self) -> int:
+        return self._seq
 
     def _cleanup_handles(self) -> None:
+        if self._gdi32 and self._h_mem_dc and hasattr(self, "_h_old_bitmap") and self._h_old_bitmap:
+            try:
+                self._gdi32.SelectObject(self._h_mem_dc, self._h_old_bitmap)
+            except Exception:
+                pass
+            self._h_old_bitmap = None
         if self._gdi32 and self._h_bitmap:
             try:
                 self._gdi32.DeleteObject(self._h_bitmap)
@@ -366,6 +477,12 @@ class Win32FastCapture:
             except Exception:
                 pass
             self._h_desk = None
+        self._raw_np = None
+        self._raw_flat = None
+        self._rgb_buffer = None
+        self._rgb_flat = None
+        self._mem_view = None
+        self._bits_ptr = None
         self._is_open = False
 
     def close(self) -> None:
@@ -403,6 +520,7 @@ class ThreadedScreenCapture:
         import threading
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._latest_frame: Optional[np.ndarray] = None
         self._seq: int = 0
         self._last_grab_time: float = 0.0
@@ -414,7 +532,17 @@ class ThreadedScreenCapture:
                 self.source.open()
             except Exception:
                 pass
-        self._latest_frame = self.source.grab()
+        with self._cond:
+            if hasattr(self.source, "grab_with_sequence") and callable(self.source.grab_with_sequence):
+                frame, src_seq = self.source.grab_with_sequence()
+                self._seq = max(self._seq + 1, src_seq)
+            else:
+                frame = self.source.grab()
+                self._seq += 1
+            self._latest_frame = frame
+            self._last_grab_time = time.perf_counter()
+            self._last_error = None
+            self._cond.notify_all()
         self._running = True
         import threading
         self._thread = threading.Thread(target=self._worker, daemon=True, name="AVCS-CaptureWorker")
@@ -432,30 +560,62 @@ class ThreadedScreenCapture:
             except Exception:
                 pass
         sleep_interval = 1.0 / max(1.0, self.target_fps * 1.2) if self.target_fps > 0 else 0.005
+        has_grab_seq = hasattr(self.source, "grab_with_sequence") and callable(self.source.grab_with_sequence)
         while self._running:
             try:
-                frame = self.source.grab()
+                if has_grab_seq:
+                    frame, src_seq = self.source.grab_with_sequence()
+                else:
+                    frame = self.source.grab()
+                    src_seq = None
                 now = time.perf_counter()
-                with self._lock:
+                with self._cond:
                     self._latest_frame = frame
-                    self._seq += 1
+                    if src_seq is not None:
+                        self._seq = max(self._seq + 1, src_seq)
+                    else:
+                        self._seq += 1
                     self._last_grab_time = now
                     self._last_error = None
+                    self._cond.notify_all()
             except Exception as exc:
-                with self._lock:
+                with self._cond:
                     self._last_error = exc
+                    self._cond.notify_all()
             time.sleep(sleep_interval)
 
     def grab(self) -> np.ndarray:
+        frame, _ = self.grab_with_sequence()
+        return frame
+
+    def grab_with_sequence(
+        self,
+        min_sequence: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> tuple[np.ndarray, int]:
+        """Returns the latest frame and its strictly monotonic sequence number from one locked snapshot.
+
+        If min_sequence is specified, atomically waits until a frame with sequence > min_sequence
+        is produced, eliminating stale frame polling and race conditions.
+        """
         if not self._running or self._latest_frame is None:
             self.open()
-        with self._lock:
+        with self._cond:
+            if min_sequence is not None and self._seq <= min_sequence and self._running:
+                self._cond.wait_for(
+                    lambda: self._seq > min_sequence or not self._running or self._last_error is not None,
+                    timeout=timeout,
+                )
             if self._last_error is not None:
                 raise self._last_error
-            return self._latest_frame
+            if self._latest_frame is None:
+                raise CaptureError("capture worker has not produced a frame")
+            return self._latest_frame, self._seq
 
     def close(self) -> None:
         self._running = False
+        with self._cond:
+            self._cond.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
             self._thread = None
@@ -516,3 +676,15 @@ def open_capture(
     if threaded:
         return ThreadedScreenCapture(cap).open()
     return cap
+
+
+__all__ = [
+    "CaptureError",
+    "ScreenCapture",
+    "SyntheticScreen",
+    "FrameSource",
+    "Win32FastCapture",
+    "Win32GDICaptureAdapter",
+    "ThreadedScreenCapture",
+    "open_capture",
+]

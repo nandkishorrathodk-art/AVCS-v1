@@ -23,8 +23,12 @@ import numpy as np
 import torch
 
 from avcs.perception.events import VisualEvent, VisualEventStreamer, VisualEventType
-from avcs.perception.focus import VisualFocusDetector, VisualFocusState
-from avcs.perception.goal_grounder import (
+from avcs.perception.focus import (
+    FocusVerificationResult,
+    VisualFocusDetector,
+    VisualFocusState,
+)
+from avcs.goal_grounder import (
     GoalConditionedGrounder,
     load_grounding_checkpoint,
 )
@@ -45,42 +49,12 @@ from avcs.control.verifier import (
     VerificationStatus,
     VisualRippleVerifier,
 )
-from forge.vision.capture import ScreenCapture, open_capture
+from avcs.observation import EntitySummary, SceneObservation, VisualObservationEngine
+from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.motor import get_default_driver
 from forge.vision.cortex.sdk import UnvalidatedGroundingError
 
 logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass(frozen=True)
-class SceneObservation:
-    """Truthful, evidence-backed visual scene observation emitted to System 2."""
-    timestamp: float
-    primary_category: str
-    stability: str
-    surprise_score: float
-    description: str
-    visible_entities: List[str]
-    has_active_modal: bool
-    is_stable: bool
-    confidence: float
-    uncertainty: float = 0.0
-    frame_sequence: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "timestamp": round(self.timestamp, 3),
-            "frame_sequence": self.frame_sequence,
-            "primary_category": self.primary_category,
-            "stability": self.stability,
-            "surprise_score": round(self.surprise_score, 4),
-            "description": self.description,
-            "visible_entities": self.visible_entities,
-            "has_active_modal": self.has_active_modal,
-            "is_stable": self.is_stable,
-            "confidence": round(self.confidence, 3),
-            "uncertainty": round(self.uncertainty, 3),
-        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -148,6 +122,7 @@ class AVCSController:
         force_virtual_motor: bool = False,
         enable_streaming: bool = True,
         require_real_capture: bool = False,
+        motor_driver: Optional[Any] = None,
     ) -> None:
         if isinstance(target_fps, bool) or not isinstance(target_fps, int) or target_fps <= 0:
             raise ValueError("target_fps must be a positive integer")
@@ -174,15 +149,27 @@ class AVCSController:
         self.eye = HumanEye(source=self.source, device=device)
 
         # 3. Motor Actuation (Hands)
-        self.motor_driver = get_default_driver(force_virtual=force_virtual_motor)
-        self.servoing = NeuromuscularServoingController(driver=self.motor_driver)
+        if motor_driver is not None:
+            self.motor_driver = motor_driver
+        else:
+            self.motor_driver = get_default_driver(force_virtual=force_virtual_motor)
+        self.servoing = NeuromuscularServoingController(driver=self.motor_driver, eye=self.eye)
 
-        # 4. Postcondition Verifier
+        # 4. Postcondition Verifier & Action Broker
         self.verifier = VisualRippleVerifier(eye=self.eye, driver=self.motor_driver)
+        from avcs.control.action_broker import ActionBroker, ActionSafetyController
+        self.safety = ActionSafetyController()
+        self.broker = ActionBroker(eye=self.eye, driver=self.motor_driver, safety_controller=self.safety)
 
         # 5. Real-Time Telemetry Bus & Differential Events
         self.stream_bus = NeuroStreamBus(buffer_size=120) if enable_streaming else None
+        if self.stream_bus is not None:
+            if hasattr(self.eye, "attach_stream_bus"):
+                self.eye.attach_stream_bus(self.stream_bus)
+            if hasattr(self.servoing, "attach_stream_bus"):
+                self.servoing.attach_stream_bus(self.stream_bus)
         self.event_streamer = VisualEventStreamer()
+        self.observation_engine = VisualObservationEngine()
 
         # 6. Neural Grounding Model (Cross-Attention / GoalConditionedGrounder)
         self.grounder: Optional[GoalConditionedGrounder] = None
@@ -199,8 +186,9 @@ class AVCSController:
         self._stream_frames_dropped = 0
         self._stream_tick_latencies_ms: deque[float] = deque(maxlen=512)
         self._stream_tick_intervals_ms: deque[float] = deque(maxlen=512)
-        self._stream_has_source_sequence = callable(
-            getattr(self.source, "grab_with_sequence", None)
+        self._stream_has_source_sequence = (
+            callable(getattr(self.source, "grab_with_sequence", None))
+            and not isinstance(self.source, SyntheticScreen)
         )
 
     @property
@@ -264,8 +252,21 @@ class AVCSController:
         candidates = []
         if self.weights_path is not None:
             candidates.append(self.weights_path)
+            default_paths = {
+                Path("runs/weights/candidates/candidate_m3_highres_v2.pt"),
+                Path("runs/weights/goal_grounder_best.pt"),
+            }
+            if self.weights_path in default_paths:
+                for alt in (
+                    Path("runs/weights/candidates/candidate_m3_highres_v2.pt"),
+                    Path("runs/weights/goal_grounder_best.pt"),
+                    Path("runs/weights/human_eye_weights.pt"),
+                ):
+                    if alt not in candidates:
+                        candidates.append(alt)
         else:
             candidates.extend([
+                Path("runs/weights/candidates/candidate_m3_highres_v2.pt"),
                 Path("runs/weights/goal_grounder_best.pt"),
                 Path("runs/weights/human_eye_weights.pt"),
             ])
@@ -304,14 +305,14 @@ class AVCSController:
         t0 = time.time()
         if frame is None:
             grab_with_sequence = getattr(self.source, "grab_with_sequence", None)
-            if callable(grab_with_sequence):
+            if callable(grab_with_sequence) and not isinstance(self.source, SyntheticScreen):
                 frame, captured_sequence = grab_with_sequence()
                 if frame_sequence is None:
                     frame_sequence = captured_sequence
             else:
                 frame = self.source.grab()
         self._frame_seq += 1
-        state = self.eye.observe(frame=frame)
+        state = self.eye.observe(frame=frame, frame_sequence=frame_sequence)
 
         cat = getattr(state, "primary_category", "unknown")
         cat_clean = cat.replace("_", " ").title()
@@ -321,7 +322,8 @@ class AVCSController:
         inf_ms = getattr(state, "latency_ms", getattr(state, "inference_time_ms", 10.0))
 
         # Broadcast telemetry packet with local and capture sequence provenance.
-        if self.stream_bus is not None:
+        # Broadcast telemetry packet with local and capture sequence provenance (if eye did not broadcast it).
+        if self.stream_bus is not None and getattr(self.eye, "stream_bus", None) is not self.stream_bus:
             packet = NeuroPacket(
                 timestamp=t0,
                 seq=self._frame_seq,
@@ -341,43 +343,28 @@ class AVCSController:
         self.event_streamer.process_state(state)
 
         # Synthesize truthful natural language observation
-        entities = []
-        if affordances:
-            by_kind: Dict[str, int] = {}
-            for spot in affordances[:10]:
-                kind = spot[2] if len(spot) > 2 else "element"
-                by_kind[kind] = by_kind.get(kind, 0) + 1
-            for k, count in by_kind.items():
-                entities.append(f"{count} {k}{'s' if count > 1 else ''}")
-
-        desc_parts = [f"Display is active. Primary context: {cat_clean} ({stability})."]
-        if has_modal:
-            desc_parts.append("A modal alert dialog is currently open and focused.")
-        if entities:
-            desc_parts.append(f"Visible interactive controls: {', '.join(entities)}.")
-        else:
-            desc_parts.append("No dense interactive elements detected on screen.")
-
-        if state.surprise_score > 0.4:
-            desc_parts.append(f"Visual surprise detected ({state.surprise_score:.2f}); screen content recently shifted.")
-
-        obs = SceneObservation(
-            timestamp=t0,
-            primary_category=cat,
-            stability=stability,
-            surprise_score=state.surprise_score,
-            description=" ".join(desc_parts),
-            visible_entities=entities,
-            has_active_modal=has_modal,
-            is_stable=(stability == "stable" and state.surprise_score < 0.2),
-            confidence=0.92 if affordances else 0.75,
-            uncertainty=0.08 if affordances else 0.25,
-            frame_sequence=(
-                frame_sequence if frame_sequence is not None else self._frame_seq
-            ),
+        obs = self.observation_engine.generate(
+            state=state,
+            frame=frame,
+            prior_action="observe",
         )
+        if frame_sequence is not None:
+            obs = dataclasses.replace(
+                obs,
+                frame_sequence=frame_sequence,
+                frame_id=f"frame_{frame_sequence}",
+            )
         self._last_observation = obs
         return obs
+
+    def observe(
+        self,
+        frame: Optional[np.ndarray] = None,
+        *,
+        frame_sequence: Optional[int] = None,
+    ) -> SceneObservation:
+        """Observes the display and returns a privacy-preserving SceneObservation to System 2."""
+        return self.describe_screen(frame=frame, frame_sequence=frame_sequence)
 
     def consult_system2(
         self,
@@ -424,8 +411,9 @@ class AVCSController:
         self._stream_frames_dropped = 0
         self._stream_tick_latencies_ms.clear()
         self._stream_tick_intervals_ms.clear()
-        self._stream_has_source_sequence = callable(
-            getattr(self.source, "grab_with_sequence", None)
+        self._stream_has_source_sequence = (
+            callable(getattr(self.source, "grab_with_sequence", None))
+            and not isinstance(self.source, SyntheticScreen)
         )
         self._stream_thread = threading.Thread(
             target=self._stream_worker,
@@ -447,7 +435,7 @@ class AVCSController:
                     break
 
                 tick_started = time.perf_counter()
-                if callable(grab_with_sequence):
+                if callable(grab_with_sequence) and not isinstance(self.source, SyntheticScreen):
                     frame, capture_sequence = grab_with_sequence()
                     if last_capture_sequence is not None:
                         if capture_sequence <= last_capture_sequence:
@@ -543,6 +531,7 @@ class AVCSController:
         query: str,
         double_click: bool = False,
         verify_action: bool = True,
+        enable_micro_tremor: Optional[bool] = None,
     ) -> ActionResult:
         """Locates target, moves naturally (5th-order minimum-jerk), clicks, and verifies postcondition.
         
@@ -584,12 +573,18 @@ class AVCSController:
             foveal_res = self.eye.inspect_fovea(centroid=(tx, ty))
             if foveal_res.confidence >= 0.5:
                 # Snap to refined foveal centroid
-                tx, ty = foveal_res.centroid
+                tx, ty = foveal_res.refined_centroid
         except Exception:
             pass
 
         # 3. Smooth Biological Motor Movement
-        self.servoing.servo_to((tx, ty), realtime=False)
+        if enable_micro_tremor is not None:
+            try:
+                self.servoing.servo_to((tx, ty), realtime=False, enable_micro_tremor=enable_micro_tremor)
+            except TypeError:
+                self.servoing.servo_to((tx, ty), realtime=False)
+        else:
+            self.servoing.servo_to((tx, ty), realtime=False)
 
         # 4. Dispatch once through the verifier, which owns the action lifecycle.
         verification_dict = None
@@ -653,14 +648,91 @@ class AVCSController:
             verification=res.verification,
         )
 
+    def verify_focus(
+        self,
+        target_region: Optional[Tuple[float, float, float, float]] = None,
+        foreground_app: Optional[str] = None,
+        target_point: Optional[Tuple[float, float]] = None,
+    ) -> FocusVerificationResult:
+        """Evaluates the dual-condition typing safety gate:
+        Condition A (OS State): Foreground window matches foreground_app (if given).
+        Condition B (Visual Pixels): Target region/point exhibits visual focus (conf >= 0.70 and caret blinking or focus ring).
+        """
+        t0 = time.perf_counter()
+
+        # 1. Condition A: OS / Window State Check
+        os_verified = True
+        active_win = None
+        if hasattr(self.motor_driver, "get_foreground_window"):
+            active_win = self.motor_driver.get_foreground_window()
+        elif sys.platform == "win32" and not self.force_virtual_motor:
+            try:
+                import win32gui
+                hwnd = win32gui.GetForegroundWindow()
+                if hwnd:
+                    active_win = win32gui.GetWindowText(hwnd)
+            except Exception:
+                pass
+
+        if foreground_app is not None:
+            if active_win is None or foreground_app.lower() not in active_win.lower():
+                os_verified = False
+
+        # 2. Condition B: Pure-Pixel Visual Focus Check
+        point = target_point
+        if point is None:
+            if target_region is not None:
+                x1, y1, x2, y2 = target_region
+                point = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            else:
+                point = getattr(self.eye.pursuit, "current_gaze", (0.5, 0.5))
+
+        st = self.eye.verify_focus(target_point=point)
+        visual_is_focused = getattr(st, "is_focused", False)
+        visual_conf = getattr(st, "confidence", 0.0)
+        caret_blink = getattr(st, "caret_blinking", True)
+
+        visual_verified = bool(visual_is_focused and visual_conf >= 0.70 and caret_blink)
+
+        verified = bool(os_verified and visual_verified)
+        final_conf = visual_conf if verified else min(visual_conf, 0.69)
+
+        if verified:
+            reason = "Focus confirmed"
+        elif not os_verified:
+            reason = f"Window mismatch (expected '{foreground_app}', got '{active_win}')"
+        elif not caret_blink:
+            reason = f"visual focus verification failed closed (caret blink absent, conf={visual_conf:.2f})"
+        else:
+            reason = f"visual focus verification failed closed (conf={visual_conf:.2f})"
+
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        return FocusVerificationResult(
+            verified=verified,
+            confidence=final_conf,
+            os_window_verified=os_verified,
+            visual_focus_verified=visual_verified,
+            active_window_title=active_win,
+            expected_window_title=foreground_app,
+            caret_detected=getattr(st, "caret_detected", False),
+            caret_blinking=caret_blink,
+            focus_ring_detected=getattr(st, "focus_ring_detected", False),
+            caret_coord=getattr(st, "caret_coord", None),
+            target_region=target_region,
+            reason=reason,
+            latency_ms=dt_ms,
+        )
+
     def type_text(
         self,
         text: str,
+        verify_focus: bool = True,
         clear_first: bool = False,
         press_enter: bool = False,
         target_field: Optional[str] = None,
         target_query: Optional[str] = None,
         verify_action: bool = False,
+        foreground_app: Optional[str] = None,
     ) -> ActionResult:
         """Types text with fail-closed visual focus verification."""
         t0 = time.perf_counter()
@@ -691,24 +763,60 @@ class AVCSController:
                     latency_ms=dt_ms,
                 )
 
-        # Verify typing focus before committing keystrokes
         current_gaze = self.eye.pursuit.current_gaze
-        st = self.eye.verify_focus(target_point=current_gaze)
-        if not getattr(st, "is_focused", False) or getattr(st, "confidence", 0.0) < 0.70 or not getattr(st, "caret_blinking", True):
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            return ActionResult(
-                action="type_text",
-                target_query=field or "current_focus",
-                success=False,
-                verified=False,
-                message=f"Typing blocked: visual focus verification failed closed (caret blink absent, conf={getattr(st, 'confidence', 0.0):.2f}).",
-                latency_ms=dt_ms,
-            )
+        # Dual-Condition Focus Gate
+        if verify_focus:
+            foc_res = self.verify_focus(foreground_app=foreground_app, target_point=current_gaze)
+            if not foc_res.verified:
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                return ActionResult(
+                    action="type_text",
+                    target_query=field or "current_focus",
+                    success=False,
+                    verified=False,
+                    message=f"Typing blocked: {foc_res.reason}.",
+                    latency_ms=dt_ms,
+                    verification=foc_res.to_dict(),
+                )
 
+        # Safe Clearing (Eliminate blind Ctrl+A + Backspace; Terminal Protection Guard)
         if clear_first:
-            self.motor_driver.press_hotkey("ctrl", "a")
-            self.motor_driver.press_key("backspace")
-        self.motor_driver.type_text(text)
+            active_win = None
+            if hasattr(self.motor_driver, "get_foreground_window"):
+                active_win = self.motor_driver.get_foreground_window()
+            elif sys.platform == "win32" and not self.force_virtual_motor:
+                try:
+                    import win32gui
+                    hwnd = win32gui.GetForegroundWindow()
+                    if hwnd:
+                        active_win = win32gui.GetWindowText(hwnd)
+                except Exception:
+                    pass
+            active_str = (active_win or foreground_app or "").lower()
+            is_terminal = any(term in active_str for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
+            if is_terminal:
+                self.motor_driver.press_hotkey("ctrl", "u")
+            else:
+                self.motor_driver.press_hotkey("ctrl", "a")
+                self.motor_driver.press_key("backspace")
+
+        pre_state = self.eye.observe() if verify_action else None
+
+        # Mid-typing focus loss check callback
+        def _focus_check() -> bool:
+            if foreground_app is not None:
+                cur_win = None
+                if hasattr(self.motor_driver, "get_foreground_window"):
+                    cur_win = self.motor_driver.get_foreground_window()
+                if cur_win is not None and foreground_app.lower() not in cur_win.lower():
+                    return False
+            return True
+
+        if hasattr(self.motor_driver, "type_text"):
+            try:
+                self.motor_driver.type_text(text, focus_check_fn=_focus_check)
+            except TypeError:
+                self.motor_driver.type_text(text)
         if press_enter:
             self.motor_driver.press_key("enter")
 
@@ -718,7 +826,7 @@ class AVCSController:
             v_res = self.verifier.verify_action(
                 action_name="type_text",
                 target=current_gaze,
-                pre_state=None,
+                pre_state=pre_state,
                 settle_ms=40.0,
             )
             verified = v_res.status == VerificationStatus.VERIFIED

@@ -1,0 +1,29 @@
+{
+  "scenario_a_static_idle": {
+    "pass": true,
+    "max_motion": 0.0,
+    "max_surprise": 0.0
+  },
+  "scenario_b_cursor_motion": {
+    "pass": true,
+    "mean_motion": 0.00030206427618395537,
+    "overlay_fps": 0
+  },
+  "scenario_c_modal_dialog": {
+    "pass": true,
+    "surprise": 1.0,
+    "overlay_suspected": true,
+    "category": "desktop_canvas"
+  },
+  "scenario_d_window_transition": {
+    "pass": true,
+    "ripple_verified": true,
+    "optical_delta": 0.346567839384079,
+    "category": "terminal_shell"
+  },
+  "scenario_e_identity_persistence": {
+    "pass": true,
+    "persistence_rate_pct": 100.0
+  },
+  "all_scenarios_passed": true
+}

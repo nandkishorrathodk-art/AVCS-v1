@@ -22,6 +22,7 @@ from avcs.events import VisualEvent, VisualEventStreamer, VisualEventType
 from avcs.focus import VisualFocusDetector, VisualFocusState
 from avcs.grounding import FovealInspection, GroundingResult
 from avcs.human_eye import HumanEye, HumanEyeState, MovingObject
+from avcs.observation import SceneObservation, VisualObservationEngine
 from avcs.memory import UIMLTree, VisualDiff, VisualMemorySnapshot
 from avcs.servoing import (
     NeuromuscularServoingController,
@@ -204,6 +205,13 @@ class HumanEyeClient:
     def see(self, frame: Optional[np.ndarray] = None) -> HumanEyeState:
         """Perceives the visual field immediately through the Eyes."""
         return self.perceive(frame=frame)
+
+    def observe(self, frame: Optional[np.ndarray] = None) -> SceneObservation:
+        """Returns a privacy-preserving, evidence-backed SceneObservation for System 2."""
+        state = self.perceive(frame=frame)
+        if not hasattr(self, "_observation_engine"):
+            self._observation_engine = VisualObservationEngine()
+        return self._observation_engine.generate(state, frame=frame)
 
     @property
     def current_state(self) -> HumanEyeState:
