@@ -6,6 +6,14 @@ Developed by Parth Labs under the direction of **Nandkishor Rathod** (Project Ow
 
 ---
 
+### Core Documentation Links
+* 📄 **[Product Requirements Document (PRD.md)](PRD.md)** — Full specification, biological vision architecture, and design targets.
+* 🤝 **[Contribution Guide (CONTRIBUTING.md)](CONTRIBUTING.md)** — Clean-room rules, open challenges, test instructions, and PR guidelines.
+* 🎯 **[Goals & Honest Reality (GOAL.md)](GOAL.md)** — Unvarnished engineering reality, live test findings, and hardware limits.
+* 📊 **[Project Status & Milestones (PROJECT.md)](PROJECT.md)** — Current feature inventory, test results, and milestone ledger.
+
+---
+
 ## 1. What We Are Building (Kya Bana Rahe Hain)
 
 AVCS is designed as a **two-tier biological vision and cognition architecture** for computer interaction:
