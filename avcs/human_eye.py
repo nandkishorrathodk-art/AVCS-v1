@@ -753,7 +753,7 @@ class HumanEye(nn.Module):
             else:
                 frame_rgb = frame_sub
 
-            t_in = torch.from_numpy(np.ascontiguousarray(frame_rgb)).float() / 255.0
+            t_in = torch.from_numpy(np.ascontiguousarray(frame_rgb).copy()).float() / 255.0
             t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
             if t_in.shape[-2:] != self.input_size:
                 t_resized = F.interpolate(t_in, size=self.input_size, mode="bilinear", align_corners=False)

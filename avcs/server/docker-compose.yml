@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  avcs-cloud:
+    build:
+      context: ../..
+      dockerfile: avcs/server/Dockerfile
+    container_name: avcs-cloud-engine
+    restart: always
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      AVCS_INFERENCE_API_KEY: ${AVCS_INFERENCE_API_KEY:?Set AVCS_INFERENCE_API_KEY to a random secret of at least 32 characters}
+      OMP_NUM_THREADS: "1"
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G

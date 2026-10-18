@@ -1,0 +1,24 @@
+{
+  "release_name": "avcs-system1-v1.0.0-preview.1",
+  "package_name": "avcs-system1",
+  "package_version": "1.0.0rc1",
+  "model_architecture": "AVCSSystem1V1",
+  "checkpoint_file": "avcs_system1_v1.pt (not included)",
+  "checkpoint_schema_version": 2,
+  "parameter_count": 1663564,
+  "checkpoint_sha256": "c30eb0686da96eb6f67981021bcb646b60b3ed6b050927ee97085e59ee6125a4",
+  "local_evaluation_report_sha256": "bc99d821845211006bcc383da48d37282246513d470ffe28b5bf583c38a88a00",
+  "inference_device_default": "cpu",
+  "runtime_dependencies": {
+    "torch": ">=2.0.0",
+    "numpy": ">=1.24.0,<3.0",
+    "Pillow": ">=9.0.0"
+  },
+  "dataset_provenance": "The training manifest identifies procedural synthetic data, but candidate-checkpoint lineage and separate data redistribution rights are not established. Data, annotations, and evaluation report are excluded.",
+  "software_license": "Apache-2.0",
+  "checkpoint_redistribution_status": "BLOCKED; checkpoint and inherited candidate weights are not included.",
+  "dataset_redistribution_status": "UNKNOWN; dataset frames and annotations are not included.",
+  "evaluation_report_redistribution_status": "UNKNOWN; report is not included pending dataset-rights review.",
+  "distribution_scope": "Source-only package; no trained checkpoint, candidate weights, data, annotations, screenshots, or evaluation report.",
+  "publication_status": "Locally packaged source-only preview; not uploaded or published."
+}
