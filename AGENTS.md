@@ -198,6 +198,11 @@ fixing the echo problem (see below).
 Pure-pixel visual awareness of the desktop. Read `docs/SCREEN_VISION.md`. The
 facts to keep straight:
 
+- AVCS System 1 is intended to run locally; System 2 may be a cloud LLM that
+  receives bounded text observations and returns high-level goals. Do not send
+  frames or visual embeddings to System 2. Follow the engineering and evidence
+  requirements in `docs/AVCS_ENGINEERING_RULES.md`.
+
 - The **reflex layer** is non-generative (typed `SceneState`, no text model) and
   runs every captured frame. Measured full-tick p50 ~3.7 ms (reflex + model
   forward) at a 16x24 tile grid, so the 40-80 ms real-time budget is met with

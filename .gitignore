@@ -8,9 +8,14 @@ __pycache__/
 *.key
 *.p12
 *.pfx
-runs/
+runs/*
+!runs/weights/
+runs/weights/*
+!runs/weights/candidates/
 .pytest_cache/
 *.pt
+!runs/weights/candidates/*.pt
+!runs/weights/candidates/*.json
 *.pth
 *.safetensors
 *.onnx
@@ -22,4 +27,5 @@ pilot-results/
 m7-results/
 m8-live-results/
 .agents/
-.gravitas/
+.gravitas/
+scratch/

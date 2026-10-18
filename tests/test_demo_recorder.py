@@ -1,4 +1,5 @@
 import ctypes
+import json
 from ctypes import wintypes
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 from avcs.training.demo_recorder import (
     WindowInfo,
     WindowsDemoRecorder,
+    build_absence_record,
     build_click_record,
     crop_window_frame,
     find_exact_window_title,
@@ -136,6 +138,19 @@ def test_click_record_contains_no_captured_keystrokes_or_text():
     }
     assert "typed_text" not in record
     assert "key" not in record["action"]
+
+
+def test_absence_record_has_no_fabricated_click_coordinate():
+    record = build_absence_record(
+        task="Find a missing Save button",
+        target_label="Save button",
+        frame_path="frames/sample.png",
+        recorded_at_utc="2026-10-11T00:00:00+00:00",
+    )
+
+    assert record["action"] == {"type": "target_absent"}
+    assert record["target_label"] == "Save button"
+    assert "point_norm" not in record["action"]
 
 
 def test_calibration_stream_keeps_pixels_in_memory_and_stops_if_window_closes(tmp_path):
@@ -299,6 +314,81 @@ def test_recorder_rejects_invalid_predeclared_target_labels(tmp_path):
                 user32=object(),
                 target_labels=[label],
             )
+
+
+def test_recorder_supports_predeclared_absence_labels(tmp_path):
+    events = []
+    recorder = WindowsDemoRecorder(
+        window_title="Untitled - Notepad",
+        task="Calibrate target absence",
+        output_dir=tmp_path / "session",
+        user32=object(),
+        absent_target_labels=["Save button", "Export menu"],
+        event_sink=events.append,
+    )
+
+    recorder._announce_next_absent_label(0)
+
+    assert events == ["Next absent target (1/2): Save button"]
+    assert recorder._next_absent_label() == "Save button"
+    assert not recorder._all_predefined_targets_recorded(0, 1)
+    assert recorder._next_absent_label() == "Export menu"
+    assert recorder._all_predefined_targets_recorded(0, 2)
+
+
+def test_recorder_writes_target_absence_sample_without_audit_click(tmp_path):
+    class Capture:
+        virtual_left = 0
+        virtual_top = 0
+        virtual_width = 100
+        virtual_height = 80
+
+        def open(self):
+            pass
+
+        def get_geometry(self):
+            return self
+
+        def grab_region(self, rect):
+            return np.zeros((rect[3] - rect[1], rect[2] - rect[0], 3), dtype=np.uint8)
+
+        def close(self):
+            pass
+
+    class Recorder(WindowsDemoRecorder):
+        def _selected_window(self):
+            return WindowInfo(1, "AVCS_DEMO_WINDOW", (0, 0, 100, 80))
+
+        def _owns_foreground(self, _target_hwnd):
+            return True
+
+        def _left_button_down(self):
+            return False
+
+        def _right_button_down(self):
+            self.right_checks = getattr(self, "right_checks", 0) + 1
+            return self.right_checks == 2
+
+    output = tmp_path / "absence-session"
+    recorder = Recorder(
+        window_title="AVCS_DEMO_WINDOW",
+        task="Find an absent Save button",
+        output_dir=output,
+        capture=Capture(),
+        user32=object(),
+        absent_target_labels=["Save button"],
+        capture_interval=0.0001,
+        poll_interval=0.0001,
+    )
+
+    assert recorder.run() == 1
+    sample = json.loads((output / "samples.jsonl").read_text(encoding="utf-8"))
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+
+    assert sample["action"] == {"type": "target_absent"}
+    assert sample["target_label"] == "Save button"
+    assert manifest["sample_count"] == 1
+    assert list((output / "audit").iterdir()) == []
 
 
 def test_win32_hardware_input_uses_documented_field_names():

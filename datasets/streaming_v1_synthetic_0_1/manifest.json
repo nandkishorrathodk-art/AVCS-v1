@@ -1,0 +1,492 @@
+{
+  "annotation_policy": {
+    "change_masks": "pixel-difference masks generated from known procedural frames",
+    "missing_or_ambiguous": "represented explicitly in each recording annotation-status map",
+    "motion_grid_displacement": "ground-truth translating-object displacement in normalized grid units"
+  },
+  "created_by": "avcs.streaming_v1.data.generate_procedural_sequences",
+  "dataset_version": "avcs-streaming-v1-synthetic-0.1.0",
+  "generation": {
+    "frames_per_recording": 24,
+    "generator_sha256": "84d9f09a30afc83df2619473fc761122c061a3545c27cccae8fcceac906a1937",
+    "height": 64,
+    "nominal_fps": 10.0,
+    "recordings_per_split": {
+      "test": 4,
+      "train": 12,
+      "validation": 4
+    },
+    "scene": "textured background, translating colored rectangle, occasional occluding bar",
+    "seed": 731,
+    "width": 64
+  },
+  "recordings": [
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0000.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1329020134,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0000",
+      "sha256": "2b02b569dc63e695bfaae9c4212c76346559a87bf00830a41ee76c18d2b45b43",
+      "source_id": "8b8c250c69a8bf19680112513b9cffb49894806ed5a8f66c30bcd61386535532",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0001.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 813826977,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0001",
+      "sha256": "435fb09876d254c29defc61b8d80a9750ee6fe9676417e3fc6d2c25b735a74ce",
+      "source_id": "4d3b8deefdb9064ae471d3203f9512e18e51abbd8f0cee2154f5730acfd15bf9",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0002.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 710210862,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0002",
+      "sha256": "c8cc1e3123c76b073e7d7694b40d00914e98bf2da81c7dc212e1f8220afb9fcd",
+      "source_id": "3eec8457f02cd11428b62cbf268ffdbdb144c3a6ce89c04fd70df537b06ac54e",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0003.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 2144259486,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0003",
+      "sha256": "a343ec9627b958f032a0b544ce202591d449ec6dd80e04a25a098b0ac2c58774",
+      "source_id": "b29656d3a53e40f4185954c1ecb99a9e085de769abb91773400af875bb00fd12",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0004.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 962691537,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0004",
+      "sha256": "269f322a592264807ce4557513cfb93c9cc628c41fa92c7017506f815be57c38",
+      "source_id": "ae86e9bee68bee363f72e25b7d136565143f0c4657a4488a7f818061c01eca2c",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0005.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 2084964876,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0005",
+      "sha256": "fa7ec1fab26d17b584cffde9c738a01b72d7290eed09f69972924b87e6adb4ee",
+      "source_id": "07eefa2e7c8f11bc3cd139f9a59e674c347447773269d33d8e4d8ba8d5a6c255",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0006.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 856348087,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0006",
+      "sha256": "e2dee5c4ca94c90e9ba3b592bf2f6e3f613fee769cbf1a09ce5b41d19fedac18",
+      "source_id": "e484e045c4685573eb03192085577fd6e53c3933b441acc2790ce6540e98e731",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0007.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1334699286,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0007",
+      "sha256": "7a030142cb0e754a7062e0b1c7f2f8395a78454098104dbbe1669bf43a2f7479",
+      "source_id": "dd8e28f4eae547c30acce9a3fbbb6c431a8a96491f3e34d0315947cd5c147ce9",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0008.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 424062157,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0008",
+      "sha256": "c022e65304ab2079395b2c6111c57ba41d43d56836da8159b2b5e6d7425a591c",
+      "source_id": "697ffc975861b9bb33ffb299a2d8c7135852504a6c4d4ee19425fa294ead6f55",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0009.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1708896106,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0009",
+      "sha256": "54c9a5ba2f880e37231cd2c75f7944b1879625b16fcc0f876a4a76aaa12f01fc",
+      "source_id": "70040d798fffb7b9b576c7b65d9c55ae723f51aae981b9d87368a7a18d25af72",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0010.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 828725590,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0010",
+      "sha256": "62337c201464038c4f2b00b5cea73c69434ef8a66a6fbae9e31974ef5faa59bc",
+      "source_id": "c7fd812c10792a5beaffce84305a387686ceb63289a1b2471c5882a8a69f1b26",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\train-0011.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 101010247,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "train-0011",
+      "sha256": "6f270130752c8761d37382860390ca2c80ce1d09672221785c312445b2afe042",
+      "source_id": "997ce72df9530ee8b29de963f776b36993ad61c9c757b3f01c3fbcc87315d939",
+      "split": "train",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\validation-0012.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 2111944469,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "validation-0012",
+      "sha256": "75d18ba1f2f5423c7cdc8bc28d104a773485a81c26a682e0af9d958f2d3e1685",
+      "source_id": "cad6c3a92512cd897db240f3c9668d4cfafc9145b6bbdf92b4dccdf5dbb54e97",
+      "split": "validation",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\validation-0013.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 649070253,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "validation-0013",
+      "sha256": "e9f6fa281b158b63e9f33fd7783ac6a33cf844dcb4c6b6ad8da5b9228810e063",
+      "source_id": "38fac17f5f383f870baed8ace6827d6c029ea38a0beb72f46b65ae35872ae73f",
+      "split": "validation",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\validation-0014.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1842358711,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "validation-0014",
+      "sha256": "fb0448d32b4015ffd124245fc429fc613327fd8dc43c89fe2a5b7d6b04949558",
+      "source_id": "072bb61e72bfaa1273e5d9226b31e66a3ebf04052d262bb17eeb4d3d80caa349",
+      "split": "validation",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\validation-0015.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 483110951,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "validation-0015",
+      "sha256": "1009c3a485d12c5ef6f138e981eb963accc406fc0d76c48ae4f03b70eca877b4",
+      "source_id": "ea2a09859b863b99e6383d37c667e76ec241d72fc94f58475c07aa3d99e64c40",
+      "split": "validation",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\test-0016.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1055041345,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "test-0016",
+      "sha256": "a0aefbbfc4d432bc7d45ce6ccaf5f06b0267a2b329f7d990115cee45d987708a",
+      "source_id": "4d51913074690393ffe4850dddb25f1976ceab5592e41f4e611226f20d2eeac5",
+      "split": "test",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\test-0017.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 735474075,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "test-0017",
+      "sha256": "e08e8de8be42ebd3ff713e8ccb7977054474266778bc8e95363cde2e992d8dbc",
+      "source_id": "b6d570b2479c7ad8d329b01e30e0657400524fb8a7f5e5415564127d024bd797",
+      "split": "test",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\test-0018.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 1308246362,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "test-0018",
+      "sha256": "5f744399632a4889461be79af94fa7713cf7daadc7425f4ad70fa86188570c60",
+      "source_id": "07e77a0806c88235d38c4c714a47a6187d7fc34376630e8c179d81e12208eea9",
+      "split": "test",
+      "width": 64
+    },
+    {
+      "annotations": {
+        "change_masks": "available",
+        "motion_grid_displacement": "available",
+        "motion_mask": "available",
+        "object_identity": "not_collected",
+        "occlusion_events": "not_collected"
+      },
+      "frame_count": 24,
+      "height": 64,
+      "path": "recordings\\test-0019.npz",
+      "provenance": {
+        "external_assets": false,
+        "generator_seed": 121788883,
+        "kind": "procedurally_generated",
+        "rights_evidence": "project-owner review and signed manifest-bound approval pending"
+      },
+      "recording_id": "test-0019",
+      "sha256": "e6a5be07a1a6b8dbd44bfa3fa5c09800de59975d28af3fe6bd16fb72b5209604",
+      "source_id": "8e749e0f1f743a6d9ab9e451badddfd22556f8bfde5abb7882a099f3766293b2",
+      "split": "test",
+      "width": 64
+    }
+  ],
+  "rights": {
+    "distribution": "NOT_AUTHORIZED",
+    "external_assets": false,
+    "internal_training": "PENDING",
+    "status": "PENDING_OWNER_ATTESTATION"
+  },
+  "schema": "avcs.streaming.sequence.v1"
+}

@@ -1,0 +1,638 @@
+[
+  {
+    "path": "runs\\cortex_2m\\cortex_2m_best.pt",
+    "size_bytes": 9833615,
+    "sha256": "9827e2a6200385af84c40eca9b1074ef7ca73ace19e00ba810b17ad5bcba9d1f",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 2442047,
+    "metadata": {
+      "epoch": 5,
+      "val_loss": 1.8352895021438598,
+      "val_cat_acc": 10.833333333333334,
+      "total_parameters": 2433257,
+      "universal_categories": [
+        "editor_code",
+        "terminal_shell",
+        "git_diff_viewer",
+        "database_client",
+        "data_spreadsheet",
+        "document_writer",
+        "presentation_slides",
+        "pdf_reader",
+        "graphic_canvas",
+        "vector_design",
+        "cad_3d_modeling",
+        "video_editor",
+        "audio_daw",
+        "media_player",
+        "file_explorer",
+        "task_manager",
+        "system_settings",
+        "installer_wizard",
+        "notification_hub",
+        "browser_web",
+        "email_client",
+        "chat_collaboration",
+        "video_conference",
+        "calculator",
+        "archive_tool",
+        "game_viewport",
+        "hardware_monitor",
+        "virtual_machine",
+        "remote_desktop",
+        "desktop_canvas",
+        "modal_dialog",
+        "unknown_window"
+      ],
+      "universal_affordances": [
+        "static_background",
+        "button_primary",
+        "button_secondary",
+        "icon_tool",
+        "tab_header",
+        "menu_item",
+        "dropdown_select",
+        "text_field_single",
+        "text_field_multiline",
+        "code_editor_line",
+        "spreadsheet_cell",
+        "checkbox_toggle",
+        "radio_option",
+        "slider_track",
+        "splitter_pane",
+        "scrollbar_thumb",
+        "canvas_anchor_handle",
+        "tree_node_expand",
+        "table_column_header",
+        "modal_scrim_dismiss",
+        "tooltip_hover",
+        "notification_close",
+        "draggable_titlebar",
+        "hyperlink"
+      ]
+    },
+    "sample_keys": [
+      "backbone.stem.conv.weight",
+      "backbone.stem.bn.weight",
+      "backbone.stem.bn.bias",
+      "backbone.stem.bn.running_mean",
+      "backbone.stem.bn.running_var",
+      "backbone.stem.bn.num_batches_tracked",
+      "backbone.stage1.0.block.0.conv.weight",
+      "backbone.stage1.0.block.0.bn.weight"
+    ],
+    "total_keys": 174
+  },
+  {
+    "path": "runs\\temporal_cortex\\temporal_change_weighted.pt",
+    "size_bytes": 498409,
+    "sha256": "6787c65445809658f23795bc7b9c8f3f2ebce31e568c5326120d48b044934250",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 121986,
+    "metadata": {
+      "format_version": 1,
+      "model": "TemporalVisualCortex",
+      "loss_history": [
+        {
+          "epoch": 1.0,
+          "total": 1.2980276973623979,
+          "prediction": 0.400154814908379,
+          "variance": 0.8657092953983107,
+          "decorrelation": 0.004604164064594921,
+          "photometric": 0.027312769407504482,
+          "changed_pixel_fraction": 0.004702116313733552,
+          "motion_smoothness": 0.09333287571605883,
+          "batches": 19.0,
+          "pairs": 146.0
+        },
+        {
+          "epoch": 2.0,
+          "total": 1.0434052881441618,
+          "prediction": 0.3777361731780203,
+          "variance": 0.6277931567869688,
+          "decorrelation": 0.31330602851353195,
+          "photometric": 0.021517768208133548,
+          "changed_pixel_fraction": 0.005332143683182566,
+          "motion_smoothness": 0.07651892814197038,
+          "batches": 19.0,
+          "pairs": 146.0
+        },
+        {
+          "epoch": 3.0,
+          "total": 0.8690320943531237,
+          "prediction": 0.3611743261939601,
+          "variance": 0.43408845757183273,
+          "decorrelation": 1.3098065700185926,
+          "photometric": 0.018384385461869993,
+          "changed_pixel_fraction": 0.0050827829461348685,
+          "motion_smoothness": 0.05985317810585624,
+          "batches": 19.0,
+          "pairs": 146.0
+        }
+      ],
+      "evaluation_status": "not_evaluated"
+    },
+    "sample_keys": [
+      "encoder.0.0.weight",
+      "encoder.0.1.weight",
+      "encoder.0.1.bias",
+      "encoder.1.0.weight",
+      "encoder.1.1.weight",
+      "encoder.1.1.bias",
+      "encoder.2.0.weight",
+      "encoder.2.1.weight"
+    ],
+    "total_keys": 22
+  },
+  {
+    "path": "runs\\temporal_cortex\\temporal_stream_a.pt",
+    "size_bytes": 498021,
+    "sha256": "1a22e3aadad036ec85dca4a62c8490ad9382c9d2e01ef7205c55b9621c6fcf47",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 121986,
+    "metadata": {
+      "format_version": 1,
+      "model": "TemporalVisualCortex",
+      "loss_history": [
+        {
+          "epoch": 1.0,
+          "total": 1.1053619782129924,
+          "prediction": 0.41474337577819825,
+          "variance": 0.613460781176885,
+          "decorrelation": 1.0592449953158696,
+          "photometric": 0.029917640487353007,
+          "motion_smoothness": 0.0974070464571317,
+          "batches": 15.0,
+          "pairs": 115.0
+        },
+        {
+          "epoch": 2.0,
+          "total": 0.9330474376678467,
+          "prediction": 0.400513356924057,
+          "variance": 0.3978781541188558,
+          "decorrelation": 2.6931448578834534,
+          "photometric": 0.02298088458677133,
+          "motion_smoothness": 0.07898469815651575,
+          "batches": 15.0,
+          "pairs": 115.0
+        },
+        {
+          "epoch": 3.0,
+          "total": 0.8612871050834656,
+          "prediction": 0.3623307784398397,
+          "variance": 0.3717181086540222,
+          "decorrelation": 2.648699084917704,
+          "photometric": 0.018195475886265435,
+          "motion_smoothness": 0.06189563348889351,
+          "batches": 15.0,
+          "pairs": 115.0
+        }
+      ],
+      "evaluation_status": "not_evaluated"
+    },
+    "sample_keys": [
+      "encoder.0.0.weight",
+      "encoder.0.1.weight",
+      "encoder.0.1.bias",
+      "encoder.1.0.weight",
+      "encoder.1.1.weight",
+      "encoder.1.1.bias",
+      "encoder.2.0.weight",
+      "encoder.2.1.weight"
+    ],
+    "total_keys": 22
+  },
+  {
+    "path": "runs\\temporal_cortex\\temporal_stride2.pt",
+    "size_bytes": 498185,
+    "sha256": "9f55e7a4eb9ac755b9efb6cabf4ed5da5b5726e969e6d791103451b13d7393f2",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 121986,
+    "metadata": {
+      "format_version": 1,
+      "model": "TemporalVisualCortex",
+      "loss_history": [
+        {
+          "epoch": 1.0,
+          "total": 1.3651943683624268,
+          "prediction": 0.4108766853809357,
+          "variance": 0.9209142923355103,
+          "decorrelation": 0.0001750473995343782,
+          "photometric": 0.028525546379387378,
+          "changed_pixel_fraction": 0.008971405029296876,
+          "motion_smoothness": 0.09741651490330697,
+          "batches": 10.0,
+          "pairs": 74.0
+        },
+        {
+          "epoch": 2.0,
+          "total": 1.26148601770401,
+          "prediction": 0.38754530549049376,
+          "variance": 0.845965838432312,
+          "decorrelation": 0.002964440610958263,
+          "photometric": 0.023252636753022672,
+          "changed_pixel_fraction": 0.009049224853515624,
+          "motion_smoothness": 0.09207399263978004,
+          "batches": 10.0,
+          "pairs": 74.0
+        },
+        {
+          "epoch": 3.0,
+          "total": 1.1384658932685852,
+          "prediction": 0.37026615142822267,
+          "variance": 0.7410394668579101,
+          "decorrelation": 0.0321118432097137,
+          "photometric": 0.021562032774090766,
+          "changed_pixel_fraction": 0.008978271484375,
+          "motion_smoothness": 0.08627505898475647,
+          "batches": 10.0,
+          "pairs": 74.0
+        }
+      ],
+      "evaluation_status": "not_evaluated"
+    },
+    "sample_keys": [
+      "encoder.0.0.weight",
+      "encoder.0.1.weight",
+      "encoder.0.1.bias",
+      "encoder.1.0.weight",
+      "encoder.1.1.weight",
+      "encoder.1.1.bias",
+      "encoder.2.0.weight",
+      "encoder.2.1.weight"
+    ],
+    "total_keys": 22
+  },
+  {
+    "path": "runs\\temporal_cortex\\temporal_v1.pt",
+    "size_bytes": 497789,
+    "sha256": "3c22b83cde32d4bd3c49992295a031fa1aea17caad4f0536156f233bb704df81",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 121986,
+    "metadata": {
+      "format_version": 1,
+      "model": "TemporalVisualCortex",
+      "loss_history": [
+        {
+          "epoch": 1.0,
+          "total": 1.1579648190074496,
+          "prediction": 0.43398785922262406,
+          "variance": 0.5922974348068237,
+          "decorrelation": 0.5275421234675579,
+          "photometric": 0.10642467935880025,
+          "motion_smoothness": 0.08306296749247445,
+          "batches": 9.0,
+          "pairs": 68.0
+        },
+        {
+          "epoch": 2.0,
+          "total": 0.9710042741563585,
+          "prediction": 0.3880790140893724,
+          "variance": 0.408490647872289,
+          "decorrelation": 2.2151087125142417,
+          "photometric": 0.08195906049675411,
+          "motion_smoothness": 0.07742459409766728,
+          "batches": 9.0,
+          "pairs": 68.0
+        },
+        {
+          "epoch": 3.0,
+          "total": 0.9094125628471375,
+          "prediction": 0.3719985220167372,
+          "variance": 0.3571532898479038,
+          "decorrelation": 2.5818204283714294,
+          "photometric": 0.07332878932356834,
+          "motion_smoothness": 0.07318273683389027,
+          "batches": 9.0,
+          "pairs": 68.0
+        }
+      ],
+      "evaluation_status": "not_evaluated"
+    },
+    "sample_keys": [
+      "encoder.0.0.weight",
+      "encoder.0.1.weight",
+      "encoder.0.1.bias",
+      "encoder.1.0.weight",
+      "encoder.1.1.weight",
+      "encoder.1.1.bias",
+      "encoder.2.0.weight",
+      "encoder.2.1.weight"
+    ],
+    "total_keys": 22
+  },
+  {
+    "path": "runs\\ui_grounder\\grounder_checkpoint.pt",
+    "size_bytes": 5522961,
+    "sha256": "3e54904aeb95455d4937a585aff5c754c32526442d1fa5f82b669a4bf94d5ef9",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 1,
+    "parameter_count": 1362395,
+    "metadata": {
+      "schema_version": 1,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_demonstrations",
+      "training_samples": 160,
+      "validation_samples": 40,
+      "input_size": 256,
+      "feature_dim": 192,
+      "training_history": [
+        {
+          "epoch": 1,
+          "train_loss": 133.1486343383789,
+          "val_loss": 171.50860595703125,
+          "top1_acc_pct": 0.0,
+          "med_pixel_err": 213.50512380332526,
+          "learning_rate": 0.0003333333333333333,
+          "epoch_sec": 32.14
+        },
+        {
+          "epoch": 2,
+          "train_loss": 80.20878868103027,
+          "val_loss": 125.33321533203124,
+          "top1_acc_pct": 0.0,
+          "med_pixel_err": 234.67748208158355,
+          "learning_rate": 0.0005,
+          "epoch_sec": 29.23
+        },
+        {
+          "epoch": 3,
+          "train_loss": 50.40794143676758,
+          "val_loss": 54.11402282714844,
+          "top1_acc_pct": 0.0,
+          "med_pixel_err": 180.27992631347482,
+          "learning_rate": 0.0005,
+          "epoch_sec": 29.75
+        },
+        {
+          "epoch": 4,
+          "train_loss": 36.3585168838501,
+          "val_loss": 34.18020782470703,
+          "top1_acc_pct": 0.0,
+          "med_pixel_err": 3.953778981667444,
+          "learning_rate": 0.000255,
+          "epoch_sec": 30.4
+        },
+        {
+          "epoch": 5,
+          "train_loss": 28.23819236755371,
+          "val_loss": 28.723486709594727,
+          "top1_acc_pct": 0.0,
+          "med_pixel_err": 3.531602136206603,
+          "learning_rate": 1e-05,
+          "epoch_sec": 29.58
+        }
+      ],
+      "timestamp": 1792221779.2900438
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.0.block.0.conv.weight",
+      "visual_encoder.stage1.0.block.0.bn.weight"
+    ],
+    "total_keys": 193
+  },
+  {
+    "path": "runs\\ui_grounder\\test_grounder.pt",
+    "size_bytes": 835182,
+    "sha256": "10d98d1c83b532d8ff202fcaeeba633eda3b5547e9a409a1288f8d46b865e368",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 1,
+    "parameter_count": 201758,
+    "metadata": {
+      "schema_version": 1,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_demonstrations",
+      "training_samples": 160,
+      "validation_samples": 40,
+      "input_size": 256,
+      "target_presence_threshold": 0.4
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.block.0.conv.weight",
+      "visual_encoder.stage1.block.0.bn.weight"
+    ],
+    "total_keys": 81
+  },
+  {
+    "path": "runs\\weights\\avcs_cortex_weights.pt",
+    "size_bytes": 4659747,
+    "sha256": "22a76dd1a65819b15d21cf8e7b979ba982a4f66c880f2c66455a7732215c1dac",
+    "model_type": "dict",
+    "schema_version": "unknown",
+    "parameter_count": 1145138,
+    "metadata": {},
+    "sample_keys": [
+      "backbone.stem.conv.weight",
+      "backbone.stem.bn.weight",
+      "backbone.stem.bn.bias",
+      "backbone.stem.bn.running_mean",
+      "backbone.stem.bn.running_var",
+      "backbone.stem.bn.num_batches_tracked",
+      "backbone.stage1.block.0.conv.weight",
+      "backbone.stage1.block.0.bn.weight"
+    ],
+    "total_keys": 214
+  },
+  {
+    "path": "runs\\weights\\candidates\\candidate_m3_foveal_v1.pt",
+    "size_bytes": 770321,
+    "sha256": "9fac88b0b99aca5cd5b7f23692128435f6147de714c1b80cb060874e12b75f54",
+    "model_type": "avcs_query_conditioned_foveal_refiner",
+    "schema_version": 2,
+    "parameter_count": 187484,
+    "metadata": {
+      "schema_version": 2,
+      "model_type": "avcs_query_conditioned_foveal_refiner",
+      "query_dim": 128,
+      "visual_channels": 32,
+      "fovea_crop_size": 96,
+      "epoch": 14,
+      "best_val_med_err_px": 0.75,
+      "best_val_p95_err_px": 38.93,
+      "val_acc_3px": 63.26,
+      "train_samples": 2560,
+      "val_samples": 640,
+      "trained_timestamp": 1792259905.526229
+    },
+    "sample_keys": [
+      "query_encoder.embedding.weight",
+      "query_encoder.convolutions.0.weight",
+      "query_encoder.convolutions.0.bias",
+      "query_encoder.convolutions.2.weight",
+      "query_encoder.convolutions.2.bias",
+      "query_encoder.projection.0.weight",
+      "query_encoder.projection.0.bias",
+      "query_encoder.projection.1.weight"
+    ],
+    "total_keys": 55
+  },
+  {
+    "path": "runs\\weights\\candidates\\candidate_m3_highres_v1.pt",
+    "size_bytes": 5522122,
+    "sha256": "74412a750d6e28bbecd15b2dad84ee4110d2ce3b10bcfc4f70a173fcff18e2e1",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 1,
+    "parameter_count": 1362395,
+    "metadata": {
+      "schema_version": 1,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_demonstrations",
+      "training_samples": 2056,
+      "validation_samples": 514,
+      "held_out_test_samples": 40,
+      "input_size": 256,
+      "split_seed": 42,
+      "best_val_accuracy_pct": 95.22292993630573,
+      "best_val_median_error_px": 1.901221056095083
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.0.block.0.conv.weight",
+      "visual_encoder.stage1.0.block.0.bn.weight"
+    ],
+    "total_keys": 193
+  },
+  {
+    "path": "runs\\weights\\candidates\\candidate_m3_highres_v2.pt",
+    "size_bytes": 5524041,
+    "sha256": "600ce046539c1274dd265166933660f2ab2005e412517eee74c4df26071c673f",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 2,
+    "parameter_count": 1362460,
+    "metadata": {
+      "schema_version": 2,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_and_absence_demonstrations",
+      "training_samples": 2392,
+      "validation_samples": 682,
+      "held_out_test_samples": 40,
+      "target_presence_threshold": 0.55,
+      "input_size": 256
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.0.block.0.conv.weight",
+      "visual_encoder.stage1.0.block.0.bn.weight"
+    ],
+    "total_keys": 195
+  },
+  {
+    "path": "runs\\weights\\candidates\\candidate_m3_reranker_v1.pt",
+    "size_bytes": 468885,
+    "sha256": "8c9d8d299aad56f324f32cd08e986aead344fb5bdfd4102f2785727f3935e007",
+    "model_type": "avcs_candidate_disambiguator_v1",
+    "schema_version": 1,
+    "parameter_count": 115969,
+    "metadata": {
+      "model_type": "avcs_candidate_disambiguator_v1",
+      "schema_version": 1,
+      "k_candidates": 4,
+      "margin_threshold": 0.25,
+      "conflict_distance_px": 12.0,
+      "best_val_rerank_acc": 98.08306709265176,
+      "val_coarse_acc": 97.44408945686901,
+      "epochs_trained": 3,
+      "coarse_checkpoint": "runs/weights/candidates/candidate_m3_highres_v2.pt"
+    },
+    "sample_keys": [
+      "scoring_mlp.0.weight",
+      "scoring_mlp.0.bias",
+      "scoring_mlp.1.weight",
+      "scoring_mlp.1.bias",
+      "scoring_mlp.4.weight",
+      "scoring_mlp.4.bias",
+      "scoring_mlp.5.weight",
+      "scoring_mlp.5.bias"
+    ],
+    "total_keys": 10
+  },
+  {
+    "path": "runs\\weights\\goal_grounder_best.pt",
+    "size_bytes": 5522122,
+    "sha256": "4e2beb5104d7d5a86c3506c1f748cf511ad8fb88611ce33661e867e052abbb52",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 1,
+    "parameter_count": 1362395,
+    "metadata": {
+      "schema_version": 1,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_demonstrations",
+      "training_samples": 1256,
+      "validation_samples": 314,
+      "held_out_test_samples": 40,
+      "input_size": 256,
+      "split_seed": 42,
+      "best_val_accuracy_pct": 94.5859872611465,
+      "best_val_median_error_px": 2.052829790903852
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.0.block.0.conv.weight",
+      "visual_encoder.stage1.0.block.0.bn.weight"
+    ],
+    "total_keys": 193
+  },
+  {
+    "path": "runs\\weights\\human_eye_weights.pt",
+    "size_bytes": 2190083,
+    "sha256": "587d166a0413b886214321a151a9f6baf70f8c1d222f2f53b0b44fef4570f345",
+    "model_type": "avcs_goal_conditioned_grounder",
+    "schema_version": 1,
+    "parameter_count": 201758,
+    "metadata": {
+      "schema_version": 1,
+      "model_type": "avcs_goal_conditioned_grounder",
+      "dataset_provenance": "recorded_ui_click_demonstrations",
+      "training_samples": 160,
+      "validation_samples": 40,
+      "held_out_test_samples": 40,
+      "negative_samples": 30,
+      "input_size": 256,
+      "feature_dim": 128,
+      "target_presence_threshold": 0.4
+    },
+    "sample_keys": [
+      "visual_encoder.stem.conv.weight",
+      "visual_encoder.stem.bn.weight",
+      "visual_encoder.stem.bn.bias",
+      "visual_encoder.stem.bn.running_mean",
+      "visual_encoder.stem.bn.running_var",
+      "visual_encoder.stem.bn.num_batches_tracked",
+      "visual_encoder.stage1.block.0.conv.weight",
+      "visual_encoder.stage1.block.0.bn.weight"
+    ],
+    "total_keys": 81
+  }
+]

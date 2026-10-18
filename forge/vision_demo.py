@@ -109,6 +109,7 @@ def main() -> None:
     if args.vlm:
         vlm = VLMDescriber.try_load()
         if vlm is not None:
+            describer = vlm
             print("  local VLM captioner available (change-only)")
         else:
             print("  VLM requested but unavailable -> model word head used")
@@ -184,7 +185,7 @@ def main() -> None:
     print(f"  FULL TICK p95   : {s['tick_p95_ms']} ms")
     print(f"  observed fps    : {s['fps']}  (capped by --fps)")
     print(f"  events emitted  : {s['events']}")
-    print(f"  descriptions    : {s['captions']}  (from the trained model)")
+    print(f"  descriptions    : {s['captions']}  (local, change-triggered)")
     print(f"\n  dashboard -> {html_path}")
     print(f"  live json -> {json_path}")
 

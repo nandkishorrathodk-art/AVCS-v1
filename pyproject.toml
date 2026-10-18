@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avcs-sdk"
-version = "0.1.1"
-description = "Experimental visual perception and temporal modeling tools for screen-based AI research."
+version = "0.2.0"
+description = "Real-Time Biological Artificial Visual Cortex System (AVCS - System 1: Eyes + Hands) for Autonomous Computer Use."
 readme = "README.md"
 authors = [
     { name = "Parth Labs", email = "contact@parthlabs.in" },
@@ -42,6 +42,7 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.22.0",
     "Pillow>=9.0.0",
+    "cryptography>=44.0.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,14 @@ desktop = [
 dev = [
     "pytest>=7.0.0",
     "wheel",
+]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "requests>=2.31.0",
+]
+client = [
+    "requests>=2.31.0",
 ]
 
 [project.urls]
@@ -70,10 +79,13 @@ avcs-record-demo = "avcs.training.demo_recorder:main"
 avcs-train-grounder = "avcs.training.train_grounder:main"
 avcs-evaluate-grounder = "avcs.training.evaluate_grounder:main"
 avcs-observe = "avcs.observe:main"
+avcs-demo = "avcs.demo_system2:main"
+avcs-train-ui-grounder = "avcs.training.train_ui_grounder:main"
+avcs-benchmark-grounder = "benchmarks.run_ui_grounding_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["adapters*", "avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*"]
+include = ["adapters*", "avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]

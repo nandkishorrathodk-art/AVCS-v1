@@ -2,18 +2,19 @@
 from __future__ import annotations
 
 import time
+
 import numpy as np
 import pytest
 
 from avcs.stream import (
+    GameReflexController,
     NeuroPacket,
     NeuroStreamBus,
     RealTimeNeuroStreamer,
-    GameReflexController,
 )
+from forge.vision.capture import SyntheticScreen
 from forge.vision.cortex.motor import VirtualCursorDriver
 from forge.vision.cortex.sdk import ScreenEye
-from forge.vision.capture import SyntheticScreen
 
 
 def test_neuro_packet_compact_packing():
@@ -28,7 +29,9 @@ def test_neuro_packet_compact_packing():
         surprise_score=0.12,
         inference_ms=3.7,
         action_hotspots=[(0.5, 0.5, "clickable", 0.9)],
+        source_frame_sequence=84,
     )
+    assert pkt.to_dict()["source_frame_sequence"] == 84
 
     data = pkt.pack_compact()
     assert len(data) == 40  # 40-byte C-ABI natural alignment

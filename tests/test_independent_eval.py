@@ -451,13 +451,13 @@ class TestRequirementR3CPUPerformance:
         eye = HumanEye(source="synthetic", load_weights=True)
         eye.eval()
 
-        # Warm-up (5 iterations)
-        for _ in range(5):
+        # Warm-up (10 iterations)
+        for _ in range(10):
             f = np.random.randint(0, 255, (360, 640, 3), dtype=np.uint8)
             eye.observe(f)
 
-        # Benchmark 40 iterations with dynamic changing frames
-        iterations = 40
+        # Benchmark 60 iterations with dynamic changing frames
+        iterations = 60
         tick_latencies_ms: List[float] = []
 
         for _ in range(iterations):

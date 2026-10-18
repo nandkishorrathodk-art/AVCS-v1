@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import List, Optional, Protocol, Set, Tuple
+from typing import Callable, List, Optional, Protocol, Set, Tuple
 
 from forge.vision.cortex.motor.failsafe import CornerBreakoutFailSafe, SafetyBreakoutException
 
@@ -79,6 +79,13 @@ class VirtualCursorDriver:
         self.typed_history: List[str] = []
         self.key_history: List[str] = []
         self.held_keys: Set[str] = set()
+        self.mock_foreground_window: Optional[str] = None
+
+    def set_foreground_window(self, title: Optional[str]) -> None:
+        self.mock_foreground_window = title
+
+    def get_foreground_window(self) -> Optional[str]:
+        return self.mock_foreground_window
 
     @property
     def screen_size(self) -> Tuple[int, int]:
@@ -142,11 +149,27 @@ class VirtualCursorDriver:
         key_delay_ms: int = 10,
         clear_first: bool = False,
         press_enter: bool = False,
+        focus_check_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._check_failsafe()
+        if focus_check_fn is not None and not focus_check_fn():
+            from avcs.perception.focus import FocusLostError
+            raise FocusLostError("Focus lost prior to typing.")
+
         if clear_first:
-            self.key_history.append("ctrl+a")
-            self.key_history.append("backspace")
+            active_win = (self.mock_foreground_window or "").lower()
+            is_terminal = any(term in active_win for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
+            if is_terminal:
+                self.key_history.append("ctrl+u")
+            else:
+                self.key_history.append("ctrl+a")
+                self.key_history.append("backspace")
+
+        if focus_check_fn is not None:
+            from avcs.perception.focus import FocusLostError
+            for idx, ch in enumerate(text):
+                if not focus_check_fn():
+                    raise FocusLostError(f"Focus lost mid-typing at character index {idx} ('{ch}').")
         self.typed_history.append(text)
         if press_enter:
             self.key_history.append("enter")

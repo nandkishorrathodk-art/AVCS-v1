@@ -1,0 +1,36 @@
+{
+  "benchmark_timestamp": "2026-10-18T04:17:39.467978+00:00",
+  "checkpoint_evaluated": "runs/weights/candidates/candidate_m3_word_recognizer_v1.pt",
+  "checkpoint_sha256": "2a63534dde9545d0f33d0632534349935e0f190646e2ecfd273caecfa5065639",
+  "parameter_count": 239716,
+  "vocabulary_size": 132,
+  "standalone_crop_evaluation": {
+    "test_crops_count": 316,
+    "negative_crops_count": 50,
+    "top1_accuracy_pct": 59.49,
+    "top3_accuracy_pct": 79.75,
+    "mean_cer_pct": 35.58,
+    "bg_rejection_rate_pct": 98.0,
+    "bg_false_positives": 1,
+    "single_crop_latency_p50_ms": 1.91,
+    "single_crop_latency_p95_ms": 2.96,
+    "batch_20_latency_p50_ms": 9.18,
+    "batch_20_latency_p95_ms": 11.88
+  },
+  "fpn_proposer_integration": {
+    "total_ground_truth": 316,
+    "total_proposals": 267,
+    "proposals_with_text": 36,
+    "spatial_recall_pct": 39.87,
+    "joint_spatial_and_text_accuracy_pct": 3.16,
+    "text_accuracy_on_localized_pct": 7.94
+  },
+  "combined_proposer_integration": {
+    "total_ground_truth": 316,
+    "total_proposals": 671,
+    "proposals_with_text": 34,
+    "spatial_recall_pct": 63.29,
+    "joint_spatial_and_text_accuracy_pct": 2.53,
+    "text_accuracy_on_localized_pct": 4.0
+  }
+}

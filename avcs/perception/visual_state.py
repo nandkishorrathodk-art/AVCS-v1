@@ -126,3 +126,4 @@ class VisualStateObservation:
             } if self.temporal_change else None,
             "uncertainty_flags": list(self.uncertainty_flags),
         }
+

@@ -20,6 +20,13 @@ from forge.vision.cortex.model import ArtificialVisualCortex, CortexState
 class UnvalidatedGroundingError(RuntimeError):
     """Raised when an unvalidated language-grounding estimate is used for motor input."""
 
+    def __str__(self) -> str:
+        base = super().__str__()
+        if "validated trained semantic grounding is unavailable" not in base:
+            return f"{base} (validated trained semantic grounding is unavailable)"
+        return base
+
+
 
 class ScreenEye:
     """The developer-facing Sensory Vision SDK for Computer-Use AI Agents.
@@ -136,13 +143,22 @@ class ScreenEye:
 
     def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """Returns an experimental, unvalidated normalized gaze estimate."""
-        import hashlib
-        # Deterministic text query embedding via SHA256 seed for reproducible visual attention
-        seed = int(hashlib.sha256(query.encode("utf-8")).hexdigest()[:8], 16)
-        rng = torch.Generator(device=self.device)
-        rng.manual_seed(seed)
-        text_emb = torch.randn(1, self.cortex.cfg.latent_dim, device=self.device, generator=rng)
-        text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
+        from avcs.goal_grounder import ByteQueryEncoder, encode_queries
+        if not hasattr(self, "_query_encoder") or self._query_encoder is None:
+            self._query_encoder = ByteQueryEncoder(output_dim=self.cortex.cfg.latent_dim).to(self.device)
+            self._query_encoder.eval()
+
+        clean_q = query.strip() if isinstance(query, str) else ""
+        if not clean_q:
+            clean_q = " "
+        encoded_bytes = clean_q.encode("utf-8")
+        if len(encoded_bytes) > 96:
+            clean_q = encoded_bytes[:96].decode("utf-8", errors="ignore") or " "
+
+        tokens = encode_queries([clean_q]).to(self.device)
+        with torch.inference_mode():
+            text_emb = self._query_encoder(tokens)
+            text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
 
         with self.engine._lock:
             if frame is None:

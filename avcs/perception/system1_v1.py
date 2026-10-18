@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from PIL import Image
 import torch
+from torch.torch_version import TorchVersion
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -568,14 +569,17 @@ class AVCSSystem1V1(nn.Module):
         self,
         output_path: str,
         training_metadata: Optional[Dict[str, Any]] = None,
+        checkpoint_name: Optional[str] = None,
     ) -> str:
         """Saves unified AVCSSystem1V1 weights and provenance metadata."""
+        if checkpoint_name is not None and Path(checkpoint_name).name != checkpoint_name:
+            raise ValueError("checkpoint_name must be a filename, not a path")
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         meta = training_metadata or {}
         payload = {
             "schema_version": SYSTEM1_V1_SCHEMA_VERSION,
             "architecture": "AVCSSystem1V1",
-            "checkpoint_name": SYSTEM1_V1_CHECKPOINT_NAME,
+            "checkpoint_name": checkpoint_name or SYSTEM1_V1_CHECKPOINT_NAME,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "parameter_count": self.total_parameters,
             "input_size": self.input_size,
@@ -660,7 +664,8 @@ class AVCSSystem1V1(nn.Module):
                     )
 
         try:
-            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            with torch.serialization.safe_globals([TorchVersion]):
+                ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
         except (EOFError, OSError, pickle.UnpicklingError, RuntimeError) as exc:
             raise ValueError(f"Invalid or incompatible checkpoint {checkpoint_path}: {exc}") from exc
         if not isinstance(ckpt, dict):

@@ -217,7 +217,9 @@ class TestCheckpointSerialization:
         model = AVCSSystem1V1()
         with tempfile.TemporaryDirectory() as tmpdir:
             ckpt_path = Path(tmpdir) / "test_sys1.pt"
-            sha256 = model.save_checkpoint(str(ckpt_path), training_metadata={"test": True})
+            sha256 = model.save_checkpoint(
+                str(ckpt_path), training_metadata={"torch": torch.__version__}
+            )
 
             assert ckpt_path.exists()
             assert (Path(tmpdir) / "test_sys1.json").exists()

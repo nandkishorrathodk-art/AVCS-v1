@@ -1,6 +1,7 @@
 # AVCS System 1 Platform Integration
 
-**Status:** design only; no platform endpoint or model deployment is enabled.
+**Status:** design only for System 1; the inspected platform has separate
+inference routes for other AVCS models.
 **Model package:** `avcs-system1` `1.0.0rc1` (preview `1.0.0-preview.1`).
 
 This document separates two repositories:
@@ -9,66 +10,77 @@ This document separates two repositories:
   Python package and its existing FastAPI inference service.
 - **Platform website repository:** `nandkishorrathodk-art/AVCS`, containing the
   Next.js application inspected at commit
-  `b917824cc5bef742da194ec77ba2f745b80ffe13` on 2026-10-18.
+  `7fc7a9ce902d6854fd9c3da6bb17d3786ed03b48` on 2026-10-18.
 
-The platform repository was inspected independently. The proposal below is
-not evidence that an endpoint has been implemented, that the platform accepts
-OpenAI-compatible requests, or that either repository has been deployed.
+The platform repository was inspected independently. Existing API-key
+authentication and other-model inference endpoints are implemented there, but
+they do not serve `AVCSSystem1V1`. This proposal is not evidence that a System 1
+endpoint or deployment exists.
 
 ## What exists today
 
-The inspected platform is a Next.js 16.4.2 application with Supabase
-authentication configuration, a browser-side heuristic affordance playground,
-and a browser-only API-key demonstration. It has no `src/app/api` route
-handlers, OpenAI chat-completions route, or configured model-provider client.
-The playground's connected-component/edge detector is explicitly documented
-as a heuristic, not a trained model. The API-key console keeps generated
-plaintext and its hash in component state; it does not persist keys or
-authenticate server requests. `vision:read` and `vision:write` are currently
-scope definitions, not deployed authorization.
+The inspected platform is a Next.js 16.4.2 Node application with Supabase
+dashboard authentication and SQLite-backed API-key and billing stores. It has
+authenticated routes including `POST /api/v1/perceive`,
+`POST /api/v1/ground`, and an OpenAI-shaped
+`POST /api/v1/chat/completions`. The API-key store persists SHA-256 hashes,
+checks scope/revocation/expiry, and applies a tier-based in-process
+sliding-window rate limit. The existing perception route uses `vision:read`
+and calls the separate Python worker's `/v1/perceive`; the worker runs the
+existing `HumanEye` component, not System 1. The `/api/v1/models` list likewise
+contains `avcs-human-eye` and `avcs-goal-grounder`, not `AVCSSystem1V1`.
+
+The existing public `/api/v1/perceive` route accepts base64 PNG/JPEG with an
+8 MiB decoded-image limit, but it parses JSON before enforcing any explicit raw
+request-body limit. The Python worker's current image decoder has no explicit
+byte or pixel-dimension limit, and no application-level worker rate or
+concurrency control was found. The platform request log stores metadata
+including client IP, but not image bytes in the inspected route. Hosting and
+proxy retention policies remain unknown.
 
 The model/source repository separately has a Python FastAPI server with
-authenticated `POST /v1/perceive` and `POST /v1/ground` operations. These
-currently use other AVCS components, base64 JSON, and the server-side
-`AVCS_INFERENCE_API_KEY` read through `X-API-Key`; they are not System 1
-endpoints. The Docker Compose service binds to loopback and has CPU/memory
-limits, but no application rate limiter or request-body cap was found in the
-server route. Do not treat that service as a ready public System 1 deployment.
+authenticated `POST /v1/perceive` and `POST /v1/ground` operations. They use
+other AVCS components and the server-side `AVCS_INFERENCE_API_KEY` in
+`X-API-Key`; they are not System 1 endpoints. The existing decoder processes
+images in memory but has no explicit size cap and can return decoder exception
+details. No actual hosting provider, deployed Python service, or deployment
+secrets were verified.
 
-No platform host, public API base URL, model-artifact host, per-user API-key
-store, or server-side retention policy was established by this inspection.
-The Next.js package scripts (`dev`, `build`, `start`) do not identify a hosting
-provider.
+No deployment provider or production environment configuration is identified
+in the inspected platform checkout. Its documentation expects a separately
+reachable Python service; it does not prove PyTorch hosting or a live
+deployment.
 
 ## Proposed public contract
 
-Implement a dedicated JSON API route in the platform repository, preferably
-`POST /v1/perception`. In a Next.js App Router deployment, a matching route
-handler can be placed at `src/app/v1/perception/route.ts`. Do not implement it
-as a chat-completions compatibility shim: System 1 is a typed visual
-observation API and does not need an LLM.
+Implement a dedicated public JSON API route in the platform repository at
+`POST /api/v1/perception` (`src/app/api/v1/perception/route.ts`) and a separate
+private Python worker route at `POST /v1/perception`. Do not implement it as a
+chat-completions compatibility shim: System 1 is a typed visual-observation
+API and does not need an LLM.
 
 ### Request
 
 ```http
-POST /v1/perception HTTP/1.1
+POST /api/v1/perception HTTP/1.1
 Authorization: Bearer avcs_live_<caller-key>
 Content-Type: application/json
 ```
 
 ```json
 {
-  "image_b64": "<base64-encoded PNG, JPEG, or WebP bytes>",
+  "image_base64": "<base64-encoded PNG or JPEG bytes>",
   "query": "Save button"
 }
 ```
 
-`query` is optional. Decode the image to RGB before inference. Reject malformed
-base64, unsupported image formats, empty images, oversized payloads, invalid
-dimensions, and queries exceeding the documented UTF-8 byte limit. The caller's
-API key must be resolved server-side from a persistent hashed-key store and
-authorized for `vision:write`; reject missing, revoked, expired, or
-under-scoped keys. Browser-side key-generation state is not authentication.
+`query` is optional. The existing platform parser supports PNG/JPEG and an
+8 MiB decoded-image limit; it does not currently support WebP. Decode the image
+to RGB before inference. Reject malformed base64, unsupported formats, empty
+images, oversized raw/decoded payloads, invalid dimensions, and queries over
+256 UTF-8 bytes. Reuse the platform's server-side hashed API-key registry and
+require `vision:read` (matching its current visual inference routes), including
+revocation, expiry, and scope checks.
 
 ### Successful response
 
@@ -155,11 +167,11 @@ unsupported media, `422` invalid query or image dimensions, `429` rate limit,
 
 ## Request path and credential boundaries
 
-1. A caller sends the request to the platform's server route using its own
+1. A caller sends the request to `/api/v1/perception` using its own
    `avcs_live_…` or `avcs_test_…` key.
-2. The platform validates that key and `vision:write` scope against a durable,
-   server-side store. The current key console is only a prototype; persistence
-   and route authentication must be implemented before this step is active.
+2. The platform validates the key and `vision:read` scope using its existing
+   server-side SQLite API-key registry, and applies the configured rate and
+   billing policies.
 3. The platform server forwards the bounded request over private HTTPS to a
    dedicated Python System 1 inference worker. Do not run PyTorch inference in
    browser JavaScript.
@@ -172,24 +184,25 @@ Suggested server-only configuration placeholders:
 ```dotenv
 # Disabled until checkpoint lineage and redistribution rights are cleared.
 AVCS_SYSTEM1_ENABLED=false
-AVCS_SYSTEM1_INFERENCE_URL=https://<private-system1-worker>
-AVCS_PLATFORM_API_KEY=<server-only-service-credential>
+AVCS_INFERENCE_ENDPOINT=https://<private-system1-worker>
+AVCS_INFERENCE_API_KEY=<server-only-32+-character-service-credential>
 AVCS_SYSTEM1_CHECKPOINT_PATH=/run/secrets/avcs_system1.pt
 AVCS_SYSTEM1_CHECKPOINT_SHA256=<approved-checkpoint-sha256>
 AVCS_LLM_API_KEY=<optional-outbound-llm-credential-not-used-by-system1>
 ```
 
-`AVCS_PLATFORM_API_KEY` is an internal platform-to-worker credential, never a
-browser variable or substitute for each caller's scoped API key. Configure the
-worker's inbound service credential through its server-side secret mechanism
-(the existing FastAPI service currently names this `AVCS_INFERENCE_API_KEY`).
-If both settings represent the same service credential, provision them from
-the same secret-manager entry; do not log either value. `AVCS_LLM_API_KEY` is
-unrelated and must not be read or forwarded by System 1.
+`AVCS_INFERENCE_API_KEY` is an internal platform-to-worker credential, never
+a browser variable or substitute for each caller's scoped API key. The
+inspected platform proxy and existing FastAPI worker use this server-only name
+for their shared service secret. Provision it through each runtime's secret
+manager; do not log it. `AVCS_LLM_API_KEY` is unrelated and must not be read or
+forwarded by System 1.
 
 Keep `AVCS_SYSTEM1_ENABLED=false` and do not mount a checkpoint while rights
-remain unresolved. The current checkpoint and possible inherited candidate
-weights are **BLOCKED/UNKNOWN** for redistribution in
+remain unresolved. The current checkpoint demonstrably includes the grounder
+and word-recognizer candidates; the FPN candidate's initialization is unknown.
+The checkpoint and its inherited candidates are **BLOCKED/UNKNOWN** for
+redistribution in
 [`RELEASE_RIGHTS_AUDIT.md`](RELEASE_RIGHTS_AUDIT.md). Once written permission
 and complete lineage are established, mount the approved artifact read-only,
 verify its SHA-256 against the separately approved configuration and sidecar,
@@ -204,10 +217,10 @@ These are proposed initial limits to validate with deployment-specific
 load-testing; they are not currently enforced by either repository:
 
 - Enforce a **12 MiB encoded request limit** at the ingress and route before
-  fully buffering JSON; also enforce decoded dimensions no larger than 8,192
-  pixels per side and 32 million pixels total. These align with the inspected
-  platform playground constants but still require worker memory validation.
-- Accept only PNG/JPEG/WebP after decoding and format verification. Bound
+  fully buffering JSON; also enforce decoded dimensions no larger than 4,096
+  pixels per side and 16,777,216 pixels total. These are proposed limits and
+  still require worker memory validation.
+- Accept only PNG/JPEG after decoding and format verification. Bound
   query length by UTF-8 bytes. Do not trust the client MIME label alone.
 - Apply a distributed per-caller-key rate limit (proposed starting point:
   30 requests/minute) and a bounded worker semaphore (proposed maximum two
@@ -234,19 +247,21 @@ load-testing; they are not currently enforced by either repository:
   benchmark fixtures by default. Avoid request-body logging in the reverse
   proxy and Next.js runtime as well as in the Python worker.
 
-The current platform repository does not establish production ingress limits,
-distributed rate limiting, a hosting provider, or the provider's image-log
-retention. These must be confirmed and tested in the actual deployment rather
-than inferred from the local Next.js scripts.
+The platform has an in-process tier limiter, not a shared distributed
+limiter; its README recommends a single instance with durable SQLite storage.
+The existing `/api/v1/perceive` handler has no raw JSON body cap before parsing,
+and the Python worker has no explicit image byte/pixel or concurrency cap.
+Hosting-provider ingress limits and image-log retention are unknown. These
+must be fixed or verified in the actual deployment.
 
 ## Deployment readiness checklist
 
 - [ ] Rights audit clears the exact checkpoint SHA-256, all possible inherited
       initializers, training data, and third-party training assets for public
       or hosted inference use.
-- [ ] A persistent caller-key store exists; keys are stored hashed, scopes,
-      expiry, and revocation are checked server-side, and the route requires
-      `vision:write`.
+- [ ] The dedicated route reuses caller-key hashes, scope, expiry, revocation,
+      rate-limit, and billing checks; it requires `vision:read`, matching the
+      existing visual inference routes.
 - [ ] The platform route handler and a separate Python worker are implemented,
       reviewed, tested, and documented. No OpenAI-compatible API is claimed
       unless separately implemented and validated.
@@ -267,6 +282,8 @@ than inferred from the local Next.js scripts.
 - [ ] A real deployed URL and downloadable service/model artifacts are verified
       before anyone describes the integration as live.
 
-**Current status:** platform contract inspected; proposal documented; no
-platform files changed, no endpoint implemented, no checkpoint loaded, and no
-deployment or upload performed.
+**Current status:** platform authentication and existing model routes were
+inspected. System 1 contract documented; no System 1 endpoint implemented, no
+checkpoint loaded by the platform worker, and no deployment or weight upload
+performed. See [`SYSTEM1_MODEL_PROVENANCE_AND_SERVING_GATE.md`](SYSTEM1_MODEL_PROVENANCE_AND_SERVING_GATE.md)
+for checkpoint lineage and the publication/deployment gate.

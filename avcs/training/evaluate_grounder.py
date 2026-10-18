@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from avcs.goal_grounder import load_grounding_checkpoint
+from avcs.goal_grounder import GROUNDING_DATASET_PROVENANCE, load_grounding_checkpoint
 from avcs.training.demonstrations import (
     DemonstrationClickDataset,
     DemoRecord,
@@ -60,6 +61,22 @@ def _point_metrics(
         "pck_5_percent_diagonal": sum(error <= 0.05 for error in diagonal_errors)
         / sample_count,
     }
+
+
+def _wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+    if trials <= 0 or successes < 0 or successes > trials:
+        raise ValueError("Wilson interval requires 0 <= successes <= positive trials.")
+    proportion = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (proportion + z * z / (2.0 * trials)) / denominator
+    margin = (
+        z
+        * math.sqrt(
+            proportion * (1.0 - proportion) / trials + z * z / (4.0 * trials * trials)
+        )
+        / denominator
+    )
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
 def evaluate_grounder(
@@ -116,49 +133,92 @@ def evaluate_grounder(
     errors_norm: list[float] = []
     errors_pixels: list[float] = []
     relative_diagonal_errors: list[float] = []
+    presence_scores: list[float] = []
     model.eval()
     with torch.inference_mode():
         for batch in loader:
-            logits = model(batch["image"].to(device), batch["query_tokens"].to(device))
+            logits, presence_logits = model.forward_with_presence(
+                batch["image"].to(device), batch["query_tokens"].to(device)
+            )
+            presence_scores.extend(presence_logits.sigmoid().cpu().tolist())
             predicted_canvas = _decode_canvas_points(logits).cpu()
             letterbox = batch["letterbox"]
             original_x = (predicted_canvas[:, 0] - letterbox[:, 0]) / letterbox[:, 2]
             original_y = (predicted_canvas[:, 1] - letterbox[:, 1]) / letterbox[:, 3]
             predicted_original = torch.stack((original_x, original_y), dim=1)
             target_original = batch["point_norm"]
-            error = predicted_original - target_original
-            errors_norm.extend(torch.linalg.vector_norm(error, dim=1).tolist())
-            for idx, _point in enumerate(batch["point_norm"]):
-                frame_index = len(errors_pixels)
-                frame_path = test_records[frame_index].frame_path
+            for idx, record in enumerate(test_records[len(presence_scores) - len(batch["target_present"]):]):
+                if not record.target_present:
+                    continue
+                error = predicted_original[idx] - target_original[idx]
+                errors_norm.append(float(torch.linalg.vector_norm(error)))
+                frame_path = record.frame_path
                 with Image.open(frame_path) as image:
                     width, height = image.size
-                dx = float(error[idx, 0]) * width
-                dy = float(error[idx, 1]) * height
+                dx = float(error[0]) * width
+                dy = float(error[1]) * height
                 pixel_distance = (dx * dx + dy * dy) ** 0.5
                 errors_pixels.append(pixel_distance)
                 relative_diagonal_errors.append(
                     pixel_distance / (width * width + height * height) ** 0.5
                 )
 
-    if len(errors_norm) != len(test_records) or not errors_norm:
-        raise RuntimeError("Held-out test evaluation did not cover all test samples")
-    training_points = [record.point_norm for record in train_records]
+    if len(presence_scores) != len(test_records) or not errors_norm:
+        raise RuntimeError("Held-out evaluation did not cover every test sample.")
+    presence_threshold = float(model.checkpoint_metadata["target_presence_threshold"])
+    presence_predictions = [score >= presence_threshold for score in presence_scores]
+    presence_labels = [record.target_present for record in test_records]
+    negatives = sum(not label for label in presence_labels)
+    positives = sum(presence_labels)
+    false_activations = sum(
+        prediction and not label
+        for prediction, label in zip(presence_predictions, presence_labels)
+    )
+    true_activations = sum(
+        prediction and label
+        for prediction, label in zip(presence_predictions, presence_labels)
+    )
+    precision = (
+        true_activations / sum(presence_predictions) if any(presence_predictions) else 0.0
+    )
+    false_activation_interval = _wilson_interval(false_activations, negatives)
+    training_points = [
+        record.point_norm for record in train_records if record.target_present
+    ]
+    if any(point is None for point in training_points):
+        raise RuntimeError("A positive training record is missing its click point.")
+    training_points = [point for point in training_points if point is not None]
+    positive_test_records = [record for record in test_records if record.target_present]
     mean_training_point = (
         sum(point[0] for point in training_points) / len(training_points),
         sum(point[1] for point in training_points) / len(training_points),
     )
     center_baseline = _point_metrics(
-        [(0.5, 0.5)] * len(test_records), test_records
+        [(0.5, 0.5)] * len(positive_test_records), positive_test_records
     )
     training_mean_baseline = _point_metrics(
-        [mean_training_point] * len(test_records), test_records
+        [mean_training_point] * len(positive_test_records), positive_test_records
     )
     report = {
-        "dataset_provenance": "recorded_ui_click_demonstrations",
+        "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
         "checkpoint": str(Path(checkpoint_path).resolve()),
         "recording_sessions": len(sessions),
         "held_out_test_samples": len(test_records),
+        "held_out_positive_samples": positives,
+        "held_out_absent_samples": negatives,
+        "target_presence": {
+            "threshold": presence_threshold,
+            "true_activations": true_activations,
+            "false_activations": false_activations,
+            "false_activation_rate": false_activations / negatives,
+            "false_activation_rate_wilson_95_percent": list(
+                false_activation_interval
+            ),
+            "target_recall": true_activations / positives,
+            "precision": precision,
+            "empirical_zero_false_activations": false_activations == 0,
+            "action_authorized": False,
+        },
         "session_split_seed": split_seed,
         "mean_normalized_point_distance": sum(errors_norm) / len(errors_norm),
         "median_normalized_point_distance": statistics.median(errors_norm),

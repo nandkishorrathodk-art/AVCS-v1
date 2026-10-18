@@ -117,6 +117,24 @@ def build_click_record(
     }
 
 
+def build_absence_record(
+    *,
+    task: str,
+    target_label: str,
+    frame_path: str,
+    recorded_at_utc: str,
+) -> dict[str, Any]:
+    """Create a text-free label that the queried target is absent from the frame."""
+    return {
+        "schema_version": 1,
+        "task": task,
+        "target_label": target_label,
+        "frame": frame_path,
+        "action": {"type": "target_absent"},
+        "recorded_at_utc": recorded_at_utc,
+    }
+
+
 def render_click_audit(frame_rgb: np.ndarray, point_norm: Tuple[float, float]) -> Image.Image:
     """Render a review-only marker without altering the source training frame."""
     if (
@@ -159,6 +177,7 @@ class WindowsDemoRecorder:
         user32: Optional[Any] = None,
         label_queue: Optional[queue.Queue[str]] = None,
         target_labels: Optional[Sequence[str]] = None,
+        absent_target_labels: Optional[Sequence[str]] = None,
         calibration_only: bool = False,
         event_sink: Optional[Any] = None,
         poll_interval: float = 0.004,
@@ -176,18 +195,21 @@ class WindowsDemoRecorder:
         self.user32 = user32
         self.label_queue = label_queue or queue.Queue()
         self._target_labels = deque(target_labels or ())
+        self._absent_target_labels = deque(absent_target_labels or ())
         self._expected_click_count = len(self._target_labels)
+        self._expected_absent_count = len(self._absent_target_labels)
         self.calibration_only = calibration_only
         if any(
-            not label.strip()
-            or len(label.strip().encode("utf-8")) > MAX_QUERY_BYTES
-            for label in self._target_labels
+            not label.strip() or len(label.strip().encode("utf-8")) > MAX_QUERY_BYTES
+            for label in (*self._target_labels, *self._absent_target_labels)
         ):
             raise ValueError(
                 f"Predefined target labels must contain 1-{MAX_QUERY_BYTES} UTF-8 bytes."
             )
-        if calibration_only and self._expected_click_count:
-            raise ValueError("Calibration mode does not accept demonstration target labels.")
+        if calibration_only and (
+            self._expected_click_count or self._expected_absent_count
+        ):
+            raise ValueError("Calibration mode does not accept demonstration labels.")
         self.event_sink = event_sink
         self.poll_interval = poll_interval
         self.capture_interval = capture_interval
@@ -288,6 +310,9 @@ class WindowsDemoRecorder:
     def _left_button_down(self) -> bool:
         return bool(int(self._user32.GetAsyncKeyState(0x01)) & 0x8000)
 
+    def _right_button_down(self) -> bool:
+        return bool(int(self._user32.GetAsyncKeyState(0x02)) & 0x8000)
+
     def _capture_rgb(
         self, rect: Optional[Tuple[int, int, int, int]] = None
     ) -> Tuple[np.ndarray, Tuple[int, int]]:
@@ -344,7 +369,10 @@ class WindowsDemoRecorder:
         self._started_at_utc = datetime.now(timezone.utc).isoformat()
         records_path = self.output_dir / "samples.jsonl"
         sample_count = 0
+        click_count = 0
+        absent_count = 0
         previous_left_down = False
+        previous_right_down = False
         latest_crop: Optional[np.ndarray] = None
         latest_rect: Optional[Tuple[int, int, int, int]] = None
         latest_window_rect: Optional[Tuple[int, int, int, int]] = None
@@ -364,14 +392,17 @@ class WindowsDemoRecorder:
             capture_open = True
             if self.event_sink:
                 self.event_sink(
-                    "Recorder ready. Focus the selected window; only labeled left clicks are recorded."
+                    "Recorder ready. Focus the selected window; left-click labeled targets "
+                    "and right-click only when a predeclared target is absent."
                 )
-                self._announce_next_label(sample_count)
+                self._announce_next_label(click_count)
+                self._announce_next_absent_label(absent_count)
 
             with records_file:
                 while not self._stop.is_set():
                     if not self._owns_foreground(window.hwnd):
                         previous_left_down = False
+                        previous_right_down = False
                         latest_crop = None
                         latest_rect = None
                         latest_window_rect = None
@@ -431,16 +462,55 @@ class WindowsDemoRecorder:
                             records_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                             records_file.flush()
                             sample_count += 1
+                            click_count += 1
                             if self.event_sink:
-                                self.event_sink(f"Recorded labeled click {sample_count}: {label}")
-                                self._announce_next_label(sample_count)
-                            if self._all_predefined_targets_recorded(sample_count):
+                                self.event_sink(f"Recorded labeled click {click_count}: {label}")
+                                self._announce_next_label(click_count)
+                            if self._all_predefined_targets_recorded(click_count, absent_count):
                                 self._stop.set()
                         elif self.event_sink:
                             self.event_sink(
                                 "Click ignored: provide a target label and keep the click inside "
                                 "the selected window."
                             )
+                    right_down = self._right_button_down()
+                    if right_down and not previous_right_down:
+                        age = time.monotonic() - latest_capture_time
+                        current_window = self._selected_window()
+                        label = (
+                            self._next_absent_label()
+                            if current_window.rect == latest_window_rect
+                            and latest_crop is not None
+                            and age <= self.capture_interval * 3
+                            else None
+                        )
+                        if label and latest_crop is not None:
+                            sample_id = uuid.uuid4().hex
+                            relative_frame = f"frames/{sample_id}.png"
+                            Image.fromarray(latest_crop).save(self.output_dir / relative_frame)
+                            record = build_absence_record(
+                                task=self.task,
+                                target_label=label,
+                                frame_path=relative_frame,
+                                recorded_at_utc=datetime.now(timezone.utc).isoformat(),
+                            )
+                            records_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            records_file.flush()
+                            sample_count += 1
+                            absent_count += 1
+                            if self.event_sink:
+                                self.event_sink(
+                                    f"Recorded target-absent example {absent_count}: {label}"
+                                )
+                                self._announce_next_absent_label(absent_count)
+                            if self._all_predefined_targets_recorded(click_count, absent_count):
+                                self._stop.set()
+                        elif self.event_sink:
+                            self.event_sink(
+                                "No absent-target label is queued, or the selected window "
+                                "does not have a fresh frame."
+                            )
+                    previous_right_down = right_down
                     previous_left_down = left_down
                     time.sleep(self.poll_interval)
             status = "stopped"
@@ -586,9 +656,16 @@ class WindowsDemoRecorder:
             return None
         return label
 
-    def _all_predefined_targets_recorded(self, sample_count: int) -> bool:
+    def _all_predefined_targets_recorded(
+        self, click_count: int, absent_count: int = 0
+    ) -> bool:
         return bool(
-            self._expected_click_count and sample_count >= self._expected_click_count
+            (not self._expected_click_count or click_count >= self._expected_click_count)
+            and (
+                not self._expected_absent_count
+                or absent_count >= self._expected_absent_count
+            )
+            and (self._expected_click_count or self._expected_absent_count)
         )
 
     def _announce_next_label(self, sample_count: int) -> None:
@@ -596,6 +673,19 @@ class WindowsDemoRecorder:
             self.event_sink(
                 f"Next target ({sample_count + 1}/{sample_count + len(self._target_labels)}): "
                 f"{self._target_labels[0]}"
+            )
+
+    def _next_absent_label(self) -> Optional[str]:
+        if not self._absent_target_labels:
+            return None
+        return self._absent_target_labels.popleft()
+
+    def _announce_next_absent_label(self, sample_count: int) -> None:
+        if self._absent_target_labels and self.event_sink:
+            self.event_sink(
+                f"Next absent target ({sample_count + 1}/"
+                f"{sample_count + len(self._absent_target_labels)}): "
+                f"{self._absent_target_labels[0]}"
             )
 
     def stop(self) -> None:
@@ -629,8 +719,8 @@ def _read_target_labels(recorder: WindowsDemoRecorder) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Record labeled clicks or no-click cursor calibration from one isolated "
-            "Windows window."
+            "Record target clicks/absence labels or in-memory cursor calibration "
+            "from one isolated Windows window."
         )
     )
     parser.add_argument("--window-title", required=True, help="Exact, unique visible window title.")
@@ -653,6 +743,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Predeclare the next click target; repeat for a guided, non-interactive session.",
     )
     parser.add_argument(
+        "--absent-target-label",
+        action="append",
+        dest="absent_target_labels",
+        help=(
+            "Predeclare a target known to be absent; right-click once per label while "
+            "the selected window is foreground."
+        ),
+    )
+    parser.add_argument(
         "--calibrate-only",
         action="store_true",
         help="Stream live pixels and cursor coordinates in memory; never save frames.",
@@ -660,21 +759,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if not args.confirm_isolated_window:
         parser.error("Pass --confirm-isolated-window only for a disposable, non-sensitive test window.")
-    if args.calibrate_only and args.target_labels:
-        parser.error("--calibrate-only cannot be combined with --target-label.")
+    if args.calibrate_only and (args.target_labels or args.absent_target_labels):
+        parser.error("--calibrate-only cannot be combined with demonstration labels.")
     if args.calibrate_only and args.output_dir is not None:
         parser.error("--calibrate-only is an in-memory live stream and does not accept --output-dir.")
     if not args.calibrate_only and args.output_dir is None:
         parser.error("--output-dir is required when recording labeled demonstrations.")
     if not args.calibrate_only and not args.target_labels and not sys.stdin.isatty():
         parser.error("Interactive target labels require a terminal; no capture was started.")
-    if args.target_labels and any(
+    if (args.target_labels or args.absent_target_labels) and any(
         not label.strip()
         or len(label.strip().encode("utf-8")) > MAX_QUERY_BYTES
-        for label in args.target_labels
+        for label in [*(args.target_labels or []), *(args.absent_target_labels or [])]
     ):
         parser.error(
-            f"Each --target-label must contain 1-{MAX_QUERY_BYTES} non-whitespace UTF-8 bytes."
+            f"Each label must contain 1-{MAX_QUERY_BYTES} non-whitespace UTF-8 bytes."
         )
 
     recorder = WindowsDemoRecorder(
@@ -682,10 +781,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         task=args.task,
         output_dir=args.output_dir,
         target_labels=args.target_labels,
+        absent_target_labels=args.absent_target_labels,
         calibration_only=args.calibrate_only,
         event_sink=print,
     )
-    if not args.calibrate_only and not args.target_labels:
+    if not args.calibrate_only and not args.target_labels and not args.absent_target_labels:
         reader = threading.Thread(target=_read_target_labels, args=(recorder,), daemon=True)
         reader.start()
     try:
@@ -698,7 +798,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"Live calibration stopped after {count} in-memory frames; no files were saved."
         )
     else:
-        print(f"Recorded {count} labeled click(s) locally in {args.output_dir}")
+        print(f"Recorded {count} labeled sample(s) locally in {args.output_dir}")
     return 0
 
 

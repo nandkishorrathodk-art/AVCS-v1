@@ -58,12 +58,25 @@ class FovealGUIElementSample:
 
 
 def compute_crop_contrast_score(crop: np.ndarray) -> float:
-    """Computes edge sharpness/contrast score using Sobel gradient magnitude normalized to [0, 1]."""
+    """Computes edge sharpness/contrast score normalized to [0, 1].
+
+    Combines spatial mean with 99.5th percentile and top-K edge gradients
+    to avoid the spatial dilution paradox on compact UI elements (8x8 to 24x24 icons,
+    dense text labels, borderless buttons) while reliably rejecting flat backgrounds.
+    """
     if crop.size == 0:
         return 0.0
     gray = np.mean(crop, axis=-1) if crop.ndim == 3 else crop.astype(float)
     gy, gx = np.gradient(gray)
-    return float(np.mean(np.hypot(gx, gy)) / 255.0)
+    grad_mag = np.hypot(gx, gy)
+    k_edge = min(32, max(8, int(grad_mag.size * 0.005)))
+    top_k_edge = float(np.mean(np.partition(grad_mag.ravel(), -k_edge)[-k_edge:])) if grad_mag.size >= 8 else float(np.max(grad_mag))
+    return float(max(
+        float(np.mean(grad_mag)),
+        float(np.percentile(grad_mag, 99.5)),
+        top_k_edge * 0.85,
+    ) / 255.0)
+
 
 
 class DesktopGUIGenerator:

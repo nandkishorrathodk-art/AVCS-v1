@@ -6,10 +6,9 @@ CaptureAdapter, and Verifier runtime without bypassing safety gates or oracle se
 from __future__ import annotations
 
 import asyncio
-import math
 import platform
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, List, Optional, Sequence, Set
 
 from avcs.action_broker import (
     ActionBroker,
@@ -154,7 +153,7 @@ class RepositoryAVCSBackend:
         return []
 
     async def execute(self, request: ActionRequest) -> ActionResult:
-        """Translates public SDK ActionRequest to ActionBroker lifecycle with postcondition proof."""
+        """Translate supported SDK requests without overstating observed outcomes."""
         if not self._connected or self.broker is None:
             raise ClientNotConnectedError("RepositoryAVCSBackend is not connected.")
 
@@ -165,7 +164,14 @@ class RepositoryAVCSBackend:
             center = request.target.bounds.center
             tx, ty = center.x, center.y
         else:
-            tx, ty = 0.5, 0.5
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.BLOCKED,
+                duration_ms=0.0,
+                error_code="TARGET_REQUIRED",
+                message="Action requires an explicit target; the screen center is never used implicitly.",
+                attempt_count=0,
+            )
 
         # 2. Map ActionKind to broker action_type
         kind_map = {
@@ -173,9 +179,41 @@ class RepositoryAVCSBackend:
             ActionKind.DOUBLE_CLICK: "double_click",
             ActionKind.TYPE_TEXT: "type",
             ActionKind.PRESS_KEY: "press_key",
-            ActionKind.SCROLL: "scroll",
         }
-        repo_action_type = kind_map.get(request.kind, "click")
+        repo_action_type = kind_map.get(request.kind)
+        if repo_action_type is None:
+            return ActionResult(
+                action_id=request.action_id,
+                status=ActionStatus.BLOCKED,
+                duration_ms=0.0,
+                error_code="UNSUPPORTED_ACTION",
+                message=f"Action kind {request.kind.value!r} is not supported by the repository backend.",
+                attempt_count=0,
+            )
+
+        if request.kind in (ActionKind.TYPE_TEXT, ActionKind.PRESS_KEY):
+            try:
+                focus_state = await asyncio.to_thread(
+                    self.eye.verify_focus, target_point=(tx, ty)
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                return ActionResult(
+                    action_id=request.action_id,
+                    status=ActionStatus.BLOCKED,
+                    duration_ms=0.0,
+                    error_code="FOCUS_VERIFICATION_FAILED",
+                    message=f"Keyboard action blocked because focus could not be verified: {exc}",
+                    attempt_count=0,
+                )
+            if not getattr(focus_state, "is_focused", False):
+                return ActionResult(
+                    action_id=request.action_id,
+                    status=ActionStatus.BLOCKED,
+                    duration_ms=0.0,
+                    error_code="FOCUS_NOT_VERIFIED",
+                    message="Keyboard action blocked because the target has no verified visual focus.",
+                    attempt_count=0,
+                )
 
         # 3. Map ActionClass
         class_map = {
@@ -191,22 +229,6 @@ class RepositoryAVCSBackend:
             repo_action_class = RepoActionClass.HIGH_RISK
             if not request.authorization_ref or request.authorization_ref not in self.trusted_auth_tokens:
                 authorized = False
-
-        # 5. Build postcondition callback
-        expected_postcondition = None
-        if request.expected_postcondition:
-            desc = request.expected_postcondition.lower()
-
-            def dynamic_postcondition(pre: HumanEyeState, post: HumanEyeState) -> bool:
-                # If postcondition expects change, check ripple or photometric change
-                if "change" in desc or "modal" in desc or "update" in desc or "active" in desc:
-                    ripple = self.broker.verifier.calculate_local_ripple((tx, ty), post.motion_field)
-                    return ripple >= 0.015 or post.surprise_score > 0.05
-                return True
-
-            expected_postcondition = dynamic_postcondition
-        elif request.kind in (ActionKind.TYPE_TEXT, ActionKind.PRESS_KEY):
-            expected_postcondition = lambda pre, post: True
 
         text_content: Optional[str] = None
         if request.kind == ActionKind.TYPE_TEXT:
@@ -224,7 +246,6 @@ class RepositoryAVCSBackend:
             action_id=request.action_id,
             text_content=text_content,
             timeout_ms=timeout_ms,
-            expected_postcondition=expected_postcondition,
             authorized=authorized,
         )
 
@@ -240,11 +261,22 @@ class RepositoryAVCSBackend:
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-        # 7. Map repository result to SDK ActionResult with verification evidence
-        if repo_res.status == RepoActionStatus.CONFIRMED:
+        # 7. A prose postcondition is not proof of the requested application state.
+        if request.expected_postcondition and repo_res.status != RepoActionStatus.BLOCKED:
+            status = ActionStatus.AMBIGUOUS
+            evidence = VerificationEvidence(
+                verified=False,
+                method="action_broker_visual_reaction_only",
+                observed_at=time.time(),
+                details={
+                    "evidence": repo_res.evidence,
+                    "requested_postcondition": request.expected_postcondition,
+                },
+            )
+        elif repo_res.status == RepoActionStatus.CONFIRMED:
             evidence = VerificationEvidence(
                 verified=True,
-                method="action_broker_ripple_and_postcondition",
+                method="action_broker_visual_reaction",
                 observed_at=time.time(),
                 details={
                     "evidence": repo_res.evidence,

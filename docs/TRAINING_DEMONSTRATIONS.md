@@ -73,21 +73,41 @@ requires saved frames, so it is not part of this no-image live-stream path.
 
 The recorder requires an exact, unique, visible window title and a new output
 directory. It records only while that window (or an owned modal) is foreground,
-stores only cropped window frames and normalized left-click points, and never
-records keyboard input or uploads data. Task descriptions and target labels are
-saved with the examples; do not include secrets or real user content.
+stores only cropped window frames and labels, and never records keyboard input
+or uploads data. Task descriptions and target labels are saved with the
+examples; do not include secrets or real user content.
 Window bounds come from DWM physical-pixel geometry and click points from
 `GetPhysicalCursorPos`, avoiding DPI-virtualized `GetWindowRect` coordinates.
 If Windows cannot provide physical bounds for the selected window, recording
 fails rather than guessing a scale. Review each saved frame and its click point
-before accepting the label. When the operator is following instructions
-remotely, record one target label per run to avoid label/click order drift.
+or absence label before accepting it. When the operator is following
+instructions remotely, record one target label per run to avoid label/order
+drift.
+
+To record a real target-absent example, use an isolated test window with no
+private content, predeclare the query, and right-click while that query is
+visibly absent:
+
+```powershell
+python -m avcs.training.demo_recorder `
+  --window-title "AVCS_DEMO_WINDOW" `
+  --task "Verify absence of a Save button" `
+  --output-dir "runs/demonstrations/notepad-absent-01" `
+  --absent-target-label "Save button" `
+  --confirm-isolated-window
+```
+
+The operator is responsible for confirming absence; the recorder does not
+infer it. Each right-click records one fresh cropped frame and an explicit
+`target_absent` label with no fabricated point. For mixed sessions, provide
+both `--target-label` and `--absent-target-label`; left-click labeled present
+targets and right-click for absent queries. Review every saved frame and label.
 
 The output contains `manifest.json`, `samples.jsonl`, `frames/*.png`, and
 review-only `audit/*.png` previews with a red marker at each saved click point.
 The audit preview is a separate copy; only the unmarked `frames/*.png` image is
-used for training. Samples are raw human demonstrations, not model predictions
-or validation results. The checked-in Cortex-2M checkpoint was trained on procedural colored blocks.
+used for training. Negative examples have no click-marker preview. Samples are
+raw human demonstrations, not model predictions or validation results. The checked-in Cortex-2M checkpoint was trained on procedural colored blocks.
 Its recorded synthetic validation category accuracy is 10.83%; this is not a
 real-application grounding score. The synthetic trainer now requires the
 explicit `--synthetic-data-only` flag and writes to
@@ -115,9 +135,10 @@ demonstrations and separate validation.
 The architecture is implemented but **has not been trained on real UI
 demonstrations**. `predict()` intentionally refuses inference from a randomly
 initialized model. Train only after collecting at least five separate
-recording sessions; the trainer reserves complete sessions for validation and
-held-out test, so frames from one session cannot leak between splits and at
-least three sessions remain for training:
+recording sessions. Every train, validation, and held-out split must contain
+both present and absent examples. The trainer reserves complete sessions for
+validation and held-out test, so frames from one session cannot leak between
+splits and at least three sessions remain for training:
 
 ```powershell
 avcs-train-grounder `
@@ -128,9 +149,13 @@ avcs-train-grounder `
 The same trainer is available without the installed console entry point as
 `python -m avcs.training.train_grounder --data-dir "runs/demonstrations"`.
 
-The trainer uses validation click-point distance to choose a checkpoint and
-does not evaluate the held-out test split. It fingerprints all split data into
-the checkpoint so evaluation can reject changed data. After training, run the
+The trainer combines click-localization loss with a target-presence classifier.
+It calibrates an abstention threshold on validation negatives, choosing a
+threshold above the highest observed negative score; this yields zero
+empirical false activations on that calibration set by construction, not a
+guarantee for future screens. The trainer does not evaluate the held-out test
+split. It fingerprints all split data into the checkpoint so evaluation can
+reject changed data. After training, run the
 held-out evaluator separately:
 
 ```powershell
@@ -140,11 +165,12 @@ python -m avcs.training.evaluate_grounder `
   --output "runs/real_ui_grounder/held_out_report.json"
 ```
 
-Its labels are click points, not target boxes, so it reports normalized/pixel
-point distances and point-distance thresholds, not target-box hit rate. The
-held-out results are only useful if the sessions and labels are representative;
-they are not end-to-end task success. Once trained, a checkpoint can be loaded
-with `load_grounding_checkpoint`; its output score is an uncalibrated peak
-probability, not a confidence guarantee. Do not connect candidate coordinates
-to live input until separate safety, calibration, and isolated acceptance work
-establishes that behavior.
+It reports click-point distances for present examples and target recall,
+precision, false-activation counts/rates, and a Wilson 95% interval for the
+held-out negative false-activation rate. A zero observed false-activation count
+is not proof of zero future risk; the interval shows sample-size uncertainty.
+Results only generalize to representative held-out sessions, not unseen
+applications or end-to-end tasks. Prediction includes a calibrated
+target-presence score, but `action_authorized` remains false. Do not connect
+candidate coordinates to live input based only on this training/evaluation
+milestone.

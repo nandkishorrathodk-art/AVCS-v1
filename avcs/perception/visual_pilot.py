@@ -255,3 +255,4 @@ class VisualUnderstandingPilot(nn.Module):
             )
 
         return pred_cat, cat_conf, detected_regions
+

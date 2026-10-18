@@ -1,9 +1,7 @@
-"""AVCS Lightweight Cloud Client for External Projects (Project X).
+"""AVCS Cloud Client for External Projects (Project X).
 
-Zero-Weight Mandate:
-This client contains NO neural network weights and does NOT require PyTorch.
-It sends local screen frames to your hosted AVCS Cloud Inference Server over HTTPS,
-receives real-time affordances and kinematics, and executes motor actions locally.
+This client sends local screen frames to the configured AVCS inference server,
+receives structured results, and can execute pointer actions locally.
 
 Usage in any external project:
     from avcs.server.client import AVCSCloudClient
@@ -21,9 +19,11 @@ Usage in any external project:
 from __future__ import annotations
 
 import base64
+import ipaddress
 import io
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import numpy as np
 from PIL import Image
@@ -43,8 +43,24 @@ class AVCSCloudClient:
         source: Optional[Any] = None,
         force_virtual_motor: bool = False,
         timeout: float = 5.0,
+        allow_insecure_http: bool = False,
     ) -> None:
         self.endpoint = endpoint_url.rstrip("/")
+        parsed_endpoint = urlsplit(self.endpoint)
+        if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.hostname:
+            raise ValueError("endpoint_url must be an absolute HTTP(S) URL")
+        if parsed_endpoint.username or parsed_endpoint.password:
+            raise ValueError("endpoint_url must not contain embedded credentials")
+        hostname = parsed_endpoint.hostname.lower()
+        try:
+            is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            is_loopback = False
+        if parsed_endpoint.scheme == "http" and not is_loopback and not allow_insecure_http:
+            raise ValueError(
+                "HTTP is only permitted for loopback endpoints; use HTTPS for remote servers "
+                "or explicitly set allow_insecure_http=True for a trusted test network"
+            )
         self.api_key = api_key
         self.timeout = timeout
         self.headers = {"Content-Type": "application/json"}
@@ -117,6 +133,32 @@ class AVCSCloudClient:
         resp.raise_for_status()
         return resp.json()
 
+    def ground(
+        self, query: str, frame: Optional[np.ndarray] = None
+    ) -> Dict[str, Any]:
+        """Request a candidate target point; the response is not authorization to act."""
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("Grounding query cannot be empty")
+        if frame is None:
+            frame = self.source.grab()
+        self._last_frame = frame
+        payload = {
+            "image_b64": self._encode_image(frame),
+            "query": clean_query,
+        }
+        resp = requests.post(
+            f"{self.endpoint}/v1/ground",
+            json=payload,
+            headers=self.headers,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or "target_coord" not in data:
+            raise ValueError("Grounding response is missing the target_coord field")
+        return data
+
     def verify_focus(self, target: Tuple[float, float], reference_frame: Optional[np.ndarray] = None) -> bool:
         """Verifies if input element at target visually possesses active typing focus (fail-closed)."""
         if self._last_frame is None:
@@ -130,7 +172,9 @@ class AVCSCloudClient:
         resp = requests.post(f"{self.endpoint}/v1/verify_focus", json=payload, headers=self.headers, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        return bool(data.get("is_focused", False))
+        if not isinstance(data, dict) or type(data.get("is_focused")) is not bool:
+            raise ValueError("Focus response must contain a boolean is_focused field")
+        return data["is_focused"]
 
     def move_to(self, target: Tuple[float, float], realtime: bool = True) -> bool:
         """Requests minimum-jerk trajectory from cloud and executes smooth movement on local OS."""
@@ -201,4 +245,3 @@ class AVCSCloudClient:
                 self.source.close()
             except Exception:
                 pass
-

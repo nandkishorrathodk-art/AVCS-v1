@@ -1,0 +1,147 @@
+{
+  "benchmark_mission": "Milestone 3.1: Global Candidate Disambiguation & P95 Reduction",
+  "coarse_checkpoint": "runs/weights/candidates/candidate_m3_highres_v2.pt",
+  "coarse_sha256": "600ce046539c1274dd265166933660f2ab2005e412517eee74c4df26071c673f",
+  "reranker_checkpoint": "runs/weights/candidates/candidate_m3_reranker_v1.pt",
+  "reranker_sha256": "8c9d8d299aad56f324f32cd08e986aead344fb5bdfd4102f2785727f3935e007",
+  "foveal_checkpoint": "runs/weights/candidates/candidate_m3_foveal_v1.pt",
+  "foveal_sha256": "9fac88b0b99aca5cd5b7f23692128435f6147de714c1b80cb060874e12b75f54",
+  "total_test_samples": 316,
+  "rerank_flips": "3/316 (0.9%)",
+  "selective_fovea_accepted": "95/316 (30.1%)",
+  "arm_a_coarse_v2": {
+    "top_1_hits": "290/316",
+    "top_1_accuracy_pct": 91.77,
+    "point_in_box_hits": "305/316",
+    "point_in_box_accuracy_pct": 96.52,
+    "median_error_px": 1.77,
+    "mean_error_px": 4.4,
+    "p90_error_px": 9.11,
+    "p95_error_px": 16.0,
+    "p99_error_px": 39.3,
+    "max_error_px": 101.66,
+    "samples_le_3px": 220,
+    "pct_le_3px": 69.62
+  },
+  "arm_b_global_disambiguator": {
+    "top_1_hits": "286/316",
+    "top_1_accuracy_pct": 90.51,
+    "point_in_box_hits": "308/316",
+    "point_in_box_accuracy_pct": 97.47,
+    "median_error_px": 2.06,
+    "mean_error_px": 4.03,
+    "p90_error_px": 8.29,
+    "p95_error_px": 12.73,
+    "p99_error_px": 32.81,
+    "max_error_px": 78.67,
+    "samples_le_3px": 211,
+    "pct_le_3px": 66.77
+  },
+  "arm_c_selective_fovea": {
+    "top_1_hits": "287/316",
+    "top_1_accuracy_pct": 90.82,
+    "point_in_box_hits": "308/316",
+    "point_in_box_accuracy_pct": 97.47,
+    "median_error_px": 2.22,
+    "mean_error_px": 4.29,
+    "p90_error_px": 8.78,
+    "p95_error_px": 12.73,
+    "p99_error_px": 32.81,
+    "max_error_px": 78.67,
+    "samples_le_3px": 192,
+    "pct_le_3px": 60.76
+  },
+  "adversarial_negative_rejection_pct": 100.0,
+  "blank_screen_fp_count": 0,
+  "blank_screen_total": 30,
+  "latencies": {
+    "coarse_forward_p50_ms": 71.93,
+    "coarse_forward_p95_ms": 125.65,
+    "disambiguator_p50_ms": 82.53,
+    "disambiguator_p95_ms": 134.54,
+    "selective_foveal_p50_ms": 7.45,
+    "combined_pipeline_p50_ms": 162.13,
+    "combined_pipeline_p95_ms": 274.2
+  },
+  "category_summary": {
+    "desktop_canvas": {
+      "num_samples": 38,
+      "arm_a_median": 1.45,
+      "arm_b_median": 2.05,
+      "arm_c_median": 2.05,
+      "arm_a_p95": 16.03,
+      "arm_b_p95": 15.64,
+      "arm_c_p95": 15.64
+    },
+    "editor_code": {
+      "num_samples": 53,
+      "arm_a_median": 2.36,
+      "arm_b_median": 2.53,
+      "arm_c_median": 2.77,
+      "arm_a_p95": 34.1,
+      "arm_b_p95": 29.42,
+      "arm_c_p95": 29.42
+    },
+    "browser_webpage": {
+      "num_samples": 55,
+      "arm_a_median": 1.52,
+      "arm_b_median": 1.99,
+      "arm_c_median": 1.79,
+      "arm_a_p95": 11.95,
+      "arm_b_p95": 11.65,
+      "arm_c_p95": 11.65
+    },
+    "terminal_shell": {
+      "num_samples": 30,
+      "arm_a_median": 1.84,
+      "arm_b_median": 2.11,
+      "arm_c_median": 2.37,
+      "arm_a_p95": 12.4,
+      "arm_b_p95": 12.26,
+      "arm_c_p95": 12.26
+    },
+    "modal_dialog": {
+      "num_samples": 20,
+      "arm_a_median": 1.94,
+      "arm_b_median": 1.58,
+      "arm_c_median": 1.37,
+      "arm_a_p95": 5.04,
+      "arm_b_p95": 5.09,
+      "arm_c_p95": 5.19
+    },
+    "form_input": {
+      "num_samples": 40,
+      "arm_a_median": 1.64,
+      "arm_b_median": 1.6,
+      "arm_c_median": 3.63,
+      "arm_a_p95": 12.98,
+      "arm_b_p95": 12.67,
+      "arm_c_p95": 12.67
+    },
+    "media_playback": {
+      "num_samples": 30,
+      "arm_a_median": 1.32,
+      "arm_b_median": 1.4,
+      "arm_c_median": 1.14,
+      "arm_a_p95": 4.42,
+      "arm_b_p95": 5.02,
+      "arm_c_p95": 5.46
+    },
+    "settings_panel": {
+      "num_samples": 50,
+      "arm_a_median": 1.94,
+      "arm_b_median": 2.12,
+      "arm_c_median": 3.26,
+      "arm_a_p95": 10.61,
+      "arm_b_p95": 10.29,
+      "arm_c_p95": 10.72
+    }
+  },
+  "acceptance_targets": {
+    "grounding_accuracy_ge_90": true,
+    "median_error_le_2px": false,
+    "p95_error_le_3px": false,
+    "negative_rejection_ge_95": true,
+    "blank_fp_count_zero": true
+  }
+}

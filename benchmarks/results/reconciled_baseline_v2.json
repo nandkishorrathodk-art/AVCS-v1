@@ -1,0 +1,655 @@
+{
+  "checkpoint_path": "runs/weights/candidates/candidate_m3_highres_v2.pt",
+  "sha256": "600ce046539c1274dd265166933660f2ab2005e412517eee74c4df26071c673f",
+  "total_parameters": 1362460,
+  "schema_version": 2,
+  "confidence_threshold": 0.55,
+  "total_test_samples": 316,
+  "top_1_hits": "290/316",
+  "top_1_accuracy_pct": 91.77,
+  "point_in_box_hits": "305/316",
+  "point_in_box_accuracy_pct": 96.52,
+  "median_error_px": 1.78,
+  "mean_error_px": 4.41,
+  "p90_error_px": 9.15,
+  "p95_error_px": 16.06,
+  "p99_error_px": 39.45,
+  "max_error_px": 102.06,
+  "samples_le_3px": 220,
+  "pct_le_3px": 69.6,
+  "negative_query_rejection_pct": 96.5,
+  "blank_screen_fp_count": 0,
+  "blank_screen_total": 30,
+  "top_30_worst_errors": [
+    {
+      "query": "Run button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0006.png",
+      "gt_xy": [
+        0.3008,
+        0.1465
+      ],
+      "pred_xy": [
+        0.6994,
+        0.1381
+      ],
+      "dx_px": 102.04,
+      "dy_px": -2.14,
+      "err_px": 102.06,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.981,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Files icon",
+      "category": "desktop_canvas",
+      "kind": "icon",
+      "file_path": "screens/test_held_out_0004.png",
+      "gt_xy": [
+        0.334,
+        0.3828
+      ],
+      "pred_xy": [
+        0.1259,
+        0.1488
+      ],
+      "dx_px": -53.26,
+      "dy_px": -59.9,
+      "err_px": 80.15,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.738,
+      "failure_category": "icon_spatial_ambiguity"
+    },
+    {
+      "query": "Projects icon",
+      "category": "desktop_canvas",
+      "kind": "icon",
+      "file_path": "screens/test_held_out_0004.png",
+      "gt_xy": [
+        0.1309,
+        0.1523
+      ],
+      "pred_xy": [
+        0.3256,
+        0.3805
+      ],
+      "dx_px": 49.84,
+      "dy_px": 58.42,
+      "err_px": 76.79,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.998,
+      "failure_category": "icon_spatial_ambiguity"
+    },
+    {
+      "query": "Run button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0008.png",
+      "gt_xy": [
+        0.334,
+        0.166
+      ],
+      "pred_xy": [
+        0.2849,
+        0.3144
+      ],
+      "dx_px": -12.57,
+      "dy_px": 37.99,
+      "err_px": 40.01,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.993,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Edit button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0010.png",
+      "gt_xy": [
+        0.2246,
+        0.1504
+      ],
+      "pred_xy": [
+        0.3662,
+        0.144
+      ],
+      "dx_px": 36.24,
+      "dy_px": -1.64,
+      "err_px": 36.28,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.997,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "View button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0009.png",
+      "gt_xy": [
+        0.3594,
+        0.1543
+      ],
+      "pred_xy": [
+        0.231,
+        0.1514
+      ],
+      "dx_px": -32.87,
+      "dy_px": -0.74,
+      "err_px": 32.87,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.992,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Run button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0009.png",
+      "gt_xy": [
+        0.4824,
+        0.1543
+      ],
+      "pred_xy": [
+        0.3548,
+        0.162
+      ],
+      "dx_px": -32.66,
+      "dy_px": 1.96,
+      "err_px": 32.71,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.989,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Tools button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0008.png",
+      "gt_xy": [
+        0.2246,
+        0.166
+      ],
+      "pred_xy": [
+        0.3331,
+        0.1613
+      ],
+      "dx_px": 27.78,
+      "dy_px": -1.2,
+      "err_px": 27.81,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.999,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Find... input field",
+      "category": "editor_code",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0006.png",
+      "gt_xy": [
+        0.3105,
+        0.8984
+      ],
+      "pred_xy": [
+        0.2105,
+        0.8968
+      ],
+      "dx_px": -25.61,
+      "dy_px": -0.4,
+      "err_px": 25.61,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.92,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Selection button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0010.png",
+      "gt_xy": [
+        0.3398,
+        0.1504
+      ],
+      "pred_xy": [
+        0.4328,
+        0.1502
+      ],
+      "dx_px": 23.81,
+      "dy_px": -0.05,
+      "err_px": 23.81,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.915,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "team@visualcortex.ai input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0029.png",
+      "gt_xy": [
+        0.498,
+        0.375
+      ],
+      "pred_xy": [
+        0.4307,
+        0.313
+      ],
+      "dx_px": -17.22,
+      "dy_px": -15.88,
+      "err_px": 23.43,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.996,
+      "failure_category": "input_field_anchor"
+    },
+    {
+      "query": "Tools button",
+      "category": "editor_code",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0006.png",
+      "gt_xy": [
+        0.1914,
+        0.1465
+      ],
+      "pred_xy": [
+        0.2783,
+        0.147
+      ],
+      "dx_px": 22.24,
+      "dy_px": 0.12,
+      "err_px": 22.24,
+      "in_box": false,
+      "is_hit": false,
+      "confidence": 0.993,
+      "failure_category": "adjacent_control_confusion"
+    },
+    {
+      "query": "Search Google or type URL input field",
+      "category": "browser_webpage",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0014.png",
+      "gt_xy": [
+        0.4902,
+        0.4863
+      ],
+      "pred_xy": [
+        0.5701,
+        0.493
+      ],
+      "dx_px": 20.45,
+      "dy_px": 1.72,
+      "err_px": 20.52,
+      "in_box": true,
+      "is_hit": false,
+      "confidence": 0.05,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "******** input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0030.png",
+      "gt_xy": [
+        0.5,
+        0.5312
+      ],
+      "pred_xy": [
+        0.4302,
+        0.5252
+      ],
+      "dx_px": -17.86,
+      "dy_px": -1.54,
+      "err_px": 17.93,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.998,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Apply Changes button",
+      "category": "settings_panel",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0036.png",
+      "gt_xy": [
+        0.6406,
+        0.8945
+      ],
+      "pred_xy": [
+        0.5716,
+        0.9036
+      ],
+      "dx_px": -17.66,
+      "dy_px": 2.32,
+      "err_px": 17.82,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 1.0,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "I'm Feeling Lucky button",
+      "category": "browser_webpage",
+      "kind": "button",
+      "file_path": "screens/test_held_out_0013.png",
+      "gt_xy": [
+        0.6445,
+        0.5781
+      ],
+      "pred_xy": [
+        0.5774,
+        0.579
+      ],
+      "dx_px": -17.18,
+      "dy_px": 0.23,
+      "err_px": 17.18,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 1.0,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Enter command... input field",
+      "category": "terminal_shell",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0018.png",
+      "gt_xy": [
+        0.4941,
+        0.416
+      ],
+      "pred_xy": [
+        0.4328,
+        0.4164
+      ],
+      "dx_px": -15.69,
+      "dy_px": 0.11,
+      "err_px": 15.69,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.956,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Enter command... input field",
+      "category": "terminal_shell",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0019.png",
+      "gt_xy": [
+        0.5,
+        0.3926
+      ],
+      "pred_xy": [
+        0.4396,
+        0.3925
+      ],
+      "dx_px": -15.47,
+      "dy_px": -0.02,
+      "err_px": 15.47,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.985,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Search... input field",
+      "category": "settings_panel",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0038.png",
+      "gt_xy": [
+        0.4922,
+        0.1719
+      ],
+      "pred_xy": [
+        0.5459,
+        0.1779
+      ],
+      "dx_px": 13.75,
+      "dy_px": 1.53,
+      "err_px": 13.83,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 1.0,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Find a setting... input field",
+      "category": "settings_panel",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0040.png",
+      "gt_xy": [
+        0.5137,
+        0.1484
+      ],
+      "pred_xy": [
+        0.4637,
+        0.1468
+      ],
+      "dx_px": -12.8,
+      "dy_px": -0.42,
+      "err_px": 12.81,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.993,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "user@example.com input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0027.png",
+      "gt_xy": [
+        0.498,
+        0.3789
+      ],
+      "pred_xy": [
+        0.4481,
+        0.3789
+      ],
+      "dx_px": -12.78,
+      "dy_px": -0.01,
+      "err_px": 12.78,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.991,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Find in file... input field",
+      "category": "editor_code",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0009.png",
+      "gt_xy": [
+        0.3281,
+        0.9062
+      ],
+      "pred_xy": [
+        0.2787,
+        0.9106
+      ],
+      "dx_px": -12.65,
+      "dy_px": 1.14,
+      "err_px": 12.7,
+      "in_box": true,
+      "is_hit": false,
+      "confidence": 0.05,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Enter username input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0026.png",
+      "gt_xy": [
+        0.498,
+        0.2305
+      ],
+      "pred_xy": [
+        0.5462,
+        0.2377
+      ],
+      "dx_px": 12.33,
+      "dy_px": 1.84,
+      "err_px": 12.47,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.866,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Type URL or search input field",
+      "category": "browser_webpage",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0011.png",
+      "gt_xy": [
+        0.6035,
+        0.2344
+      ],
+      "pred_xy": [
+        0.5561,
+        0.2315
+      ],
+      "dx_px": -12.12,
+      "dy_px": -0.74,
+      "err_px": 12.15,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.87,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Type URL or search input field",
+      "category": "browser_webpage",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0015.png",
+      "gt_xy": [
+        0.6055,
+        0.2188
+      ],
+      "pred_xy": [
+        0.5589,
+        0.2204
+      ],
+      "dx_px": -11.92,
+      "dy_px": 0.41,
+      "err_px": 11.93,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.965,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Enter username input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0030.png",
+      "gt_xy": [
+        0.5,
+        0.2344
+      ],
+      "pred_xy": [
+        0.5451,
+        0.233
+      ],
+      "dx_px": 11.54,
+      "dy_px": -0.35,
+      "err_px": 11.55,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.915,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Search docs... input field",
+      "category": "browser_webpage",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0013.png",
+      "gt_xy": [
+        0.5059,
+        0.457
+      ],
+      "pred_xy": [
+        0.4642,
+        0.4526
+      ],
+      "dx_px": -10.67,
+      "dy_px": -1.13,
+      "err_px": 10.73,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.996,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Documentation tab",
+      "category": "browser_webpage",
+      "kind": "tab",
+      "file_path": "screens/test_held_out_0012.png",
+      "gt_xy": [
+        0.2344,
+        0.1367
+      ],
+      "pred_xy": [
+        0.1926,
+        0.1383
+      ],
+      "dx_px": -10.71,
+      "dy_px": 0.42,
+      "err_px": 10.72,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.984,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "dev@company.org input field",
+      "category": "form_input",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0030.png",
+      "gt_xy": [
+        0.5,
+        0.3828
+      ],
+      "pred_xy": [
+        0.4587,
+        0.3787
+      ],
+      "dx_px": -10.56,
+      "dy_px": -1.06,
+      "err_px": 10.62,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.99,
+      "failure_category": "in_box_off_center"
+    },
+    {
+      "query": "Search code... input field",
+      "category": "editor_code",
+      "kind": "input_field",
+      "file_path": "screens/test_held_out_0010.png",
+      "gt_xy": [
+        0.3184,
+        0.8984
+      ],
+      "pred_xy": [
+        0.2771,
+        0.896
+      ],
+      "dx_px": -10.56,
+      "dy_px": -0.61,
+      "err_px": 10.58,
+      "in_box": true,
+      "is_hit": true,
+      "confidence": 0.839,
+      "failure_category": "in_box_off_center"
+    }
+  ]
+}
