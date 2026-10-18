@@ -151,3 +151,4 @@ In live testing on the operator's actual 1920×1200 physical display, four criti
 - [ ] Expand scene classification training beyond synthetic mockups to real-world enterprise applications (VS Code, Chrome, Terminal, Windows Settings, Office).
 - [ ] Expand patch word recognition from 131 words to 500+ UI tokens using clean-room synthetic renderers.
 - [ ] Full end-to-end task demonstration: User instructs System 2 in natural language $\to$ System 2 plans subgoals $\to$ System 1 executes motor actions $\to$ Postconditions verified $\to$ Outcome reported.
+
