@@ -6,8 +6,9 @@ import pytest
 import torch
 
 from forge.vision.cortex.core.dorsal import DorsalAffordanceStream, AFFORDANCE_CLASSES
+from forge.vision.cortex.core.learned import LearnedStabilityHead
 from forge.vision.cortex.core.modulation import LanguageModulation, CharNGramEncoder, dsnt_soft_argmax
-from forge.vision.cortex.core.predictive import PredictiveCodingEngine, decode_stability
+from forge.vision.cortex.core.predictive import STABILITY_STATES, PredictiveCodingEngine
 from forge.vision.cortex.sdk import ScreenEye
 from forge.vision.capture import SyntheticScreen
 
@@ -47,41 +48,37 @@ def test_char_ngram_encoder():
     assert sim < 0.99
 
 
-def test_dorsal_nms_and_regions():
-    """Verify 2D spatial NMS deduplicates peaks and find_action_regions returns bounds."""
+def test_dorsal_affordance_map_is_dense_and_normalised():
+    """The dorsal stream now exposes only its learned dense affordance field.
+
+    Peak extraction moved to the learned SlotDetector, so what remains here is
+    the head itself: a per-class probability field that must be a valid
+    distribution at every spatial location.
+    """
     dorsal = DorsalAffordanceStream(in_dim=64)
     feat = torch.randn(1, 64, 16, 16)
 
-    hotspots = dorsal.find_action_hotspots(feat, action_type="clickable", top_k=3, threshold=0.1)
-    assert len(hotspots) <= 3
-    for x, y, conf in hotspots:
-        assert 0.0 <= x <= 1.0
-        assert 0.0 <= y <= 1.0
-        assert conf >= 0.1
-
-    regions = dorsal.find_action_regions(feat, action_type="clickable", top_k=2, threshold=0.1)
-    assert len(regions) <= 2
-    for cx, cy, w, h, conf in regions:
-        assert 0.0 <= cx <= 1.0
-        assert 0.0 <= cy <= 1.0
-        assert w > 0.0 and h > 0.0
+    probs = dorsal.get_affordance_map(feat)
+    assert probs.dim() == 4
+    assert probs.shape[1] == len(AFFORDANCE_CLASSES)
+    # Softmax over classes: each location sums to one, nothing is negative.
+    assert torch.allclose(probs.sum(dim=1), torch.ones(1, *probs.shape[2:]), atol=1e-5)
+    assert float(probs.min()) >= 0.0
 
 
-def test_predictive_hysteresis_and_anomaly_gating():
-    """Verify Schmitt-trigger hysteresis suppresses state flickering."""
-    logits_animating = torch.tensor([[0.4, 0.5, 0.05, 0.05]]) # argmax is 1 (animating)
-    
-    # Low surprise when previous was stable -> stays stable
-    state1 = decode_stability(logits_animating, surprise_score=0.10, prev_state="stable")
-    assert state1 == "stable"
+def test_learned_stability_head_replaces_schmitt_thresholds():
+    """Stability is now the argmax of a learned head, not a threshold ladder."""
+    head = LearnedStabilityHead(latent_dim=16, num_states=len(STABILITY_STATES))
+    memory = torch.randn(2, 16)
+    surprise = torch.rand(2, 1)
 
-    # Higher surprise -> transitions to animating
-    state2 = decode_stability(logits_animating, surprise_score=0.35, prev_state="stable")
-    assert state2 == "animating"
+    logits = head(memory, surprise, torch.tensor([0, 1]))
+    assert logits.shape == (2, len(STABILITY_STATES))
 
-    # Acute surprise -> surprise event
-    state3 = decode_stability(logits_animating, surprise_score=0.75, prev_state="stable")
-    assert state3 == "surprise_event"
+    # The head is differentiable end to end: this is what lets the temporal
+    # state be trained rather than hand-tuned.
+    logits.sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in head.parameters())
 
 
 def test_sdk_bare_decorator_and_close():

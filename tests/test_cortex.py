@@ -58,9 +58,6 @@ def test_dorsal_affordance_stream():
     probs = dorsal.get_affordance_map(feats)
     assert torch.allclose(probs.sum(dim=1), torch.ones(1, 16, 16), atol=1e-4)
 
-    hotspots = dorsal.find_action_hotspots(feats, action_type="clickable", top_k=3, threshold=0.0)
-    assert len(hotspots) <= 3
-
 
 def test_ventral_semantic_stream():
     ventral = VentralSemanticStream(in_dim=64, latent_dim=128)

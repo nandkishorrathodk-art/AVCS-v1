@@ -69,6 +69,10 @@ class LanguageModulation(nn.Module):
             nn.Linear(64, 2),  # residual offset
             nn.Sigmoid(),
         )
+        # Learned residual scale, initialised to the value the hand-tuned version
+        # used. Making it a parameter lets training decide how far the regression
+        # head may move the DSNT peak instead of fixing that at 0.15.
+        self.residual_scale = nn.Parameter(torch.tensor(0.15))
 
     def forward(
         self,
@@ -94,7 +98,7 @@ class LanguageModulation(nn.Module):
 
         # 5. Modulated visual features for residual coordinate refinement
         modulated_features = visual_features * (1.0 + relevance_map)
-        residual = (self.coord_regressor(modulated_features) - 0.5) * 0.15
+        residual = (self.coord_regressor(modulated_features) - 0.5) * self.residual_scale
         target_coords = torch.clamp(dsnt_coords + residual, 0.0, 1.0)
 
         return relevance_map, target_coords

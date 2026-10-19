@@ -146,7 +146,12 @@ def run_game_demo(duration_seconds: float = 3.0, virtual_motor: bool = True) -> 
     print(f"  • Mean Tracking Error   : {mean_err:.4f} (normalized)")
     print(f"  • Flash Surprise Reflex : {len(reflexes_fired)} dodge reactions triggered")
     print("-" * 72)
-    print("VERDICT: AVCS meets real-time 60-120 FPS continuous visual-motor criteria.")
+    # The verdict is derived from the measured rate, not asserted. An earlier
+    # version printed a fixed "meets 60-120 FPS" line regardless of the run.
+    if fps >= 60.0:
+        print(f"VERDICT: {fps:.1f} FPS measured - meets the >=60 FPS real-time criterion.")
+    else:
+        print(f"VERDICT: {fps:.1f} FPS measured - BELOW the >=60 FPS real-time criterion.")
     print("=" * 72)
 
     controller.close()

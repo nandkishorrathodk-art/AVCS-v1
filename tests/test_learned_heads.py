@@ -111,7 +111,7 @@ def test_model_emits_all_learned_outputs(small_cortex):
     assert state.scene_attributes.shape == (len(SCENE_ATTRIBUTES),)
     assert state.object_count >= 0.0
     assert len(state.objects) == small_cortex.cfg.num_object_slots
-    assert state.stability_state_learned in ("stable", "animating", "transitioning", "surprise_event")
+    assert state.stability_state in ("stable", "animating", "transitioning", "surprise_event")
 
 
 def test_model_state_dict_contains_learned_heads(small_cortex):

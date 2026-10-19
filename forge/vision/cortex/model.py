@@ -15,7 +15,11 @@ import torch.nn as nn
 
 from forge.vision.cortex.config import CortexConfig, ModelConfig
 from forge.vision.cortex.core.backbone import CorticalBackbone
-from forge.vision.cortex.core.dorsal import AFFORDANCE_CLASSES, DorsalAffordanceStream
+from forge.vision.cortex.core.dorsal import (
+    AFFORDANCE_CLASSES,
+    INTERACTIVE_CLASSES,
+    DorsalAffordanceStream,
+)
 from forge.vision.cortex.core.fovea import RetinalFoveation, RetinalView
 from forge.vision.cortex.core.learned import (
     ACTION_NAMES,
@@ -30,7 +34,6 @@ from forge.vision.cortex.core.modulation import LanguageModulation
 from forge.vision.cortex.core.predictive import (
     STABILITY_STATES,
     PredictiveCodingEngine,
-    decode_stability,
 )
 from forge.vision.cortex.core.servoing import VisualMotorState, VisualServoingEngine
 from forge.vision.cortex.core.ventral import UI_CATEGORIES, VentralSemanticStream
@@ -60,7 +63,6 @@ class CortexState:
     action: str = "noop"                                  # argmax over learned action logits
     action_target: Optional[Tuple[float, float]] = None   # Learned action coordinate
     action_confidence: float = 0.0
-    stability_state_learned: str = "stable"               # Learned stability (no hand-tuned thresholds)
     inference_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,7 +95,6 @@ class CortexState:
                 if self.action_target else None
             ),
             "action_confidence": round(float(self.action_confidence), 3),
-            "stability_state_learned": self.stability_state_learned,
             "inference_ms": round(self.inference_ms, 2),
         }
 
@@ -284,21 +285,39 @@ class ArtificialVisualCortex(nn.Module):
 
         text_dense = float(out["text_density"][0].item())
         surprise = max(0.0, min(1.0, float(out["surprise_score"].mean().item())))
-        stability = decode_stability(
-            out["stability_logits"],
-            surprise_score=surprise,
-            prev_state=getattr(self.predictive, "current_state", None),
+
+        # 4. Learned temporal stability (single source of truth).
+        stab_idx = int(torch.argmax(out["stability_logits_learned"][0]).item())
+        stability = (
+            STABILITY_STATES[stab_idx] if stab_idx < len(STABILITY_STATES) else "stable"
         )
+        self._prev_state_idx = stab_idx
         self.predictive.current_state = stability
 
-        # 4. Extract Top Action Hotspots (Clickable / Typeable)
+        # 5. Learned object slots. Everything below is read off the trained
+        # SlotDetector: boxes, presence (objectness) and class. There is no
+        # greedy non-maximum suppression and no hand-tuned threshold.
+        slot_obj = torch.sigmoid(out["slots"]["objectness"][0])           # (N,)
+        slot_boxes = out["slots"]["boxes"][0]                              # (N, 4)
+        slot_cls = torch.softmax(out["slots"]["class_logits"][0], dim=-1)  # (N, C)
+        order = torch.argsort(slot_obj, descending=True)
+
+        objects: List[dict] = []
         hotspots: List[Tuple[float, float, str, float]] = []
-        for act in ["clickable", "typeable"]:
-            spots = self.dorsal.find_action_hotspots(
-                out["fused_feat"], action_type=act, top_k=2, threshold=0.25
-            )
-            for x, y, conf in spots:
-                hotspots.append((x, y, act, conf))
+        for i in order.tolist():
+            cls_idx = int(torch.argmax(slot_cls[i]).item())
+            cls_name = AFFORDANCE_CLASSES[cls_idx] if cls_idx < len(AFFORDANCE_CLASSES) else "static"
+            conf = float(slot_obj[i].item())
+            cx, cy = float(slot_boxes[i][0].item()), float(slot_boxes[i][1].item())
+            objects.append({
+                "box": [round(float(v), 3) for v in slot_boxes[i].tolist()],
+                "objectness": round(conf, 3),
+                "class": cls_name,
+                "class_confidence": round(float(slot_cls[i][cls_idx].item()), 3),
+            })
+            if cls_name in INTERACTIVE_CLASSES:
+                hotspots.append((cx, cy, cls_name, conf))
+        hotspots = hotspots[: self.cfg.num_object_slots]
 
         # 5. Extract Language Grounding (if query passed)
         query_target = None
@@ -324,23 +343,7 @@ class ArtificialVisualCortex(nn.Module):
         # Dense affordance argmax map (H_grid, W_grid)
         aff_map_np = torch.argmax(out["affordance_logits"][0], dim=0).cpu().numpy()
 
-        # 7. Fully-learned outputs (no hand-tuned thresholds anywhere below).
-        objects: List[dict] = []
-        slot_obj = out["slots"]["objectness"][0]              # (N,)
-        slot_boxes = out["slots"]["boxes"][0]                 # (N, 4)
-        slot_cls = torch.softmax(out["slots"]["class_logits"][0], dim=-1)  # (N, C)
-        # Objects are emitted in objectness order; presence is read from the
-        # learned objectness value, not compared against a fixed cutoff.
-        order = torch.argsort(slot_obj, descending=True)
-        for i in order.tolist():
-            cls_idx = int(torch.argmax(slot_cls[i]).item())
-            objects.append({
-                "box": [round(float(v), 3) for v in slot_boxes[i].tolist()],
-                "objectness": round(float(slot_obj[i].item()), 3),
-                "class": AFFORDANCE_CLASSES[cls_idx] if cls_idx < len(AFFORDANCE_CLASSES) else "static",
-                "class_confidence": round(float(slot_cls[i][cls_idx].item()), 3),
-            })
-
+        # 7. Learned scene description and action.
         scene_attributes = torch.sigmoid(out["attribute_logits"][0]).cpu().numpy()
         object_count = float(out["object_count"][0].item())
 
@@ -349,13 +352,6 @@ class ArtificialVisualCortex(nn.Module):
         action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else "noop"
         action_target = tuple(float(v) for v in out["action_target"][0].cpu().tolist())
         action_conf = float(out["action_confidence"][0].item())
-
-        # Learned stability: argmax over the learned head (no Schmitt thresholds).
-        stab_idx = int(torch.argmax(out["stability_logits_learned"][0]).item())
-        stability_learned = (
-            STABILITY_STATES[stab_idx] if stab_idx < len(STABILITY_STATES) else "stable"
-        )
-        self._prev_state_idx = stab_idx
 
         dt = (time.perf_counter() - t0) * 1000.0
 
@@ -379,7 +375,6 @@ class ArtificialVisualCortex(nn.Module):
             action=action_name,
             action_target=action_target,
             action_confidence=action_conf,
-            stability_state_learned=stability_learned,
             inference_ms=dt,
         )
 

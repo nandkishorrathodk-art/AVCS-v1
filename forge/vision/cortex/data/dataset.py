@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader, Dataset
 
 from forge.vision.cortex.core.learned import ACTION_NAMES, SCENE_ATTRIBUTES
 from forge.vision.cortex.data.synthetic import ProceduralScreenGenerator, SyntheticScreenData
-from forge.vision.cortex.data.text import ngram_query_embedding
 
 MAX_OBJECT_SLOTS = 16
 
@@ -185,16 +184,12 @@ class ScreenDataset(Dataset):
         else:
             target_coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
 
-        # Deterministic query embedding derived from the actual target label.
-        query_embed = ngram_query_embedding(data.interactive_label(), self.latent_dim)
-
         sample = {
             "frame_t": frame_t,
             "frame_next": frame_next,
             "affordance_mask": mask_down,
             "category_idx": torch.tensor(data.category_idx, dtype=torch.long),
             "target_coord": target_coord,
-            "query_embed": query_embed,
             "query_text": data.interactive_label(),
             "scene_attributes": torch.from_numpy(_scene_attributes(data)),
             "stability_target": self._stability_target(data.frame, data_next.frame),
