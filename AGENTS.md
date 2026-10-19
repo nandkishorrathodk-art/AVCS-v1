@@ -193,6 +193,34 @@ fixing the echo problem (see below).
   asserts `set(Op) == MUTATING_OPS | OBSERVING_OPS` so a new op cannot be
   added in one place and forgotten in another.
 
+## Fully-learned cortex (`forge/vision/cortex/`)
+
+`core/learned.py` holds the heads that replaced hand-written inference rules:
+`LearnedTextEncoder` (trainable byte encoder, replaced the parameter-free hash),
+`SlotDetector` (DETR-style slots, replaced greedy NMS), `SceneUnderstandingHead`
+(multi-label attributes + regressed count), `ActionPolicyHead` (the model now
+chooses the action) and `LearnedStabilityHead` (replaced the Schmitt-trigger
+thresholds 0.55/0.22/0.08).
+
+Facts to keep straight:
+
+- The model is `1,678,779` params. The learned heads add under 1 ms; the
+  backbone dominates and scales with the square of the retinal input size.
+  `realtime_config()` (128x128 retina) holds ~95 FPS on 4 CPU cores; the default
+  256x256 retina is ~37 FPS. Quote the input size with any latency number.
+- Training runs all ten loss terms in one pass (predictive, affordance,
+  category, grounding, slots, attributes, count, action, stability). The
+  affordance loss resamples targets to the logits' grid, so a checkpoint is not
+  tied to one input resolution.
+- Legacy checkpoints predate these heads. `load_avcs_weights` treats the new
+  head prefixes as optional, so an old checkpoint still loads and reports
+  `weights_loaded=True` with the new heads left at initialisation. If you change
+  a head name, update `learned_head_prefixes` in `avcs/weights.py` or every old
+  checkpoint silently stops loading.
+- Timing tests must take the minimum over repeated runs, not the mean. On a
+  loaded CI box the mean is dominated by scheduler preemption and a real-time
+  assertion flakes; the minimum is the achievable latency.
+
 ## Real-time screen vision (`forge/vision/`)
 
 Pure-pixel visual awareness of the desktop. Read `docs/SCREEN_VISION.md`. The

@@ -59,11 +59,10 @@ class AVCSCloudTrainer:
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         self.model.train()
-        total_loss = 0.0
-        total_pred = 0.0
-        total_aff = 0.0
-        total_cat = 0.0
-        total_grd = 0.0
+        keys = ["loss", "loss_predictive", "loss_affordance", "loss_category",
+                "loss_grounding", "loss_slots", "loss_attributes", "loss_count",
+                "loss_action", "loss_stability"]
+        totals = {k: 0.0 for k in keys}
         steps = 0
 
         t0 = time.perf_counter()
@@ -74,7 +73,9 @@ class AVCSCloudTrainer:
             afford_target = batch["affordance_mask"].to(self.device)
             cat_target = batch["category_idx"].to(self.device)
             coord_target = batch["target_coord"].to(self.device)
-            query_embed = batch["query_embed"].to(self.device)
+            # The learned text encoder is trained end to end; the query string is
+            # fed as text rather than a frozen hash embedding.
+            query_embed = self.model.encode_query(list(batch["query_text"]), device=self.device)
 
             self.optimizer.zero_grad()
 
@@ -99,7 +100,19 @@ class AVCSCloudTrainer:
 
                 # 5. Compute Multi-Task Loss
                 loss_dict = self.loss_fn(
-                    out_t, latent_next, afford_target, cat_target, coord_target
+                    out_t,
+                    latent_next,
+                    afford_target,
+                    cat_target,
+                    coord_target,
+                    object_boxes=batch["object_boxes"].to(self.device),
+                    object_classes=batch["object_classes"].to(self.device),
+                    object_present=batch["object_present"].to(self.device),
+                    attribute_targets=batch["scene_attributes"].to(self.device),
+                    count_targets=batch["object_count"].to(self.device),
+                    action_targets=batch["action_idx"].to(self.device),
+                    action_coord_targets=batch["action_coord"].to(self.device),
+                    stability_targets=batch["stability_target"].to(self.device),
                 )
                 loss = loss_dict["loss"]
 
@@ -108,25 +121,16 @@ class AVCSCloudTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            total_loss += loss.item()
-            total_pred += loss_dict["loss_predictive"].item()
-            total_aff += loss_dict["loss_affordance"].item()
-            total_cat += loss_dict["loss_category"].item()
-            total_grd += loss_dict["loss_grounding"].item()
+            for k in keys:
+                totals[k] += loss_dict[k].item()
             steps += 1
 
         self.scheduler.step()
         dt = time.perf_counter() - t0
 
-        metrics = {
-            "epoch": epoch,
-            "loss": total_loss / max(steps, 1),
-            "loss_predictive": total_pred / max(steps, 1),
-            "loss_affordance": total_aff / max(steps, 1),
-            "loss_category": total_cat / max(steps, 1),
-            "loss_grounding": total_grd / max(steps, 1),
-            "time_sec": dt,
-        }
+        metrics = {"epoch": epoch, "time_sec": dt}
+        for k in keys:
+            metrics[k] = totals[k] / max(steps, 1)
         return metrics
 
     def train(self, epochs: Optional[int] = None, save_path: str = "runs/weights/avcs_cortex_weights.pt") -> None:
@@ -144,6 +148,11 @@ class AVCSCloudTrainer:
                 f"Aff: {m['loss_affordance']:.4f} | "
                 f"Cat: {m['loss_category']:.4f} | "
                 f"Grd: {m['loss_grounding']:.4f} | "
+                f"Slot: {m['loss_slots']:.4f} | "
+                f"Attr: {m['loss_attributes']:.4f} | "
+                f"Cnt: {m['loss_count']:.4f} | "
+                f"Act: {m['loss_action']:.4f} | "
+                f"Stab: {m['loss_stability']:.4f} | "
                 f"Time: {m['time_sec']:.2f}s"
             )
 

@@ -316,6 +316,18 @@ def load_avcs_weights(
             optional_missing_prefixes = (
                 ("grounder.",) if target_cls == "HumanEye" and not strict else ()
             )
+            # Legacy checkpoints predate the fully-learned heads in core/learned.py,
+            # so their keys are absent. Treat them as optional: the backbone and
+            # original heads load, and the new heads stay at their initialisation
+            # until a checkpoint that contains them is trained.
+            learned_head_prefixes = (
+                "text_encoder.",
+                "slot_detector.",
+                "scene_head.",
+                "action_policy.",
+                "stability_learned.",
+            )
+            optional_missing_prefixes = optional_missing_prefixes + learned_head_prefixes
             loaded = _load_complete_state_dict(
                 target_module,
                 state,
