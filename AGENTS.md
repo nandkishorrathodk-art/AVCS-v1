@@ -312,28 +312,50 @@ oversight. Traps, both learned the hard way:
   need the system `libtk8.6.so`. They now raise an actionable ImportError
   instead of an opaque loader error.
 
-## AVCS `forge/vision/cortex/` System 1 — completed & measured
+## AVCS `forge/vision/cortex/` System 1 — what it actually does
 
-A second System 1 implementation, trained to completion in this repo. Read
-`docs/REALITY_AUDIT.md` section 11.
+Read `docs/AVCS_CORTEX_REALITY.md`. It is the corrected record; an earlier
+version of this section described the model from its code and was wrong.
 
-- `ArtificialVisualCortex` is **1,139,032 params**. Checkpoint:
+- `ArtificialVisualCortex` is **1,678,780 params**. Checkpoint:
   `runs/weights/avcs_cortex_weights.pt` (loads with 0 missing / 0 unexpected).
-- Four pipeline defects were fixed to make it train at all: `frame_next` was a
-  pixel-identical copy (world model learned identity); the `CharNGramEncoder`
-  query path was dead (grounding trained on noise); `ScreenEye.look_at` used a
-  *different, untrained* encoder than training (train/inference mismatch); the
-  trainer saved to a path discovery does not look at.
-- Real text now enters via `forge/vision/cortex/data/text.py::ngram_query_embedding`.
-  Both the trainer and `ScreenEye.look_at` **must** use this same encoder —
-  using `ByteQueryEncoder` at inference silently ungrounds the model.
-- Held-out (n=40, procedural, same generator): grounding median error
-  **0.0188 norm (~12 px @640)**. Same-distribution only; not a generalisation
-  result.
-- It is an **active-vision** model: fovea fixation is state carried between
-  calls, so consecutive `look_at` calls on one frame legitimately differ. Reset
-  fixation for bit-identical output.
-- It still has **no text decoder** and does not speak. Speech is System 2.
+- The cortex **inference path contains no hand-written decision rules**. The
+  Schmitt-trigger stability thresholds, the 2D spatial NMS for hotspots, the
+  `hotspots[:4]` cap, the `("clickable","typeable")` action filter, the
+  char-n-gram hash query embedding and the `* 0.15` residual scale are all
+  gone, replaced by learned heads (`LearnedStabilityHead`, `SlotDetector`,
+  `LearnedTextEncoder`, learned `residual_scale`). Do not reintroduce a
+  threshold in this path.
+- **The remaining collapses are in the corpus, not the model.** Measured
+  (1.7M params, 8 epochs, held-out seeds):
+  - grounding target spread across queries 0.083 (was 0.0046); grounding error
+    0.37 (was 0.53, ≈ random). Text now moves the gaze, but it is not a usable
+    pointer.
+  - action head predicts `click` on 100% of frames: 101/101 correct for
+    clickable scenes, 0/11 for typeable, 0/8 for scrollable. The corpus is ~93%
+    clickable, so the head sits at the majority class.
+  - category accuracy 33%, but **five of eight `UI_CATEGORIES` are rendered by
+    identical code paths** (`browser_webpage`/`form_input` share one branch;
+    `settings_panel`/`media_player`/`desktop_canvas` share another). Confusion
+    is `browser_webpage→form_input` 20/20 and `settings_panel→desktop_canvas`
+    20/20. `editor_code` is 20/20. The model is right; the generator is
+    ambiguous. Do not quote 33% as a model failure without this caveat.
+- Two dataset-level hardcodes were the real cause of the old "degenerate"
+  readings and are now removed: `_action_target` no longer uses a
+  `click > type > scroll` precedence list, and the grounding target is no
+  longer the same titlebar pixel for every frame (`choose_primary()` picks a
+  random element; `points_from_mask()` derives points from the painted mask
+  instead of a hand-maintained list). **If a head collapses again, check the
+  label function before blaming the model.**
+- Kept on purpose: foveal optics constants and architecture hyperparameters
+  (sensor geometry, not decision rules); `_AFFORDANCE_QUERY_NAMES` /
+  `_CATEGORY_TARGET_LABELS` (vocabulary); `CharNGramEncoder`, which is live in
+  the separate legacy `avcs/` HumanEye subsystem.
+- It is **not** a screen-understanding model and it has **no text decoder**.
+  Prose about the screen is System 2, which is not in this repo. Describing
+  System 1 output as natural language is the exact overclaim this section
+  corrects.
+
 
 ## Honest limits
 

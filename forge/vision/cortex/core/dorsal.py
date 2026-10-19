@@ -33,6 +33,17 @@ INTERACTIVE_CLASSES = frozenset(
     c for c in AFFORDANCE_CLASSES if c != "static"
 )
 
+# Affordance class -> the action verb applied to it. This is a naming
+# correspondence (a vocabulary), not a precedence rule: it says what "clickable"
+# means, not which affordance wins when several are present.
+AFFORDANCE_TO_ACTION = {
+    "static": "noop",
+    "clickable": "click",
+    "typeable": "type",
+    "scrollable": "scroll",
+    "draggable": "drag",
+}
+
 
 class DorsalAffordanceStream(nn.Module):
     """Predicts a dense spatial affordance probability tensor."""

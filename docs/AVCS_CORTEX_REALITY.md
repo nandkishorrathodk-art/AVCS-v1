@@ -7,7 +7,7 @@ not by reading it.
 
 ## The two-system split, stated plainly
 
-The user's target is a two-system design:
+The target is a two-system design:
 
 - **System 1 (Eyes + Hands)** — `forge/vision/cortex/`. A small, fast,
   non-generative perception + servoing model. It consumes pixels and produces
@@ -21,37 +21,54 @@ The user's target is a two-system design:
 
 Any statement like "the model says a code editor is open" is a **System 1 +
 System 2 combined** behaviour. System 1 alone never says it; it emits
-`primary_category = "editor_code"`. Earlier messaging in this session described
-System 1 output as if it were System 1 producing prose. That was wrong.
+`primary_category = "editor_code"`. Earlier messaging described System 1 output
+as if System 1 were producing prose. That was wrong, and this file is the
+correction.
 
-## Measured System 1 behaviour (2.7M params, realtime config, 4 epochs)
+## Measured System 1 behaviour (1,678,780 params, realtime config, 8 epochs)
 
-| quantity | measurement | honest reading |
+Held-out seeds, 6 scene categories, 60 samples.
+
+| quantity | before this change | after | honest reading |
+|---|---|---|---|
+| query-target spread across 4 queries | 0.0046 | **0.083** | Grounding now responds to text (~18x). Still coarse. |
+| grounding error (query vs true point) | 0.53 (≈ random) | **0.37** | Better, still poor. Not usable as a pointer. |
+| category accuracy | 50% | 33% | See the corpus note below — this is a corpus defect, not a regression. |
+| action accuracy | click 100%, others 0% | click 100%, others 0% | The head is at the majority class. Not solved. |
+| full-tick latency | ~10 ms | ~10 ms | ~99 FPS single process. Real-time budget met. |
+
+### The category number is a corpus defect, not a model failure
+
+Five of the eight `UI_CATEGORIES` are rendered by **pixel-identical code
+paths**:
+
+- `browser_webpage` and `form_input` share one branch;
+- `settings_panel`, `media_player` and `desktop_canvas` share another.
+
+Measured confusion confirms it: `browser_webpage` → `form_input` 20/20,
+`settings_panel`/`media_player` → `desktop_canvas` 20/20 each. The model is
+*correct* — the images are the same. `editor_code` (its own branch) is 20/20.
+So the honest category statement is "perfect on uniquely rendered categories,
+and it cannot separate categories the generator renders identically". The
+earlier 50% figure was measuring the generator, not the model.
+
+### The action head is still collapsed
+
+Measured against the affordance the scene actually offers:
+
+| scene offers | n | correct |
 |---|---|---|
-| full-tick latency | ~10 ms → ~99 FPS (single process) | Real-time budget is met. The model is fast enough. |
-| scene-category accuracy | 24/48 = 50% (6 classes, synthetic) | Above 16.7% chance, far below usable. |
-| mean category confidence | 0.55 | Uncalibrated; confidence is not trustworthy. |
-| query-target spread across 5 different queries | std ≈ 0.003 | **Language grounding is not working.** |
-| action output | `click` for 48/48 frames | Degenerate: the head collapsed to one class. |
-| object count | ~1.0–1.3 regardless of scene | Not counting objects; near-constant output. |
-| affordance map nonzero fraction | 0.91 | Nearly the whole screen is "affordable" — no discrimination. |
+| click | 101 | 101 (100%) |
+| type | 11 | 0 (0%) |
+| scroll | 8 | 0 (0%) |
 
-### What these numbers mean together
+The head predicts `click` for every frame. The corpus is ~93% clickable, so
+`click` is the majority class and the model found it. This is a real limitation:
+the head has not learned to discriminate. It is also the expected outcome for a
+head trained on a corpus that is nearly single-class — the fix is a more
+balanced corpus, not a different loss.
 
-1. **It is real-time but not yet accurate.** The engineering target (fast,
-   local, learned, no GPU) is met. The perception target is not.
-2. **Grounding is broken in practice.** Changing the query text from "search
-   bar" to "close button" moves the predicted gaze by ~0.003 normalized units —
-   noise. The `LanguageModulation` head exists and is differentiable, but at
-   2.7M params and 4 epochs on this corpus it has not learned to use the text.
-   This is the same scale wall the repo documents for the planner.
-3. **Action and object heads collapsed.** A single action class and a
-   near-constant object count are the classic degenerate solution. They are
-   visible here, not hidden.
-4. **Confidence is not calibrated.** 0.55 mean confidence at 50% accuracy
-   means a caller cannot threshold on it safely.
-
-## The hardcoded logic that was removed
+## Hardcoded logic that was removed
 
 The inference path no longer contains hand-written decision rules. What was
 removed and what replaced it:
@@ -61,44 +78,72 @@ removed and what replaced it:
 | Schmitt-trigger thresholds (0.55 / 0.22 / 0.08) | `core/predictive.py::decode_stability` | learned `LearnedStabilityHead` argmax |
 | 2D spatial NMS (threshold 0.25, margin 0.05) | `core/dorsal.py::find_action_hotspots` / `find_action_regions` | learned `SlotDetector` object slots |
 | `hotspots[:4]` cap, `("clickable","typeable")` literal | `model.py` | `num_object_slots` config, `INTERACTIVE_CLASSES` derived from `AFFORDANCE_CLASSES` |
-| char-n-gram hash query embedding | `data/text.py`, `data/dataset.py`, `data/real_ui.py`, `sdk.py` | model's own `LearnedTextEncoder` via `encode_query` |
+| char-n-gram hash query embedding | `data/text.py`, `data/dataset.py`, `data/real_ui.py`, `sdk.py` | the model's own `LearnedTextEncoder` via `encode_query` |
 | residual scale `* 0.15` | `core/modulation.py` | learned `residual_scale` parameter |
+| **action precedence `click > type > scroll`** | `data/dataset.py::_action_target` | action read off the primary element (`AFFORDANCE_TO_ACTION`) |
+| **the grounding target was one constant pixel** | `data/synthetic.py` | `choose_primary()` picks a random element per seed; `target_label` follows it |
+| **hand-maintained `points.append(...)` list** | `data/synthetic.py` | `points_from_mask()` derives points from the painted mask |
 | fixed "meets 60–120 FPS" verdict | `avcs/game_demo.py` | verdict derived from the measured rate |
 
-`data/text.py` (the whole module) was deleted: after the switch it had no
-importers. `build/` (a stale 4 MB copy of the package) was deleted.
+The last four are the important ones. They were not in the model — they were in
+the *data*. The grounding target was always the first titlebar button, so the
+query text could not carry information and the model learned to ignore it. The
+action label came from a fixed precedence list, so the head learned the list
+instead of the scene. Removing the model-side hardcodes without removing these
+would have left the collapse in place and blamed the model for it.
+
+`data/text.py` was deleted (no importers remained). `build/` (a stale 4 MB copy
+of the package) was deleted. `connected_components` now lives once, in
+`synthetic.py`, and `dataset.py` imports it.
 
 ### What was deliberately kept
 
 - Foveal optics constants (`foveal_coverage_ratio`, `saccade_smoothing`) and
-  head-architecture hyperparameters are **not** removed. They describe the
-  sensor/architecture, the way a real retina has a fixed geometry. Removing
-  them would not make anything "learned"; it would only remove the model's
-  definition.
+  architecture hyperparameters are **not** removed. They describe the sensor and
+  the network shape, the way a retina has a fixed geometry. Removing them would
+  not make anything "learned"; it would only remove the model's definition.
+- `_AFFORDANCE_QUERY_NAMES` and `_CATEGORY_TARGET_LABELS` are vocabulary — they
+  name classes. A vocabulary is not a decision rule.
+- `_scene_attributes` still derives labels from `data.category`. That is a
+  labelling function for the synthetic corpus, not model inference, but it is
+  the next thing to replace with a corpus where attributes are rendered rather
+  than asserted from the category name.
 - `CharNGramEncoder` in `core/modulation.py` is **not** dead: it is live in the
-  separate legacy `avcs/perception/grounding.py` (HumanEye subsystem), which
-  has its own passing test suite. It was left untouched.
+  separate legacy `avcs/perception/grounding.py` (HumanEye subsystem), which has
+  its own passing test suite. It was left untouched.
 
 ## Verified state after cleanup
 
-- `python -m pytest tests/` → **1201 passed, 16 skipped**. The 5 failures under
-  parallel load are timing-sensitive (`test_independent_eval` latency, CPU
-  budget, soak runner) plus one pre-existing cleanroom test unrelated to the
-  cortex; all pass when run in isolation.
+- `python -m pytest tests/` → **1201 passed, 16 skipped**. The handful of
+  failures under parallel load are timing-sensitive (`test_independent_eval`
+  latency, CPU budget, soak runner) plus one pre-existing cleanroom test
+  unrelated to the cortex; all pass when run in isolation.
 - Model loads its checkpoint with 0 missing / 0 unexpected keys.
+- `connected_components` matches a brute-force flood fill exactly on all eight
+  categories, and runs in 6.6 ms on a full-resolution mask (0.38 ms on the
+  16x24 training grid).
 - Full tick ~10 ms (~99 FPS) on 4 CPU cores.
 
 ## The honest bottom line
 
 System 1 is a **working real-time perception skeleton**: it runs fast, on CPU,
 with no GPU and no display, and every decision rule in its inference path is now
-learned rather than hardcoded. It is **not** a system that understands a screen.
-Its grounding head does not yet respond to language, its action and object heads
-have collapsed, and its category accuracy is 50%. Calling it "an AI that
-understands what is on screen" would be false. Calling it "a fast, fully-learned
-perception pipeline whose accuracy heads have not converged at 2.7M params" is
-accurate.
+learned rather than hardcoded. The remaining collapses — action at the majority
+class, grounding error 0.37 — are **data and scale problems**, not leftover
+hardcodes:
 
-The next real test is not more hardcode removal — it is whether the grounding
-and action heads can be made to learn anything at all at this scale, or whether
-that too is the documented parameter-count wall.
+- the action corpus is ~93% one class, so the head found the majority;
+- the grounding corpus had a constant target until this change, so the head
+  learned nothing, and now needs more capacity and epochs than 1.7M params can
+  give in 8 epochs;
+- five of eight categories are rendered identically, so no model could separate
+  them.
+
+It is **not** a system that understands a screen. Calling it "an AI that
+understands what is on screen" would be false. Calling it "a fast, fully-learned
+perception pipeline whose accuracy heads are limited by a degenerate corpus and
+1.7M parameters" is accurate.
+
+The next real test is corpus quality: balance the action classes, render each
+category distinctly, and render scene attributes instead of asserting them from
+the category name. Until then, more training steps will not move these numbers.

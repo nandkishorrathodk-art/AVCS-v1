@@ -37,6 +37,23 @@ class SyntheticScreenData:
             return self.interactive_points[0][2]
         return "element"
 
+    def choose_primary(self) -> None:
+        """Picks which interactive point the grounding query refers to.
+
+        Without this the first point was always the same titlebar button, so the
+        grounding target was one constant pixel for every frame and the query
+        text carried no information. Selecting a random point per seed makes the
+        label-to-coordinate mapping learnable.
+        """
+        if not self.interactive_points:
+            return
+        idx = random.randrange(len(self.interactive_points))
+        self.interactive_points = (
+            [self.interactive_points[idx]] + self.interactive_points[:idx] + self.interactive_points[idx + 1:]
+        )
+        cls = self.interactive_points[0][2]
+        self.target_label = _AFFORDANCE_QUERY_NAMES.get(cls, cls)
+
 
 # Human-readable names for the primary interactive element of each UI category.
 _CATEGORY_TARGET_LABELS = {
@@ -49,6 +66,106 @@ _CATEGORY_TARGET_LABELS = {
     "media_playback": "Play button",
     "settings_panel": "Settings item",
 }
+
+# Affordance class -> the natural-language name used as the grounding query.
+# These are vocabulary, not decision rules: they name what a class is.
+_AFFORDANCE_QUERY_NAMES = {
+    "clickable": "button",
+    "typeable": "input field",
+    "scrollable": "scroll area",
+    "draggable": "slider",
+}
+
+
+def connected_components(grid: np.ndarray) -> List[Tuple[int, int, int, int, int]]:
+    """4-connected component labelling without scipy.
+
+    `grid` is a small (H, W) int array of class indices. Returns bounding boxes
+    as (class_idx, x0, y0, x1, y1) for every non-zero component, largest first.
+
+    Runs of equal class within a row are labelled, then overlapping runs in
+    adjacent rows are unioned. Row-level run encoding keeps this linear in the
+    number of runs rather than pixels, which matters when the grid is the full
+    resolution frame.
+    """
+    H, W = grid.shape
+    parent: List[int] = []
+    run_cls: List[int] = []
+    run_box: List[List[int]] = []
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if ra > rb:
+            ra, rb = rb, ra
+        parent[rb] = ra
+
+    prev_runs: List[Tuple[int, int, int]] = []  # (x0, x1, node)
+    for y in range(H):
+        row = grid[y]
+        # Run boundaries via diff rather than a per-pixel Python scan; the mask
+        # is full resolution when the generator derives its points.
+        bounds = np.flatnonzero(row[1:] != row[:-1]) + 1
+        starts = np.concatenate(([0], bounds))
+        ends = np.concatenate((bounds, [W]))
+        cur_runs: List[Tuple[int, int, int]] = []
+        for x0, x1 in zip(starts.tolist(), ends.tolist()):
+            cls = int(row[x0])
+            if cls == 0:
+                continue
+            node = len(parent)
+            parent.append(node)
+            run_cls.append(cls)
+            run_box.append([x0, y, x1 - 1, y])
+            cur_runs.append((x0, x1 - 1, node))
+        for a0, a1, an in prev_runs:
+            for b0, b1, bn in cur_runs:
+                if a0 <= b1 and b0 <= a1 and run_cls[an] == run_cls[bn]:
+                    union(an, bn)
+        prev_runs = cur_runs
+
+    merged: dict[int, List[int]] = {}
+    for node in range(len(parent)):
+        root = find(node)
+        box = merged.get(root)
+        if box is None:
+            merged[root] = run_box[node][:]
+        else:
+            box[0] = min(box[0], run_box[node][0])
+            box[1] = min(box[1], run_box[node][1])
+            box[2] = max(box[2], run_box[node][2])
+            box[3] = max(box[3], run_box[node][3])
+
+    boxes = [(run_cls[r], b[0], b[1], b[2], b[3]) for r, b in merged.items()]
+    boxes.sort(key=lambda t: (t[2] - t[0] + 1) * (t[3] - t[1] + 1), reverse=True)
+    return boxes
+
+
+def points_from_mask(
+    mask: np.ndarray,
+) -> List[Tuple[float, float, str]]:
+    """Derives interactive points from the rendered affordance mask.
+
+    The mask is the ground truth the generator already paints; the interactive
+    points are its connected components. Deriving them here means a scene can
+    never advertise an element the mask does not contain (and vice versa), which
+    is what happened when the point list was maintained by hand.
+    """
+    H, W = mask.shape
+    points: List[Tuple[float, float, str]] = []
+    for cls_idx, x0, y0, x1, y1 in connected_components(mask):
+        name = AFFORDANCE_CLASSES[cls_idx] if cls_idx < len(AFFORDANCE_CLASSES) else "static"
+        if name not in _AFFORDANCE_QUERY_NAMES:
+            continue
+        points.append((((x0 + x1) / 2.0) / W, ((y0 + y1) / 2.0) / H, name))
+    return points
 
 # Background color painted behind the cursor in each rendered scene, restored
 # when the cursor moves so the successor frame stays otherwise identical.
@@ -75,7 +192,6 @@ class ProceduralScreenGenerator:
         # Base canvas
         canvas = np.full((self.height, self.width, 3), 32, dtype=np.uint8)
         mask = np.zeros((self.height, self.width), dtype=np.int64) # 0: static
-        points: List[Tuple[float, float, str]] = []
         cursor_xy = (self.width // 2, self.height // 2)
 
         # 1. Render Window Header (Titlebar)
@@ -87,7 +203,6 @@ class ProceduralScreenGenerator:
             by = 14
             canvas[by - 5:by + 5, bx - 5:bx + 5] = col
             mask[by - 5:by + 5, bx - 5:bx + 5] = 1 # clickable
-            points.append((bx / self.width, by / self.height, "clickable"))
 
         # 2. Render Category-Specific Elements
         if category == "editor_code":
@@ -125,20 +240,17 @@ class ProceduralScreenGenerator:
             by = my + mh - btn_h - 16
             canvas[by:by + btn_h, bx:bx + btn_w] = (0, 122, 255)
             mask[by:by + btn_h, bx:bx + btn_w] = 1 # clickable
-            points.append(((bx + btn_w / 2) / self.width, (by + btn_h / 2) / self.height, "clickable"))
 
         elif category in ("browser_webpage", "form_input"):
             # Web address bar or search box (typeable)
             ax, ay, aw, ah = 80, 36, self.width - 160, 24
             canvas[ay:ay + ah, ax:ax + aw] = (255, 255, 255)
             mask[ay:ay + ah, ax:ax + aw] = 2 # typeable
-            points.append(((ax + aw / 2) / self.width, (ay + ah / 2) / self.height, "typeable"))
 
             # Submit / Search Button (clickable)
             bx, by, bw, bh = ax + aw - 60, ay + 2, 56, 20
             canvas[by:by + bh, bx:bx + bw] = (0, 122, 204)
             mask[by:by + bh, bx:bx + bw] = 1 # clickable
-            points.append(((bx + bw / 2) / self.width, (by + bh / 2) / self.height, "clickable"))
 
             # Scrollable main feed
             canvas[ay + ah + 15:, 50:self.width - 50] = (40, 42, 48)
@@ -150,9 +262,12 @@ class ProceduralScreenGenerator:
             for sy in range(h_bar + 16, self.height - 40, 32):
                 canvas[sy:sy + 18, 16:104] = (62, 62, 66)
                 mask[sy:sy + 18, 16:104] = 1 # clickable
-                points.append((60 / self.width, (sy + 9) / self.height, "clickable"))
 
-        return SyntheticScreenData(
+        # Interactive points are the connected components of the mask the scene
+        # just painted, not a separately maintained list.
+        points = points_from_mask(mask)
+
+        data = SyntheticScreenData(
             frame=canvas,
             affordance_mask=mask,
             category=category,
@@ -161,6 +276,8 @@ class ProceduralScreenGenerator:
             target_label=_CATEGORY_TARGET_LABELS.get(category, "element"),
             cursor_xy=cursor_xy,
         )
+        data.choose_primary()
+        return data
 
     def generate_successor(self, data: SyntheticScreenData) -> SyntheticScreenData:
         """Returns a temporally plausible next frame of the same scene.

@@ -8,44 +8,15 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+from forge.vision.cortex.core.dorsal import AFFORDANCE_TO_ACTION
 from forge.vision.cortex.core.learned import ACTION_NAMES, SCENE_ATTRIBUTES
-from forge.vision.cortex.data.synthetic import ProceduralScreenGenerator, SyntheticScreenData
+from forge.vision.cortex.data.synthetic import (
+    ProceduralScreenGenerator,
+    SyntheticScreenData,
+    connected_components,
+)
 
 MAX_OBJECT_SLOTS = 16
-
-
-def _connected_components(grid: np.ndarray) -> List[Tuple[int, int, int, int, int]]:
-    """4-connected component labelling without scipy.
-
-    `grid` is a small (H, W) int array of class indices. Returns bounding boxes
-    as (class_idx, x0, y0, x1, y1) for every non-zero component, largest first.
-    """
-    H, W = grid.shape
-    seen = np.zeros((H, W), dtype=bool)
-    boxes: List[Tuple[int, int, int, int, int]] = []
-    for y0 in range(H):
-        for x0 in range(W):
-            if grid[y0, x0] == 0 or seen[y0, x0]:
-                continue
-            cls = int(grid[y0, x0])
-            stack = [(y0, x0)]
-            seen[y0, x0] = True
-            min_y = max_y = y0
-            min_x = max_x = x0
-            size = 0
-            while stack:
-                cy, cx = stack.pop()
-                size += 1
-                min_y, max_y = min(min_y, cy), max(max_y, cy)
-                min_x, max_x = min(min_x, cx), max(max_x, cx)
-                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
-                    if 0 <= ny < H and 0 <= nx < W and not seen[ny, nx] and grid[ny, nx] == cls:
-                        seen[ny, nx] = True
-                        stack.append((ny, nx))
-            if size >= 2:
-                boxes.append((cls, min_x, min_y, max_x, max_y))
-    boxes.sort(key=lambda b: (b[3] - b[1] + 1) * (b[4] - b[2] + 1), reverse=True)
-    return boxes
 
 
 def _scene_attributes(data: SyntheticScreenData) -> np.ndarray:
@@ -98,7 +69,7 @@ class ScreenDataset(Dataset):
         mask_t = torch.from_numpy(data.affordance_mask).unsqueeze(0).unsqueeze(0).float()
         grid = F.interpolate(mask_t, size=self.affordance_grid_size, mode="nearest").squeeze().long().numpy()
 
-        boxes = _connected_components(grid)
+        boxes = connected_components(grid)
         H, W = self.affordance_grid_size
         out_boxes = torch.zeros(MAX_OBJECT_SLOTS, 4, dtype=torch.float32)
         out_classes = torch.zeros(MAX_OBJECT_SLOTS, dtype=torch.long)
@@ -121,26 +92,21 @@ class ScreenDataset(Dataset):
         }
 
     def _action_target(self, data: SyntheticScreenData) -> dict[str, torch.Tensor]:
-        """Learned action target: which action, and where to apply it."""
-        mask = data.affordance_mask
-        has_typeable = bool((mask == 2).any())
-        has_clickable = bool((mask == 1).any())
-        has_scrollable = bool((mask == 3).any())
+        """Learned action target: which action, and where to apply it.
 
-        if has_clickable:
-            action = ACTION_NAMES.index("click")
-        elif has_typeable:
-            action = ACTION_NAMES.index("type")
-        elif has_scrollable:
-            action = ACTION_NAMES.index("scroll")
-        else:
-            action = ACTION_NAMES.index("noop")
+        The action is read off the primary interactive element rather than from
+        a fixed precedence list. An earlier version hardcoded
+        click > type > scroll, which the head learned perfectly and thereby
+        reported `click` on every frame; the collapse was in the label rule,
+        not the model.
+        """
+        action = ACTION_NAMES.index("noop")
+        coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
 
         if data.interactive_points:
-            pt = data.interactive_points[0]
-            coord = torch.tensor([pt[0], pt[1]], dtype=torch.float32)
-        else:
-            coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
+            px, py, cls = data.interactive_points[0]
+            coord = torch.tensor([px, py], dtype=torch.float32)
+            action = ACTION_NAMES.index(AFFORDANCE_TO_ACTION.get(cls, "noop"))
 
         return {
             "action_idx": torch.tensor(action, dtype=torch.long),
