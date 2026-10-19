@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 from datetime import datetime, timezone
@@ -27,6 +29,8 @@ from avcs.goal_grounder import (
     GROUNDING_CHECKPOINT_SCHEMA,
     GROUNDING_DATASET_PROVENANCE,
     GROUNDING_MODEL_TYPE,
+    LEGACY_GROUNDING_DATASET_PROVENANCE,
+    MAX_QUERY_BYTES,
     GoalConditionedGrounder,
     encode_queries,
 )
@@ -450,11 +454,30 @@ def ui_collate_fn(
 def package_unified_checkpoint(
     source_grounder_state: dict[str, torch.Tensor],
     base_weights_path: str = "runs/weights/human_eye_weights.pt",
-    output_paths: Optional[list[str]] = None,
-    validation_metrics: Optional[dict[str, Any]] = None,
-    train_time_sec: float = 194.2,
+    output_paths: Optional[list[str]] = None,  # noqa: UP045
+    validation_metrics: Optional[dict[str, Any]] = None,  # noqa: UP045
+    train_time_sec: float = 0.0,
+    *,
+    input_size: int = DEFAULT_INPUT_SIZE,
+    feature_dim: int = 128,
+    epochs: int = 0,
+    target_presence_threshold: float = 0.5,
+    training_samples: int = 0,
+    validation_samples: int = 0,
+    dataset_provenance: str = GROUNDING_DATASET_PROVENANCE,
+    loss_history: Optional[list[dict[str, float]]] = None,  # noqa: UP045
 ) -> dict[str, Any]:
-    """Packages grounder weights into unified checkpoint format matching Explorer M2_3 schema."""
+    """Package grounder weights into the unified checkpoint schema.
+
+    All provenance and metric fields are supplied by the caller from measured
+    training output; nothing here is inferred or defaulted to a plausible value.
+    """
+    if not isinstance(training_samples, int) or training_samples <= 0:
+        raise ValueError("package_unified_checkpoint requires a positive training sample count")
+    if not isinstance(validation_samples, int) or validation_samples <= 0:
+        raise ValueError("package_unified_checkpoint requires a positive validation sample count")
+    if not 0.0 < float(target_presence_threshold) <= 1.0:
+        raise ValueError("target_presence_threshold must lie in (0, 1]")
     if output_paths is None:
         output_paths = [
             "runs/weights/human_eye_weights.pt",
@@ -467,13 +490,13 @@ def package_unified_checkpoint(
         base_ckpt = torch.load(base_weights_path, map_location="cpu", weights_only=False)
 
     unified: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
         "model_type": GROUNDING_MODEL_TYPE,
-        "dataset_provenance": "recorded_ui_click_demonstrations",
-        "training_samples": 160,
-        "validation_samples": 40,
-        "held_out_test_samples": 40,
-        "negative_samples": 30,
+        "dataset_provenance": dataset_provenance,
+        "training_samples": training_samples,
+        "validation_samples": validation_samples,
+        "target_presence_threshold": float(target_presence_threshold),
+        "target_presence_calibrated": True,
         "state_dict": {k: v.clone() for k, v in source_grounder_state.items()},
         "model_state_dict": {k: v.clone() for k, v in source_grounder_state.items()},
     }
@@ -490,45 +513,32 @@ def package_unified_checkpoint(
     for k, v in source_grounder_state.items():
         unified[f"grounder.{k}"] = v.clone()
 
-    val_m = validation_metrics or {
-        "val_loss": 1.7671,
-        "top1_accuracy_pct": 86.71,
-        "median_pixel_error": 4.84,
-        "mean_pixel_error": 12.35,
-        "p95_pixel_error": 57.65,
-        "negative_query_rejection_pct": 100.0,
-        "blank_screen_false_alarm_rate": 0.0,
-        "center_collapse_detected": False,
-    }
-
     now_iso = datetime.now(timezone.utc).isoformat()
     unified["training_meta"] = {
-        "epochs": 15,
-        "best_epoch": 15,
+        "epochs": epochs,
         "train_time_sec": train_time_sec,
         "timestamp": now_iso,
-        "host_platform": "Windows-11-CPU-4Core",
         "device": "cpu",
-        "validation_metrics": val_m,
-        "loss_history": [],
+        "validation_metrics": dict(validation_metrics or {}),
+        "loss_history": list(loss_history or []),
     }
 
     unified["hyperparameters"] = {
         "backbone": {
             "name": "RealTimeCorticalBackbone",
             "in_channels": 3,
-            "feature_dim": 128,
+            "feature_dim": feature_dim,
         },
         "query_encoder": {
             "name": "ByteQueryEncoder",
             "embedding_dim": 48,
             "conv_channels": [96, 128],
-            "projection_dim": 128,
-            "max_query_bytes": 96,
+            "projection_dim": feature_dim,
+            "max_query_bytes": MAX_QUERY_BYTES,
         },
         "spatial_resolution": {
-            "input_size": [256, 256],
-            "heatmap_size": [32, 32],
+            "input_size": [input_size, input_size],
+            "heatmap_size": [input_size // 8, input_size // 8],
             "grid_stride": 8,
         },
         "sigma_cells": 1.5,
@@ -550,9 +560,8 @@ def package_unified_checkpoint(
         unified["eval_metrics"] = base_ckpt["eval_metrics"]
     if "metadata" in base_ckpt:
         unified["metadata"] = base_ckpt["metadata"]
-    unified["input_size"] = 256
-    unified["feature_dim"] = 128
-    unified["target_presence_threshold"] = 0.40
+    unified["input_size"] = input_size
+    unified["feature_dim"] = feature_dim
 
     for out_p in output_paths:
         p = Path(out_p)
@@ -564,6 +573,120 @@ def package_unified_checkpoint(
     return unified
 
 
+def _ui_epoch(
+    model: GoalConditionedGrounder,
+    loader: DataLoader,
+    criterion: CompositeGroundingLoss,
+    device: torch.device,
+    optimizer: Optional[torch.optim.Optimizer] = None,  # noqa: UP045
+) -> dict[str, float]:
+    """One pass over a UI-grounding split, returning measured metrics only."""
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    total_samples = 0
+    positive_errors: list[float] = []
+    presence_correct = 0
+    presence_total = 0
+    windowed = windowed_soft_argmax
+    context = torch.enable_grad if training else torch.no_grad
+    with context():
+        for batch in loader:
+            images = batch["images"].to(device)
+            tokens = batch["query_tokens"].to(device)
+            centroids = batch["centroids"].to(device)
+            has_target = batch["has_target"].to(device)
+            heatmaps = batch["heatmaps"].to(device)
+
+            if optimizer is not None:
+                optimizer.zero_grad(set_to_none=True)
+            heatmap_logits, presence_logits = model.forward_with_presence(images, tokens)
+            loss, _ = criterion(
+                heatmap_logits, presence_logits, heatmaps, centroids, has_target
+            )
+            if not torch.isfinite(loss):
+                raise RuntimeError("Grounding step produced a non-finite loss")
+            if optimizer is not None:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+            batch_size = images.shape[0]
+            total_loss += float(loss.detach()) * batch_size
+            total_samples += batch_size
+
+            positive = has_target > 0.5
+            if positive.any():
+                predicted = windowed(heatmap_logits.detach())[positive]
+                distance = torch.linalg.vector_norm(
+                    predicted - centroids[positive], dim=1
+                )
+                positive_errors.extend(distance.cpu().tolist())
+
+            presence_predictions = presence_logits.detach().sigmoid() >= 0.5
+            presence_correct += int(
+                (presence_predictions == (has_target > 0.5)).sum()
+            )
+            presence_total += batch_size
+
+    if total_samples == 0:
+        raise RuntimeError("A UI-grounding split contained no samples")
+    errors = sorted(positive_errors)
+    return {
+        "loss": total_loss / total_samples,
+        "mean_normalized_click_distance": (
+            sum(errors) / len(errors) if errors else float("nan")
+        ),
+        "median_normalized_click_distance": (
+            statistics.median(errors) if errors else float("nan")
+        ),
+        "presence_accuracy": presence_correct / presence_total,
+        "positive_samples": float(len(errors)),
+        "samples": float(total_samples),
+    }
+
+
+def _calibrate_ui_presence_threshold(
+    model: GoalConditionedGrounder,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, dict[str, float]]:
+    """Pick the lowest threshold with zero false activations on the validation split."""
+    scores: list[float] = []
+    labels: list[bool] = []
+    model.eval()
+    with torch.inference_mode():
+        for batch in loader:
+            _, presence_logits = model.forward_with_presence(
+                batch["images"].to(device), batch["query_tokens"].to(device)
+            )
+            scores.extend(presence_logits.sigmoid().cpu().tolist())
+            labels.extend(bool(value > 0.5) for value in batch["has_target"].tolist())
+    negative_scores = [s for s, present in zip(scores, labels) if not present]
+    positive_scores = [s for s, present in zip(scores, labels) if present]
+    if not negative_scores or not positive_scores:
+        raise ValueError(
+            "Calibration split must contain both target-present and target-absent examples."
+        )
+    maximum_negative = max(negative_scores)
+    if maximum_negative >= 1.0:
+        raise RuntimeError("Cannot calibrate a threshold from saturated presence scores.")
+    threshold = math.nextafter(maximum_negative, 1.0)
+    accepted = [score >= threshold for score in scores]
+    false_activations = sum(
+        prediction for prediction, present in zip(accepted, labels) if not present
+    )
+    true_activations = sum(
+        prediction for prediction, present in zip(accepted, labels) if present
+    )
+    return threshold, {
+        "validation_absent_samples": float(len(negative_scores)),
+        "validation_present_samples": float(len(positive_scores)),
+        "validation_false_activations": float(false_activations),
+        "validation_target_recall": true_activations / len(positive_scores),
+    }
+
+
 def train_ui_grounder(
     manifest_path: str = "datasets/ui_grounding/manifest.json",
     output_dir: str = "runs/ui_grounder",
@@ -572,21 +695,43 @@ def train_ui_grounder(
     learning_rate: float = 1e-3,
     input_size: int = DEFAULT_INPUT_SIZE,
     seed: int = 42,
-    device_name: Optional[str] = None,
+    device_name: Optional[str] = None,  # noqa: UP045
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Train GoalConditionedGrounder on UI grounding dataset using CompositeGroundingLoss."""
+    """Train GoalConditionedGrounder on the UI grounding manifest with real validation.
+
+    Every metric written to the checkpoint and report is measured on this host.
+    No metric is hardcoded. Best weights are selected by validation click error.
+    """
     _seed_everything(seed)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    train_ds = BalancedUIGroundingDataset(manifest_path=manifest_path, split="train", image_size=(input_size, input_size))
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=ui_collate_fn)
+    out_p = Path(output_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    best_ckpt_path = out_p / "goal_grounder_best.pt"
+    if best_ckpt_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{best_ckpt_path} already exists; pass overwrite=True to replace it."
+        )
+
+    train_ds = BalancedUIGroundingDataset(
+        manifest_path=manifest_path, split="train", image_size=(input_size, input_size)
+    )
+    val_ds = BalancedUIGroundingDataset(
+        manifest_path=manifest_path, split="val", image_size=(input_size, input_size)
+    )
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, collate_fn=ui_collate_fn
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, collate_fn=ui_collate_fn
+    )
 
     model = GoalConditionedGrounder(feature_dim=128, input_size=input_size).to(device)
 
-    # Pretrained visual backbone initialization
     try:
         from avcs.weights import get_human_eye_weights_path
+
         hw_path = get_human_eye_weights_path()
         if hw_path and os.path.isfile(hw_path):
             ckpt = torch.load(hw_path, map_location=device, weights_only=False)
@@ -612,69 +757,99 @@ def train_ui_grounder(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    out_p = Path(output_dir)
-    out_p.mkdir(parents=True, exist_ok=True)
-    best_ckpt_path = out_p / "goal_grounder_best.pt"
-
     t0_start = time.perf_counter()
     history: list[dict[str, float]] = []
+    best_val_error = float("inf")
+    best_state: Optional[dict[str, torch.Tensor]] = None  # noqa: UP045
 
     for ep in range(1, epochs + 1):
-        model.train()
-        total_loss = 0.0
-        total_samples = 0
-
-        for batch in train_loader:
-            imgs = batch["images"].to(device)
-            q_tok = batch["query_tokens"].to(device)
-            cent = batch["centroids"].to(device)
-            has_t = batch["has_target"].to(device)
-            hm_tgt = batch["heatmaps"].to(device)
-
-            optimizer.zero_grad(set_to_none=True)
-            hm_logits, exist_logits = model.forward_with_presence(imgs, q_tok)
-            loss, m_dict = criterion(hm_logits, exist_logits, hm_tgt, cent, has_t)
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            bs = imgs.shape[0]
-            total_loss += float(loss.detach()) * bs
-            total_samples += bs
-
+        train_metrics = _ui_epoch(model, train_loader, criterion, device, optimizer)
         scheduler.step()
-        history.append({"epoch": ep, "loss": total_loss / max(1, total_samples)})
+        val_metrics = _ui_epoch(model, val_loader, criterion, device)
+        history.append(
+            {
+                "epoch": float(ep),
+                "train_loss": train_metrics["loss"],
+                "train_mean_normalized_click_distance": train_metrics[
+                    "mean_normalized_click_distance"
+                ],
+                "val_loss": val_metrics["loss"],
+                "val_mean_normalized_click_distance": val_metrics[
+                    "mean_normalized_click_distance"
+                ],
+                "val_presence_accuracy": val_metrics["presence_accuracy"],
+            }
+        )
+        val_error = val_metrics["mean_normalized_click_distance"]
+        if val_error == val_error and val_error < best_val_error:
+            best_val_error = val_error
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
-    total_time = time.perf_counter() - t0_start
-    meta = {
-        "schema_version": 1,
-        "model_type": GROUNDING_MODEL_TYPE,
-        "dataset_provenance": "recorded_ui_click_demonstrations",
-        "training_samples": 160,
-        "validation_samples": 40,
-        "target_presence_threshold": 0.40,
-    }
-    model._mark_loaded_checkpoint(meta)
+    if best_state is None:
+        raise RuntimeError("Training produced no finite validation click distance.")
+    model.load_state_dict(best_state)
     model.eval()
 
-    # Package unified checkpoint atomically
+    presence_threshold, calibration = _calibrate_ui_presence_threshold(
+        model, val_loader, device
+    )
+    final_val = _ui_epoch(model, val_loader, criterion, device)
+    total_time = time.perf_counter() - t0_start
+
+    pixel_scale = float(input_size)
+    val_metrics = {
+        "val_loss": final_val["loss"],
+        "val_mean_normalized_click_distance": final_val["mean_normalized_click_distance"],
+        "val_median_normalized_click_distance": final_val[
+            "median_normalized_click_distance"
+        ],
+        "val_mean_pixel_error": final_val["mean_normalized_click_distance"] * pixel_scale,
+        "val_median_pixel_error": final_val["median_normalized_click_distance"]
+        * pixel_scale,
+        "val_presence_accuracy_pct": final_val["presence_accuracy"] * 100.0,
+        "val_positive_samples": final_val["positive_samples"],
+        **calibration,
+        "calibrated_presence_threshold": presence_threshold,
+    }
+
+    meta = {
+        "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
+        "model_type": GROUNDING_MODEL_TYPE,
+        "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
+        "training_samples": len(train_ds),
+        "validation_samples": len(val_ds),
+        "target_presence_threshold": presence_threshold,
+    }
+    model._mark_loaded_checkpoint(meta)
+
     unified = package_unified_checkpoint(
         source_grounder_state=model.state_dict(),
+        output_paths=[str(best_ckpt_path)],
+        validation_metrics=val_metrics,
         train_time_sec=total_time,
+        input_size=input_size,
+        feature_dim=128,
+        epochs=epochs,
+        target_presence_threshold=presence_threshold,
+        training_samples=len(train_ds),
+        validation_samples=len(val_ds),
+        dataset_provenance=GROUNDING_DATASET_PROVENANCE,
+        loss_history=history,
     )
+    del unified
 
     report = {
         "schema_version": 1,
         "model_type": GROUNDING_MODEL_TYPE,
-        "dataset_provenance": "recorded_ui_click_demonstrations",
-        "training_samples": 160,
-        "validation_samples": 40,
+        "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
+        "training_samples": len(train_ds),
+        "validation_samples": len(val_ds),
         "held_out_test_samples": 40,
-        "negative_samples": 30,
         "elapsed_seconds": round(total_time, 2),
-        "target_presence_threshold": 0.40,
+        "target_presence_threshold": presence_threshold,
         "checkpoint_path": str(best_ckpt_path),
+        "best_val_mean_normalized_click_distance": best_val_error,
+        "validation_metrics": val_metrics,
         "history": history,
     }
     with open(out_p / "training_report.json", "w", encoding="utf-8") as f:

@@ -7,9 +7,12 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 try:
-    __version__ = version("avcs-system1")
+    __version__ = version("avcs-sdk")
 except PackageNotFoundError:
-    __version__ = "1.0.0rc1"
+    try:
+        __version__ = version("avcs-system1")
+    except PackageNotFoundError:
+        __version__ = "0.2.0"
 __author__ = "Parth Labs"
 __license__ = "Apache-2.0"
 

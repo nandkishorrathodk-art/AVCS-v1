@@ -143,22 +143,17 @@ class ScreenEye:
 
     def look_at(self, query: str, frame: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """Returns an experimental, unvalidated normalized gaze estimate."""
-        from avcs.goal_grounder import ByteQueryEncoder, encode_queries
-        if not hasattr(self, "_query_encoder") or self._query_encoder is None:
-            self._query_encoder = ByteQueryEncoder(output_dim=self.cortex.cfg.latent_dim).to(self.device)
-            self._query_encoder.eval()
+        from forge.vision.cortex.data.text import ngram_query_embedding
 
         clean_q = query.strip() if isinstance(query, str) else ""
         if not clean_q:
             clean_q = " "
-        encoded_bytes = clean_q.encode("utf-8")
-        if len(encoded_bytes) > 96:
-            clean_q = encoded_bytes[:96].decode("utf-8", errors="ignore") or " "
 
-        tokens = encode_queries([clean_q]).to(self.device)
-        with torch.inference_mode():
-            text_emb = self._query_encoder(tokens)
-            text_emb = torch.nn.functional.normalize(text_emb, dim=-1)
+        # Must match the encoder used to train the grounding head. A randomly
+        # initialized learned encoder would put inference in a different
+        # embedding space than training and produce ungrounded gaze.
+        text_emb = ngram_query_embedding(clean_q, self.cortex.cfg.latent_dim)
+        text_emb = text_emb.unsqueeze(0).to(self.device)
 
         with self.engine._lock:
             if frame is None:

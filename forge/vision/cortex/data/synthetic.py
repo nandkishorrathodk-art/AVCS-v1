@@ -9,6 +9,7 @@ Generates realistic desktop screens and produces corresponding:
 from __future__ import annotations
 
 import random
+import zlib
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -25,6 +26,33 @@ class SyntheticScreenData:
     category: str                 # e.g. "editor_code", "modal_dialog"
     category_idx: int             # index into UI_CATEGORIES
     interactive_points: List[Tuple[float, float, str]] # (norm_x, norm_y, class_name)
+    target_label: str = "element" # natural-language name of the first interactive point
+    cursor_xy: Tuple[int, int] = (0, 0) # top-left pixel of the rendered cursor
+
+    def interactive_label(self) -> str:
+        """Natural-language query for the primary interactive point."""
+        if self.target_label:
+            return self.target_label
+        if self.interactive_points:
+            return self.interactive_points[0][2]
+        return "element"
+
+
+# Human-readable names for the primary interactive element of each UI category.
+_CATEGORY_TARGET_LABELS = {
+    "desktop_canvas": "Desktop icon",
+    "editor_code": "Code editor",
+    "browser_webpage": "Search bar",
+    "terminal_shell": "Terminal prompt",
+    "modal_dialog": "Confirm button",
+    "form_input": "Input field",
+    "media_playback": "Play button",
+    "settings_panel": "Settings item",
+}
+
+# Background color painted behind the cursor in each rendered scene, restored
+# when the cursor moves so the successor frame stays otherwise identical.
+_CURSOR_BACKDROP = np.array([32, 32, 32], dtype=np.uint8)
 
 
 class ProceduralScreenGenerator:
@@ -48,6 +76,7 @@ class ProceduralScreenGenerator:
         canvas = np.full((self.height, self.width, 3), 32, dtype=np.uint8)
         mask = np.zeros((self.height, self.width), dtype=np.int64) # 0: static
         points: List[Tuple[float, float, str]] = []
+        cursor_xy = (self.width // 2, self.height // 2)
 
         # 1. Render Window Header (Titlebar)
         h_bar = 28
@@ -79,6 +108,7 @@ class ProceduralScreenGenerator:
             # Cursor
             cx, cy = 130, h_bar + 15
             canvas[cy:cy + 10, cx:cx + 6] = (255, 255, 255)
+            cursor_xy = (cx, cy)
 
         elif category == "modal_dialog":
             # Dimmed background
@@ -128,5 +158,41 @@ class ProceduralScreenGenerator:
             category=category,
             category_idx=cat_idx,
             interactive_points=points,
+            target_label=_CATEGORY_TARGET_LABELS.get(category, "element"),
+            cursor_xy=cursor_xy,
+        )
+
+    def generate_successor(self, data: SyntheticScreenData) -> SyntheticScreenData:
+        """Returns a temporally plausible next frame of the same scene.
+
+        Simulates what actually changes between adjacent desktop frames: the
+        cursor moves a few pixels. Structure, category and affordances are
+        preserved, so the world model can learn a non-trivial transition
+        (predict the cursor motion) instead of a constant identity map.
+        """
+        frame = data.frame.copy()
+        h, w = frame.shape[:2]
+
+        rng = np.random.RandomState(zlib.crc32(data.category.encode("utf-8")) % (2**31))
+        dx = int(rng.randint(-12, 13))
+        dy = int(rng.randint(-12, 13))
+
+        # Erase only the cursor we drew, using its recorded position. Matching on
+        # white pixels would also erase white UI chrome such as address bars.
+        ox, oy = data.cursor_xy
+        frame[oy : oy + 10, ox : ox + 6] = _CURSOR_BACKDROP
+
+        cy = int(np.clip(oy + dy, 8, h - 12))
+        cx = int(np.clip(ox + dx, 8, w - 12))
+        frame[cy : cy + 10, cx : cx + 6] = (255, 255, 255)
+
+        return SyntheticScreenData(
+            frame=frame,
+            affordance_mask=data.affordance_mask,
+            category=data.category,
+            category_idx=data.category_idx,
+            interactive_points=data.interactive_points,
+            target_label=data.target_label,
+            cursor_xy=(cx, cy),
         )
 

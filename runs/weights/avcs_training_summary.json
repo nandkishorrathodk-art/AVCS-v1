@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-10-19T05:11:53.937539+00:00",
+  "architecture": "RealTimeCorticalBackbone + FastAffordanceHead + VentralSemanticStream + FovealAcuityHead",
+  "dataset": {
+    "manifest_path": "data/manifest.json",
+    "screens_ingested_from_disk": 160,
+    "fovea_crops_ingested_from_disk": 140,
+    "split": "train"
+  },
+  "training": {
+    "steps": 260,
+    "batch_size": 16,
+    "lr": 0.0015,
+    "loss_function": "AVCSCorticalAffordanceLoss (Focal Loss gamma=1.0 + margin=0.5 + Smooth L1)",
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingLR",
+    "train_time_s": 17.41,
+    "device": "cpu"
+  },
+  "acceptance_criteria": {
+    "R1_affordance": {
+      "target_precision": ">= 0.80",
+      "achieved_precision": 0.9448,
+      "achieved_recall": 0.6372,
+      "achieved_f1": 0.7611,
+      "negative_wallpaper_false_positives": 0,
+      "target_wallpaper_fp": 0,
+      "status": "PASSED"
+    },
+    "R2_foveal_and_focus": {
+      "target_fovea_classification_acc": ">= 0.70",
+      "achieved_fovea_classification_acc": 1.0,
+      "target_fovea_mean_iou": ">= 0.60",
+      "achieved_fovea_mean_iou": 0.7512,
+      "target_localization_median_px": "<= 2.0",
+      "achieved_localization_median_px": 0.62,
+      "status": "PASSED"
+    },
+    "R3_cpu_performance": {
+      "target_forward_latency_ms": "<= 20.0",
+      "achieved_p50_forward_ms": 1.33,
+      "achieved_p95_forward_ms": 1.46,
+      "single_thread": true,
+      "status": "PASSED"
+    },
+    "R4_weights_and_release": {
+      "checkpoint_path": "runs/weights/human_eye_weights.pt",
+      "weights_auto_discovery": true,
+      "status": "PASSED"
+    }
+  },
+  "evaluation_metrics": {
+    "precision": 0.9448275862068966,
+    "recall": 0.6372093023255814,
+    "f1": 0.7611111111111112,
+    "tp": 137,
+    "fp": 8,
+    "fn": 78,
+    "wallpaper_fps": 0,
+    "wallpaper_fp_rate": 0.0,
+    "fovea_classification_acc": 1.0,
+    "fovea_mean_iou": 0.7511871550107059,
+    "fovea_median_l2_px": 0.617796580021429,
+    "latency_ms": 1.3263449945952743,
+    "p95_latency_ms": 1.4643545007857028,
+    "fps": 753.9516521530235
+  }
+}

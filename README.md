@@ -22,7 +22,7 @@ Strip away all marketing, hype, and academic sugar-coating. Here is the exact te
 * **Parameter Count:** **501,612 parameters (~0.5 Million / ~2.1 MB weight file)**.
   *(For comparison: Claude 3.5 Sonnet or GPT-4 are 100+ Billion parameters; small local LLMs like Llama-3 8B are 8,000,000,000 parameters. This model is 0.006% the size of an 8B LLM).*
 * **Execution Hardware:** Runs on a standard **4-core AMD64 CPU, 15 GB RAM, ZERO GPU**.
-* **Latency & Speed:** **9.3 – 10.2 ms CPU forward pass**, sustaining **95.4 – 103.9 FPS** continuous live capture and inference.
+* **Latency & Speed:** **9.7 ms CPU forward pass (p50)**, sustaining **95.4 FPS** continuous inference at the qualified 64×64 soak resolution. Throughput scales with input area: ~106 FPS at 256×256, ~2.2 FPS at a true 1920×1200 frame. The production path letterboxes the captured desktop to 128×128 first (`StreamingObserver._prepare`), which measures **~4.5 ms / ~223 FPS end-to-end** on this hardware. See [docs/REALITY_AUDIT.md](docs/REALITY_AUDIT.md) §4.
 * **Internal Neural Components:**
   1. **Multi-Scale Spatial Encoder:** 2D Convolutions (`scale_half`, `scale_quarter`, `scale_eighth`) downsampling raw desktop pixels into a 16×16 feature grid with 48 channels.
   2. **Recurrent Spatiotemporal Memory (`ConvGRUCell`):** Gated recurrent neural memory retaining visual context across consecutive frames to track motion and state changes.
@@ -40,7 +40,7 @@ This model was engineered to solve 6 specific, fatal bottlenecks that plague exi
 
 ### Problem 1: The 3–5 Second Screenshot Lag
 * **The Industry Flaw:** Tools like Anthropic Computer Use and OpenAI Operator grab a full screenshot every 3 to 5 seconds. In that multi-second gap, the AI is completely blind: it cannot see cursor movements, hover tooltips, smooth scroll animations, typing progress, or sudden confirmation pop-ups.
-* **How AVCS Solves It:** AVCS captures and processes desktop screen pixels continuously at **95.4 – 103.9 FPS (~10ms per tick)** on a standard 4-core CPU. Its 1-slot latest-value mailbox buffer drops stale backlog frames so the model always perceives the exact present instant with zero latency lag.
+* **How AVCS Solves It:** AVCS captures and processes desktop screen pixels continuously at **95.4 FPS (64×64 soak resolution, ~10 ms per tick)** on a standard 4-core CPU, and ~223 FPS end-to-end when the desktop is letterboxed to 128×128. Its 1-slot latest-value mailbox buffer drops stale backlog frames so the model always perceives the exact present instant with zero latency lag. (Full-resolution throughput is much lower — see [docs/REALITY_AUDIT.md](docs/REALITY_AUDIT.md) §4.)
 
 ### Problem 2: The "Cheating" Trap (UIAutomation / DOM Scraping)
 * **The Industry Flaw:** Most automation bots cheat by reading OS accessibility trees (Windows UIAutomation, MSAA) or web page DOMs (Selenium, Playwright). When an application uses custom GPU rendering, HTML5 Canvas, Electron without accessibility tags, video players, or games, these tools break completely.

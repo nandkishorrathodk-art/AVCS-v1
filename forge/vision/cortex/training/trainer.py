@@ -129,7 +129,7 @@ class AVCSCloudTrainer:
         }
         return metrics
 
-    def train(self, epochs: Optional[int] = None, save_path: str = "runs/cortex_model.pt") -> None:
+    def train(self, epochs: Optional[int] = None, save_path: str = "runs/weights/avcs_cortex_weights.pt") -> None:
         num_epochs = epochs or self.train_cfg.epochs
         print(f"Starting AVCS Training on {self.device} for {num_epochs} epochs...")
 

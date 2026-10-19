@@ -27,6 +27,7 @@ from torch.utils.data import Dataset
 from forge.vision.cortex.core.dorsal import AFFORDANCE_CLASSES
 from forge.vision.cortex.core.ventral import UI_CATEGORIES
 from forge.vision.cortex.data.synthetic import ProceduralScreenGenerator
+from forge.vision.cortex.data.text import ngram_query_embedding
 
 
 @dataclass
@@ -186,9 +187,14 @@ class RealUIDataset(Dataset):
         mask_t = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0).float()
         mask_down = F.interpolate(mask_t, size=self.affordance_grid_size, mode="nearest").squeeze().long()
 
-        # Simulated or lightweight text query embedding for top-down cross-attention
-        # In full multimodal training, this can be encoded using a frozen CLIP or MiniLM text tower
-        query_embed = torch.randn(self.latent_dim, dtype=torch.float32)
+        # Deterministic query embedding from the real instruction text (or the
+        # synthetic target label). Previously this was `torch.randn`, which left
+        # the grounding head conditioned on noise.
+        if len(self.samples) > 0:
+            query_text = sample.instruction
+        else:
+            query_text = data.interactive_label()
+        query_embed = ngram_query_embedding(query_text, self.latent_dim)
 
         return {
             "frame_t": frame_t,

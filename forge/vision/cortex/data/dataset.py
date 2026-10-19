@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from forge.vision.cortex.data.synthetic import ProceduralScreenGenerator, SyntheticScreenData
+from forge.vision.cortex.data.text import ngram_query_embedding
 
 
 class ScreenDataset(Dataset):
@@ -34,8 +35,10 @@ class ScreenDataset(Dataset):
         # Generate current frame
         data = self.generator.generate(seed=idx)
 
-        # Generate consecutive frame with temporal mutation (cursor movement or minor animation)
-        data_next = self.generator.generate(category=data.category, seed=idx + 100000)
+        # Temporal successor of the *same* scene (cursor nudge / modal emergence).
+        # Re-seeding the generator would produce an unrelated scene and the world
+        # model would only ever learn identity.
+        data_next = self.generator.generate_successor(data)
 
         # Convert frame to Float Tensor (3, H, W) normalized to [0, 1]
         frame_t = torch.from_numpy(data.frame).permute(2, 0, 1).float() / 255.0
@@ -52,8 +55,8 @@ class ScreenDataset(Dataset):
         else:
             target_coord = torch.tensor([0.5, 0.5], dtype=torch.float32)
 
-        # Simulated query text embedding
-        query_embed = torch.randn(self.latent_dim, dtype=torch.float32)
+        # Deterministic query embedding derived from the actual target label.
+        query_embed = ngram_query_embedding(data.interactive_label(), self.latent_dim)
 
         return {
             "frame_t": frame_t,

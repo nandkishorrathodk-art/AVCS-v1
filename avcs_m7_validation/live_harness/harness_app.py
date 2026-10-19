@@ -16,9 +16,17 @@ from pathlib import Path
 import random
 import sys
 import time
-import tkinter as tk
-from tkinter import messagebox
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError as exc:  # pragma: no cover - depends on host Tk install
+    raise ImportError(
+        "avcs_m7_validation.live_harness.harness_app requires Tkinter, which is "
+        "not available in this Python environment. Install the system Tk runtime "
+        "(`apt-get install -y python3-tk`) or reinstall Python with tcl/tk enabled."
+    ) from exc
 
 # Configure DPI Awareness and attach to interactive desktop
 if sys.platform == "win32":

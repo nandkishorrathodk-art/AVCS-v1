@@ -228,6 +228,85 @@ oversight. Traps, both learned the hard way:
   discriminates nothing. Use `word_report` (macro-F1 + informative accuracy) on
   held-out draws and on a withheld scene category.
 
+## AVCS System 1 (`avcs/`) — audit facts
+
+`avcs/` is a separate system in this repo from `forge/`. Read
+`docs/REALITY_AUDIT.md` before making any claim about it.
+
+- The packaged `runs/weights/candidates/avcs_streaming_cortex_v1.pt`
+  (501,612 params) is **untrained clean random initialization**, reproducible
+  from `create_clean_random_cortex(seed=20261018)` to float32 rounding
+  (max diff 1.7e-7). It qualifies plumbing, not perception. Do not attach
+  accuracy claims to it.
+- System 1 has **no text decoder**. The "description" is deterministic string
+  templating in `avcs/observation.py::_synthesize_description`, not generation.
+  Reading screen text and speaking are System 2's job.
+- Throughput must be quoted with its resolution. The 95.4 FPS headline is a
+  64x64 soak number. Raw forward: 564 FPS @64x64, 106 @256x256, 2.2 @1920x1200.
+  Production letterboxes to 128x128 first (~223 FPS end-to-end).
+- `runs/weights/human_eye_weights.pt` is produced by the real trainer
+  (`avcs/training/train_affordance.py`); when present `HumanEye` loads it
+  (`weights_loaded=True`). It is gitignored, so a fresh checkout lacks it and
+  the tests that need it fail correctly. Never fabricate a placeholder
+  checkpoint to make them pass. Its acceptance numbers are same-distribution
+  synthetic figures, not a generalisation claim.
+- `runs/weights/goal_grounder_best.pt` **is** trained (1.66M params, schema 2,
+  `is_trained=True`). On `datasets/ui_grounding` `test_held_out` it reproduces
+  94.94% top-1 / 3.72 px median via
+  `python3 -m benchmarks.run_ui_grounding_benchmark`. But that split shares a
+  generator with train. On `datasets/cleanroom_system1_v1` (a different
+  generator) the same checkpoint drops to 28.1% top-1 and its calibrated
+  presence threshold is at **chance** (34.4% of true targets rejected, 65.6% of
+  true absences accepted). Always quote the split *and* the generator.
+- Actuation is hardcoded off: `GoalConditionedGrounder.predict` returns
+  `action_authorized=False` on every call and `AVCSController.locate` raises
+  unless it is true. `test_locate_with_trained_grounder` asserts this, so it is
+  an intended fail-closed invariant. `action_authorized` is never set true
+  anywhere in the repo.
+- `AVCSSystem2Bridge` defaults to `MockReasoningProvider` (a rule engine), not
+  the real `LLMReasoningProvider`. No free-form language is produced by the
+  shipped pipeline; System 1 emits template sentences only.
+- `avcs_system1_v1.pt` is lightly trained (3 epochs, val loss 0.87, 13 s) and
+  `candidate_m3_word_recognizer_v1.pt` is a 132-way closed-vocabulary
+  classifier (69.21% acc), not OCR. Neither implies a perception capability.
+- Test-suite baseline is **dependency-dependent**: install
+  `pyproject.toml [dev]` (`pytest pytest-asyncio build wheel`) plus
+  `torch numpy psutil cryptography fastapi httpx requests Pillow`. With those
+  present, the full suite is **2 failed / 1194 passed / 16 skipped**. The two
+  failures are pre-existing and environment-dependent: the cleanroom-rights
+  test (the shipped attestation binds manifest hash `abde4338…` but the current
+  manifest hashes to `06c6050d…`, so the fail-closed gate reports a binding
+  mismatch first) and the R3 latency test (passes in isolation, fails under
+  full-suite CPU contention). Always quote the installed deps with the number.
+  The Tkinter GUI tests need a display; run them under `Xvfb` and install the
+  `tk8.6` system package (`libtk8.6.so`).
+- Tkinter GUI modules (`avcs/gui.py`, `avcs/runtime/live.py`, the m7 harness)
+  need the system `libtk8.6.so`. They now raise an actionable ImportError
+  instead of an opaque loader error.
+
+## AVCS `forge/vision/cortex/` System 1 — completed & measured
+
+A second System 1 implementation, trained to completion in this repo. Read
+`docs/REALITY_AUDIT.md` section 11.
+
+- `ArtificialVisualCortex` is **1,139,032 params**. Checkpoint:
+  `runs/weights/avcs_cortex_weights.pt` (loads with 0 missing / 0 unexpected).
+- Four pipeline defects were fixed to make it train at all: `frame_next` was a
+  pixel-identical copy (world model learned identity); the `CharNGramEncoder`
+  query path was dead (grounding trained on noise); `ScreenEye.look_at` used a
+  *different, untrained* encoder than training (train/inference mismatch); the
+  trainer saved to a path discovery does not look at.
+- Real text now enters via `forge/vision/cortex/data/text.py::ngram_query_embedding`.
+  Both the trainer and `ScreenEye.look_at` **must** use this same encoder —
+  using `ByteQueryEncoder` at inference silently ungrounds the model.
+- Held-out (n=40, procedural, same generator): grounding median error
+  **0.0188 norm (~12 px @640)**. Same-distribution only; not a generalisation
+  result.
+- It is an **active-vision** model: fovea fixation is state carried between
+  calls, so consecutive `look_at` calls on one frame legitimately differ. Reset
+  fixation for bit-identical output.
+- It still has **no text decoder** and does not speak. Speech is System 2.
+
 ## Honest limits
 
 - 2.7M–50M params cannot follow a system prompt reliably. This is a scale
