@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -24,6 +24,11 @@ LEGACY_GROUNDING_CHECKPOINT_SCHEMA = 1
 SUPPORTED_GROUNDING_CHECKPOINT_SCHEMAS = (1, 2)
 GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_and_absence_demonstrations"
 LEGACY_GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_demonstrations"
+MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE = "multi_generator_grounding_corpus_v1"
+GROUNDING_CHECKPOINT_DATASET_PROVENANCES = (
+    GROUNDING_DATASET_PROVENANCE,
+    MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
+)
 DEFAULT_INPUT_SIZE = 256
 
 
@@ -165,6 +170,7 @@ class GoalConditionedGrounder(nn.Module):
         valid_provenance = provenance in (
             GROUNDING_DATASET_PROVENANCE,
             LEGACY_GROUNDING_DATASET_PROVENANCE,
+            MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
         )
         training_samples = self._checkpoint_metadata.get("training_samples")
         validation_samples = self._checkpoint_metadata.get("validation_samples")
@@ -502,12 +508,43 @@ def migrate_grounding_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, 
     return migrated
 
 
+def _select_grounder_architecture(state: dict[str, Any]) -> type:
+    """Return the class matching a checkpoint's architecture, or fail closed.
+
+    Two classes named GoalConditionedGrounder exist: this module's 195-key
+    FPN variant and the 81-key variant in ``avcs/goal_grounder.py``. They are
+    different networks, so the loader must pick by key names rather than
+    assuming one and crashing with a shape error on the other.
+    """
+    keys = set(state)
+    if not keys:
+        raise TypeError("grounding checkpoint is missing its model state dictionary")
+    is_fpn = any(key.startswith(("lateral_", "decode_")) for key in keys)
+    is_flat = any(
+        key.startswith(("head_conv1.", "heatmap_head.", "existence_head.")) for key in keys
+    )
+    if is_fpn and not is_flat:
+        return GoalConditionedGrounder
+    if is_flat and not is_fpn:
+        from avcs.goal_grounder import GoalConditionedGrounder as _FlatGrounder
+
+        return _FlatGrounder
+    raise ValueError(
+        "grounding checkpoint architecture is ambiguous: expected either "
+        "FPN keys (lateral_*/decode_*) or flat-head keys "
+        "(head_conv1./heatmap_head./existence_head.), found "
+        f"{'both' if is_fpn and is_flat else 'neither'}"
+    )
+
+
 def load_grounding_checkpoint(
     path: Union[str, Path], device: Union[str, torch.device] = "cpu"  # noqa: UP007
 ) -> GoalConditionedGrounder:
     """Load checkpoints carrying real-demonstration training provenance.
 
-    Supports schema 1 legacy checkpoints and schema 2 (with full evaluation provenance).
+    Supports schema 1 legacy checkpoints and schema 2 (with full evaluation
+    provenance), and dispatches to whichever GoalConditionedGrounder
+    architecture the checkpoint was trained with.
     """
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if not isinstance(checkpoint, dict):
@@ -525,7 +562,7 @@ def load_grounding_checkpoint(
         if dataset_provenance != LEGACY_GROUNDING_DATASET_PROVENANCE:
             raise ValueError("grounding checkpoint has invalid 'schema_version' provenance")
     elif schema_version == GROUNDING_CHECKPOINT_SCHEMA:
-        if dataset_provenance != GROUNDING_DATASET_PROVENANCE:
+        if dataset_provenance not in GROUNDING_CHECKPOINT_DATASET_PROVENANCES:
             raise ValueError("grounding checkpoint has invalid 'dataset_provenance' provenance")
 
     training_samples = checkpoint.get("training_samples")
@@ -557,16 +594,27 @@ def load_grounding_checkpoint(
     ):
         raise ValueError("grounding checkpoint has no valid calibrated target-presence threshold")
     checkpoint["target_presence_threshold"] = float(presence_threshold)
-    if not isinstance(checkpoint.get("model_state_dict"), dict):
+    state_dict = checkpoint.get("model_state_dict")
+    if not isinstance(state_dict, dict):
         raise TypeError("grounding checkpoint is missing its model state dictionary")
     input_size = checkpoint.get("input_size", DEFAULT_INPUT_SIZE)
     if isinstance(input_size, bool) or not isinstance(input_size, int) or input_size <= 0:
         raise TypeError("grounding checkpoint has invalid input_size")
-    model = GoalConditionedGrounder(input_size=input_size).to(device)
+
+    grounder_cls = _select_grounder_architecture(state_dict)
+    if grounder_cls is GoalConditionedGrounder:
+        model = grounder_cls(input_size=input_size).to(device)
+    else:
+        model = grounder_cls(
+            feature_dim=checkpoint.get("feature_dim", 128), input_size=input_size
+        ).to(device)
     try:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    except Exception:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"grounding checkpoint does not match {grounder_cls.__module__}."
+            f"{grounder_cls.__name__} (strict load failed): {exc}"
+        ) from exc
     model.eval()
     metadata = {
         "schema_version": checkpoint["schema_version"],

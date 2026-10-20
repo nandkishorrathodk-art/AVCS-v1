@@ -464,3 +464,79 @@ def test_held_out_evaluator_uses_unchanged_disjoint_data_without_input_actions(
             data_dir=str(tmp_path / "demos"),
             checkpoint_path=str(model_checkpoint),
         )
+
+
+def _demo_checkpoint_payload(state_dict, input_size=64, feature_dim=None):
+    payload = {
+        "schema_version": GROUNDING_CHECKPOINT_SCHEMA,
+        "model_type": "avcs_goal_conditioned_grounder",
+        "dataset_provenance": GROUNDING_DATASET_PROVENANCE,
+        "training_samples": 12,
+        "validation_samples": 3,
+        "target_presence_threshold": 0.5,
+        "input_size": input_size,
+        "model_state_dict": state_dict,
+    }
+    if feature_dim is not None:
+        payload["feature_dim"] = feature_dim
+    return payload
+
+
+def test_checkpoint_loader_dispatches_flat_head_architecture(tmp_path):
+    """The public loader must accept the flat-head grounder, not only the FPN one.
+
+    Regression: avcs.load_grounding_checkpoint was hard-wired to the perception
+    module's FPN class, so loading the shipped goal_grounder_best.pt raised
+    "size mismatch for visual_encoder.stem.conv.weight".
+    """
+    import avcs
+    from avcs.perception.goal_grounder import GoalConditionedGrounder as FpnGrounder
+
+    flat = GoalConditionedGrounder(input_size=64)
+    checkpoint = tmp_path / "flat.pt"
+    torch.save(_demo_checkpoint_payload(flat.state_dict(), feature_dim=128), checkpoint)
+
+    loaded = avcs.load_grounding_checkpoint(checkpoint)
+
+    assert type(loaded).__module__ == "avcs.goal_grounder"
+    assert not isinstance(loaded, FpnGrounder)
+    assert loaded.is_trained is True
+
+
+def test_checkpoint_loader_dispatches_fpn_architecture(tmp_path):
+    import avcs
+    from avcs.perception.goal_grounder import GoalConditionedGrounder as FpnGrounder
+
+    fpn = FpnGrounder(input_size=64)
+    checkpoint = tmp_path / "fpn.pt"
+    torch.save(_demo_checkpoint_payload(fpn.state_dict()), checkpoint)
+
+    loaded = avcs.load_grounding_checkpoint(checkpoint)
+
+    assert isinstance(loaded, FpnGrounder)
+    assert loaded.is_trained is True
+
+
+def test_checkpoint_loader_fails_closed_on_unknown_architecture(tmp_path):
+    import avcs
+
+    checkpoint = tmp_path / "alien.pt"
+    torch.save(_demo_checkpoint_payload({"not_a_grounder.weight": torch.zeros(1)}), checkpoint)
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        avcs.load_grounding_checkpoint(checkpoint)
+
+
+def test_checkpoint_loader_reports_mismatch_instead_of_shape_error(tmp_path):
+    """A truncated state dict must raise a clear ValueError, never a raw RuntimeError."""
+    import avcs
+
+    flat = GoalConditionedGrounder(input_size=64)
+    truncated = {
+        key: value for index, (key, value) in enumerate(flat.state_dict().items()) if index
+    }
+    checkpoint = tmp_path / "truncated.pt"
+    torch.save(_demo_checkpoint_payload(truncated, feature_dim=128), checkpoint)
+
+    with pytest.raises(ValueError, match="strict load failed"):
+        avcs.load_grounding_checkpoint(checkpoint)

@@ -47,6 +47,11 @@ LEGACY_GROUNDING_CHECKPOINT_SCHEMA = 1
 SUPPORTED_GROUNDING_CHECKPOINT_SCHEMAS = (1, 2)
 GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_and_absence_demonstrations"
 LEGACY_GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_demonstrations"
+MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE = "multi_generator_grounding_corpus_v1"
+GROUNDING_CHECKPOINT_DATASET_PROVENANCES = (
+    GROUNDING_DATASET_PROVENANCE,
+    MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
+)
 DEFAULT_INPUT_SIZE = 256
 
 
@@ -214,6 +219,7 @@ class GoalConditionedGrounder(nn.Module):
         valid_provenance = provenance in (
             GROUNDING_DATASET_PROVENANCE,
             LEGACY_GROUNDING_DATASET_PROVENANCE,
+            MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
             "avcs_procedural_synthetic_desktop_v1",
         )
         training_samples = self._checkpoint_metadata.get("training_samples")
@@ -753,7 +759,7 @@ def load_grounding_checkpoint(
         if dataset_provenance != LEGACY_GROUNDING_DATASET_PROVENANCE:
             raise ValueError("grounding checkpoint has invalid 'schema_version' provenance")
     elif schema_version == GROUNDING_CHECKPOINT_SCHEMA:
-        if dataset_provenance != GROUNDING_DATASET_PROVENANCE:
+        if dataset_provenance not in GROUNDING_CHECKPOINT_DATASET_PROVENANCES:
             raise ValueError("grounding checkpoint has invalid 'dataset_provenance' provenance")
 
     training_samples = checkpoint.get("training_samples")

@@ -278,14 +278,16 @@ oversight. Traps, both learned the hard way:
   the tests that need it fail correctly. Never fabricate a placeholder
   checkpoint to make them pass. Its acceptance numbers are same-distribution
   synthetic figures, not a generalisation claim.
-- `runs/weights/goal_grounder_best.pt` **is** trained (1.66M params, schema 2,
+- `runs/weights/goal_grounder_best.pt` **is** trained (200,883 params, schema 2,
   `is_trained=True`). On `datasets/ui_grounding` `test_held_out` it reproduces
   94.94% top-1 / 3.72 px median via
   `python3 -m benchmarks.run_ui_grounding_benchmark`. But that split shares a
   generator with train. On `datasets/cleanroom_system1_v1` (a different
-  generator) the same checkpoint drops to 28.1% top-1 and its calibrated
-  presence threshold is at **chance** (34.4% of true targets rejected, 65.6% of
-  true absences accepted). Always quote the split *and* the generator.
+  generator) the same checkpoint drops to **7.81% top-1** and its calibrated
+  presence threshold is at **chance**: 48.4% of true targets rejected (n=64,
+  15 px tolerance). Always quote the split *and* the generator. An earlier
+  revision of this file said 28.1% for that cross-generator number; that figure
+  did not reproduce and has been corrected. See "Cross-generator grounding" below.
 - Actuation is hardcoded off: `GoalConditionedGrounder.predict` returns
   `action_authorized=False` on every call and `AVCSController.locate` raises
   unless it is true. `test_locate_with_trained_grounder` asserts this, so it is
@@ -355,6 +357,88 @@ version of this section described the model from its code and was wrong.
   Prose about the screen is System 2, which is not in this repo. Describing
   System 1 output as natural language is the exact overclaim this section
   corrects.
+
+
+## Cross-generator grounding: the gap is corpus diversity, not architecture
+
+The `avcs/` grounder is the bridge from "eyes" to "hand". Its real question is
+whether it works on software it has never seen. Measured directly (n=64 cleanroom
+/ n=316 ui_grounding, 15 px tolerance, seed 7, ~950 steps per arm, 200,883-param
+`avcs.goal_grounder.GoalConditionedGrounder`):
+
+| arm | train data | steps | ui_grounding | cleanroom |
+|---|---|---|---|---|
+| A | ui_grounding only | 936 | 82.3% | 23.4% |
+| B | cleanroom only | 192 | 5.4% | 64.1% |
+| B_matched | cleanroom only | 928 | 7.6% | 73.4% |
+| C | combined, natural proportions | 936 | 85.1% | 75.0% |
+| C_matched | combined, natural proportions | 950 | **86.1%** | **85.9%** |
+| D2 | combined, full epoch per generator | 1884 | 88.6% | 81.2% |
+
+Reading:
+
+1. **The gap is real and it is memorisation of the generator, not of the
+   concept.** A ui-only model is 82.3% at home and 23.4% abroad.
+2. **It is not undertraining.** B_matched gives cleanroom-only 6x more steps
+   (192 -> 928) and moves the other generator from 5.4% to 7.6%. Ruled out.
+3. **Training on both generators fixes it, at no cost.** C_matched is 86.1% on
+   ui and 85.9% on cleanroom. Adding the second generator also *raised* cleanroom
+   accuracy over the cleanroom-only arm (73.4% -> 85.9%). Multi-generator data
+   regularises rather than trades off.
+4. **Balanced sampling must not shrink either arm's budget.** Arm D in the first
+   run was misbuilt: "balanced" capped each epoch at 512 samples, starving the
+   1256-sample ui arm, and it scored 35.8%/54.7%. D2, which gives each generator
+   a full epoch, is the correct construction. Do not quote D as a result.
+
+### Negative results (do not retry)
+
+- **Photometric augmentation does not close the gap.** Matching cleanroom's
+  appearance onto ui_grounding drops ui from 91.5% to 36.1%; matching
+  ui_grounding's appearance onto cleanroom drops cleanroom from 7.81% to 0.00%.
+  Training cleanroom with brightness/contrast/gamma/gain jitter moved the other
+  generator 5.4% -> 7.3% (within noise) while costing 8 points at home. The gap
+  is structural, not a white-balance problem.
+- **`streaming_v1_synthetic_0_1` cannot test this.** Its annotations record
+  `object_identity: not_collected`; it has no grounding targets. A third-generator
+  generalisation claim is not measurable with the corpora present.
+
+### Two architectures share the name `GoalConditionedGrounder`
+
+`avcs/goal_grounder.py` and `avcs/perception/goal_grounder.py` both define a
+class of that name, and they are **different networks**, not duplicates:
+
+| module | keys | params | discriminator | loads |
+|---|---|---|---|---|
+| `avcs/goal_grounder.py` | 81 | 200,883 | `head_conv1` / `heatmap_head` | `goal_grounder_best.pt` |
+| `avcs/perception/goal_grounder.py` | 195 | 1,354,050 | `lateral_*` / `decode_*` FPN | `candidate_m3_highres_v2.pt` |
+
+Both are loadable by their own loader, so neither is stale. The bug is that the
+public API (`avcs.load_grounding_checkpoint`, re-exported from the perception
+module) was hard-wired to the 195-key class, so calling it on the shipped
+81-key checkpoint raised
+`RuntimeError: size mismatch for visual_encoder.stem.conv.weight`. The loader
+now selects the architecture by inspecting the checkpoint's key names and
+fails closed on a mismatch instead of raising an opaque shape error. Add a new
+grounder architecture in one place and update the discriminator, or the
+fail-closed path will reject it.
+
+Note also: `validate_dataset('datasets/cleanroom_system1_v1')` raises
+`SHA-256 mismatch for annotations/train/train_00000.json` — the corpus on disk
+does not match its own manifest, independent of the rights gate.
+
+### Reproducing the combined arm
+
+`avcs/training/train_combined_grounder.py` trains the canonical 200,883-param
+grounder on any subset of `ui_grounding` and `cleanroom_system1_v1` and reports
+per-generator held-out top-1 / rejection / median-error. It reuses the existing
+rights gate (`validate_rights_attestation`) and fails closed: the clean-room arm
+raises rather than silently dropping when the signed approval bundle or an
+intact corpus is missing. Combined checkpoints carry the new
+`multi_generator_grounding_corpus_v1` provenance, accepted by both loaders and
+both `is_trained` gates. `--sampling natural` (default) keeps the proportions in
+the table above; `balanced` equalises expected draws per generator so a small
+corpus is not drowned by a large one. The sampler is the knob the arm-D failure
+turned on: any policy that starves one generator reproduces that failure.
 
 
 ## Honest limits
