@@ -223,16 +223,17 @@ When the **System 2 Cognitive VLM Bridge** is wired up with this **System 1 Visu
 
 ## 4. Where Does This Model Fail? (Current Limitations & Failure Modes — Zero Sugar-Coating)
 
-In live testing on the operator's actual 1920×1200 physical display, the model's hard limits and failure modes were exposed directly:
+In live testing on the operator's actual 1920×1200 physical display — and in held-out benchmark runs — the model's hard limits and failure modes were exposed directly:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        THE 4 BRUTAL FAILURES                           │
+│                        THE 5 BRUTAL FAILURES                           │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 1. Zero Arbitrary Text Reading (Cannot read typed text, code, or docs) │
 │ 2. Fragile Scene Classification (Mistook dark-mode VS Code for Browser)│
 │ 3. Fake "Speech" (Hardcoded Python string templates, NOT an LLM)       │
 │ 4. Zero Cognitive Planning (Cannot reason or break down tasks alone)   │
+│ 5. Generator-Specific Grounding (94.94% at home, 9.38% on new software)│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -253,6 +254,11 @@ In live testing on the operator's actual 1920×1200 physical display, the model'
 ### Failure 4: Zero Cognitive Reasoning & Task Planning
 * **The Reality:** If you tell System 1 *"Open Chrome and search for news"*, it cannot do it.
 * **Why it fails:** A 500k-parameter neural network on CPU is an **ocular reflex arc and motor cerebellum** (like a human retina, visual cortex, and motor nerves). It is NOT a prefrontal cortex. It has no conceptual understanding of goals, sequential logic, or user intent. It requires **System 2 (an LLM/VLM)** to tell it what subgoal to execute.
+
+### Failure 5: Generator-Specific Grounding (It Learned the Corpus, Not the Concept)
+* **The Reality:** The `avcs/` grounder (the bridge from "eyes" to "hand") scores **94.94% top-1 at 3.72 px median on its own test split** — and **9.38%** on a screen corpus produced by a different generator. If you hand it software it has not been trained on, it mostly points at the wrong place.
+* **Why it fails:** The `ui_grounding` split shares a frame generator with the training data, so a good score there mostly demonstrates that the model learned *that generator's* appearance — not a general notion of "button" or "input field". This is memorisation of the corpus, not the concept. AGENTS.md records a multi-generator training arm (86.1% home / 85.9% abroad) that closes the gap, but it has not been reproduced end-to-end on this branch.
+* **Do not quote the home number alone.** The cross-generator number is also **rule-dependent**: on the same checkpoint and split it is **0.00%** under the official runner's gate (`(in box or within 15 px) and confidence >= 0.35`) and **9.38%** ungated. The gate zeroes it because the calibrated presence head sits at chance on this corpus and rejects 48.4% of true targets, clipping confidence to 0.1. Quote the split, the generator, **and** the rule together, or the number is not reproducible.
 
 ---
 
@@ -319,6 +325,13 @@ py -3.14 -c "from avcs.control.controller import AVCSController; c = AVCSControl
 ```powershell
 py -3.14 benchmarks/benchmark_soak_test.py
 ```
+
+### Reproduce the Grounding Numbers (Home vs. New Software)
+```powershell
+py -3.14 -m benchmarks.run_ui_grounding_benchmark --checkpoint runs/weights/goal_grounder_best.pt --out benchmarks/results/ui_grounding_goal_grounder_best.json
+py -3.14 -m benchmarks.benchmark_cross_generator_grounding --out benchmarks/results/cross_generator_grounding_goal_grounder_best.json
+```
+The first prints the home split (94.94% top-1 / 3.72 px median). The second prints the same checkpoint on a different frame generator, and reports **both** the gated (0.00%) and ungated (9.38%) numbers so the decision rule is never ambiguous. Both reports record the checkpoint sha256. See Failure 5 above. Note: `runs/weights/` is gitignored, so these commands need the trained checkpoint present locally; the runner reports a missing checkpoint rather than scoring an untrained one.
 
 ---
 
