@@ -283,11 +283,16 @@ oversight. Traps, both learned the hard way:
   94.94% top-1 / 3.72 px median via
   `python3 -m benchmarks.run_ui_grounding_benchmark`. But that split shares a
   generator with train. On `datasets/cleanroom_system1_v1` (a different
-  generator) the same checkpoint drops to **7.81% top-1** and its calibrated
-  presence threshold is at **chance**: 48.4% of true targets rejected (n=64,
-  15 px tolerance). Always quote the split *and* the generator. An earlier
-  revision of this file said 28.1% for that cross-generator number; that figure
-  did not reproduce and has been corrected. See "Cross-generator grounding" below.
+  generator) the same checkpoint collapses: **0.00% top-1 under the official
+  benchmark's decision rule** (`(in box or within 15 px) and confidence >= 0.35`),
+  and **9.38%** if the confidence gate is dropped and only the argmax within
+  15 px is counted (n=64). The confidence gate is what zeroes it: the shipped
+  checkpoint's calibrated presence threshold sits at **chance** and rejects
+  48.4% of true targets, so `combined_conf` is clipped to 0.1 on the failures
+  and never reaches 0.35. Always quote the split, the generator, *and* the
+  decision rule — the same checkpoint reads 0.00%, 7.81%, or 9.38% depending on
+  which rule is applied, and earlier revisions of this file quoted 28.1% and
+  then 7.81% without naming one.
 - Actuation is hardcoded off: `GoalConditionedGrounder.predict` returns
   `action_authorized=False` on every call and `AVCSController.locate` raises
   unless it is true. `test_locate_with_trained_grounder` asserts this, so it is
@@ -364,7 +369,11 @@ version of this section described the model from its code and was wrong.
 The `avcs/` grounder is the bridge from "eyes" to "hand". Its real question is
 whether it works on software it has never seen. Measured directly (n=64 cleanroom
 / n=316 ui_grounding, 15 px tolerance, seed 7, ~950 steps per arm, 200,883-param
-`avcs.goal_grounder.GoalConditionedGrounder`):
+`avcs.goal_grounder.GoalConditionedGrounder`). The scoring rule for these earlier
+arms was not recorded, and the rule changes the number materially — see
+"Decision-rule sensitivity" below. Treat the table as directional and reproduce
+any single cell before quoting it. The rule-named, reproducible numbers are the
+shipped checkpoint's: 94.94% home, 0.00% gated / 9.38% ungated cross-generator.
 
 | arm | train data | steps | ui_grounding | cleanroom |
 |---|---|---|---|---|
@@ -395,12 +404,37 @@ Reading:
 - **Photometric augmentation does not close the gap.** Matching cleanroom's
   appearance onto ui_grounding drops ui from 91.5% to 36.1%; matching
   ui_grounding's appearance onto cleanroom drops cleanroom from 7.81% to 0.00%.
+  (Rule for these earlier arms was not recorded; the same checkpoint reads 0.00%
+  or 9.38% on cleanroom depending on the gate — see "Decision-rule sensitivity".)
   Training cleanroom with brightness/contrast/gamma/gain jitter moved the other
   generator 5.4% -> 7.3% (within noise) while costing 8 points at home. The gap
   is structural, not a white-balance problem.
 - **`streaming_v1_synthetic_0_1` cannot test this.** Its annotations record
   `object_identity: not_collected`; it has no grounding targets. A third-generator
   generalisation claim is not measurable with the corpora present.
+
+### Decision-rule sensitivity
+
+The clean-room number is not a single fact; it depends on the rule applied, so a
+figure without its rule is not reproducible. On the same checkpoint, same split
+(n=64), same 15 px tolerance:
+
+| rule | cleanroom top-1 |
+|---|---|
+| argmax within 15 px, no gate | **9.38%** (6/64) |
+| `(in box or 15 px) and confidence >= 0.35` (official runner) | **0.00%** (0/64) |
+
+The official runner's gate is what zeroes it. `predict_point` clips
+`combined_conf` to 0.1 whenever the calibrated presence head says the target is
+absent, and on this corpus that head sits at chance: it rejects 48.4% of true
+targets, so `confidence >= 0.35` is never satisfied on a hit. The checkpoint is
+not more broken than the ungated 9.38% implies; the gate is simply calibrated on
+a distribution that does not transfer.
+
+Reproduce both with
+`python3 -m benchmarks.benchmark_cross_generator_grounding --out benchmarks/results/cross_generator_grounding_goal_grounder_best.json`.
+That command prints both clean-room numbers (gated and ungated) plus the home
+split, and writes the full report including the checkpoint sha256.
 
 ### Two architectures share the name `GoalConditionedGrounder`
 
@@ -438,7 +472,11 @@ intact corpus is missing. Combined checkpoints carry the new
 both `is_trained` gates. `--sampling natural` (default) keeps the proportions in
 the table above; `balanced` equalises expected draws per generator so a small
 corpus is not drowned by a large one. The sampler is the knob the arm-D failure
-turned on: any policy that starves one generator reproduces that failure.
+turned on: any policy that starves one generator reproduces that failure. Score
+any resulting checkpoint on both splits with
+`python3 -m benchmarks.benchmark_cross_generator_grounding`; a combined model
+should show a small gap, and the gated/ungated pair bounds how much of a
+cross-generator number is the model versus the confidence gate.
 
 
 ## Honest limits

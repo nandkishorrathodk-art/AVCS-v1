@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -448,8 +449,13 @@ def main() -> None:
     if args.out:
         out_p = Path(args.out)
         out_p.parent.mkdir(parents=True, exist_ok=True)
+        report = res.to_dict()
+        report["checkpoint"] = str(ckpt_path)
+        report["checkpoint_sha256"] = hashlib.sha256(ckpt_path.read_bytes()).hexdigest()
+        report["split"] = args.split
+        report["confidence_threshold"] = args.threshold
         with open(out_p, "w", encoding="utf-8") as f:
-            json.dump(res.to_dict(), f, indent=2)
+            json.dump(report, f, indent=2)
         print(f"Saved evaluation report to {out_p}")
 
 
