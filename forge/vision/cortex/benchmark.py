@@ -42,7 +42,7 @@ def run_benchmark(iterations: int = 50, use_synthetic_screen: bool = True):
         print("Using synthetic random frames (1920x1080)")
 
     # Language query embedding simulation
-    dummy_text_embed = torch.randn(1, model.latent_dim, device=device)
+    dummy_text_embed = torch.randn(1, model.cfg.latent_dim, device=device)
 
     # Warmup
     print("\nWarming up pipeline...")
