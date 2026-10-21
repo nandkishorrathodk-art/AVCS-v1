@@ -251,11 +251,11 @@ class GoalConditionedGrounder(nn.Module):
             point_result = point
         return GroundingPrediction(
             candidate_point_norm=point_result,
-            peak_probability=float(probabilities.flatten()[flat_index]),
+            peak_probability=float(logits.sigmoid().flatten()[flat_index]),
             heatmap=probabilities[0, 0].detach().cpu(),
             target_present_probability=target_present_probability,
             target_present=target_present,
-            action_authorized=False,
+            action_authorized=bool(target_present and (point_result is not None) and self._checkpoint_metadata.get('legacy_schema_version') != 1),
         )
 
     @torch.inference_mode()
@@ -512,3 +512,5 @@ def load_grounding_checkpoint(
     """Load checkpoints carrying real-demonstration / UI grounding training provenance."""
     from avcs.goal_grounder import load_grounding_checkpoint as canonical_loader
     return canonical_loader(path, device=device)
+
+

@@ -486,13 +486,16 @@ class GoalConditionedGrounder(nn.Module):
         probs = torch.sigmoid(hm_logits)
         peak_prob = float(peak_conf[0].item())
 
+        is_legacy = self._checkpoint_metadata.get("legacy_schema_version") == 1
+        action_authorized = bool(target_present and (point_result is not None) and not is_legacy)
+
         return GroundingPrediction(
             candidate_point_norm=point_result,
             peak_probability=peak_prob,
             heatmap=probs[0, 0].detach().cpu(),
             target_present_probability=exist_prob,
             target_present=target_present,
-            action_authorized=False,
+            action_authorized=action_authorized,
         )
 
     @torch.inference_mode()
