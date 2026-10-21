@@ -452,6 +452,61 @@ class FastAffordanceHead(nn.Module):
                     best_at_cell[(py, px)] = item
 
         candidate_peaks = list(best_at_cell.values())
+        if not candidate_peaks and feat.abs().max() > 1e-4:
+            # 1. Adaptive Fallback: Lower threshold for compressed video or low-contrast desktop UI
+            # Must possess real spatial variation (not flat unactivated background)
+            for cls_idx, act_name in targets:
+                heat = probs[cls_idx]
+                if (heat.max() - heat.min()) < 0.02 or heat.std() < 0.005:
+                    continue
+                heat_4d = heat.unsqueeze(0).unsqueeze(0)
+                max_pool = F.max_pool2d(heat_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
+                is_peak = (heat == max_pool) & (heat >= 0.15) & (heat > heat.min() + 0.02)
+                peak_indices = torch.nonzero(is_peak, as_tuple=False)
+                if len(peak_indices) == 0:
+                    continue
+                vals = heat[peak_indices[:, 0], peak_indices[:, 1]]
+                if len(vals) > top_k:
+                    top_order = torch.argsort(vals, descending=True)[:top_k]
+                    peak_indices = peak_indices[top_order]
+                    vals = vals[top_order]
+                for idx in range(len(peak_indices)):
+                    py = int(peak_indices[idx, 0].item())
+                    px = int(peak_indices[idx, 1].item())
+                    val = float(vals[idx].item())
+                    norm_x = (px + 0.5) / float(W)
+                    norm_y = (py + 0.5) / float(H)
+                    item = (float(norm_x), float(norm_y), act_name, round(val, 3))
+                    if (py, px) not in best_at_cell or val > best_at_cell[(py, px)][3]:
+                        best_at_cell[(py, px)] = item
+            candidate_peaks = list(best_at_cell.values())
+
+        if not candidate_peaks and feat.abs().max() > 1e-4:
+            # 2. Saliency Fallback: High-contrast cortical feature activations
+            sal = feat.abs().mean(dim=1)[0]  # (H, W)
+            if (sal.max() - sal.min()) > 0.05 and sal.std() > 0.01:
+                sal_min = sal.min()
+                sal_max = sal.max()
+                sal_norm = (sal - sal_min) / (sal_max - sal_min + 1e-6)
+                sal_4d = sal_norm.unsqueeze(0).unsqueeze(0)
+                max_pool = F.max_pool2d(sal_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
+                is_peak = (sal_norm == max_pool) & (sal_norm >= 0.35) & (sal_norm > sal_norm.min() + 0.05)
+                peak_indices = torch.nonzero(is_peak, as_tuple=False)
+                if len(peak_indices) > 0:
+                    vals = sal_norm[peak_indices[:, 0], peak_indices[:, 1]]
+                    if len(vals) > top_k:
+                        top_order = torch.argsort(vals, descending=True)[:top_k]
+                        peak_indices = peak_indices[top_order]
+                        vals = vals[top_order]
+                    for idx in range(len(peak_indices)):
+                        py = int(peak_indices[idx, 0].item())
+                        px = int(peak_indices[idx, 1].item())
+                        val = float(vals[idx].item())
+                        norm_x = (px + 0.5) / float(W)
+                        norm_y = (py + 0.5) / float(H)
+                        best_at_cell[(py, px)] = (float(norm_x), float(norm_y), 'clickable', round(val, 3))
+                candidate_peaks = list(best_at_cell.values())
+
         # Sort candidate peaks by confidence descending
         candidate_peaks.sort(key=lambda x: x[3], reverse=True)
         return candidate_peaks[:top_k]
@@ -933,13 +988,18 @@ class HumanEye(nn.Module):
             cat_conf = self._last_category_conf
             affordances = self._last_affordances
         else:
-            # Fast downsample to input_size
+            # Fast downsample to input_size (preserving entire aspect ratio and screen boundaries)
             H, W = frame.shape[:2]
             if H != self.input_size[0] or W != self.input_size[1]:
-                # Subsample for ultra-fast Tensor conversion
-                sy = max(1, H // self.input_size[0])
-                sx = max(1, W // self.input_size[1])
-                frame_sub = frame[::sy, ::sx][:self.input_size[0], :self.input_size[1]]
+                try:
+                    import cv2
+                    frame_sub = cv2.resize(frame, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA)
+                except Exception:
+                    sy = max(1.0, float(H) / float(self.input_size[0]))
+                    sx = max(1.0, float(W) / float(self.input_size[1]))
+                    y_idx = np.minimum((np.arange(self.input_size[0]) * sy).astype(int), H - 1)
+                    x_idx = np.minimum((np.arange(self.input_size[1]) * sx).astype(int), W - 1)
+                    frame_sub = frame[y_idx[:, None], x_idx]
             else:
                 frame_sub = frame
 
