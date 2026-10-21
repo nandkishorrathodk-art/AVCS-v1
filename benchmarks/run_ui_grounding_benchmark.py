@@ -403,42 +403,48 @@ def main() -> None:
         print(f"Error: checkpoint {ckpt_path} not found.")
         return
 
-    from avcs.goal_grounder import GoalConditionedGrounder
+    from avcs.goal_grounder import (
+        _select_grounder_architecture,
+        load_grounding_checkpoint,
+    )
     from avcs.weights import _extract_grounder_metadata
 
-    ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=True)
-    if "grounder" in ckpt:
-        state = ckpt["grounder"]
-    elif "model_state_dict" in ckpt:
-        state = ckpt["model_state_dict"]
-    else:
-        state = ckpt
+    try:
+        model = load_grounding_checkpoint(ckpt_path, device=args.device)
+    except Exception:
+        ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=False)
+        if "grounder" in ckpt:
+            state = ckpt["grounder"]
+        elif "model_state_dict" in ckpt:
+            state = ckpt["model_state_dict"]
+        else:
+            state = ckpt
 
-    if not any(k.startswith("visual_encoder.") for k in state.keys()) and any(
-        k.startswith("grounder.") for k in state.keys()
-    ):
-        state = {k[9:] if k.startswith("grounder.") else k: v for k, v in state.items()}
+        if not any(k.startswith("visual_encoder.") for k in state.keys()) and any(
+            k.startswith("grounder.") for k in state.keys()
+        ):
+            state = {k[9:] if k.startswith("grounder.") else k: v for k, v in state.items()}
 
-    stem_weight = state.get("visual_encoder.stem.conv.weight")
-    proj_weight = state.get("visual_encoder.proj.conv.weight")
-    if proj_weight is not None:
-        feature_dim = proj_weight.shape[0]
-    elif stem_weight is not None and stem_weight.shape[0] >= 64:
-        feature_dim = stem_weight.shape[0]
-    else:
-        hp = ckpt.get("hyperparameters", {}) if isinstance(ckpt.get("hyperparameters"), dict) else {}
-        feature_dim = (
-            ckpt.get("feature_dim")
-            or hp.get("feature_dim")
-            or (hp.get("backbone", {}).get("feature_dim") if isinstance(hp.get("backbone"), dict) else None)
-            or 128
-        )
+        stem_weight = state.get("visual_encoder.stem.conv.weight")
+        proj_weight = state.get("visual_encoder.proj.conv.weight")
+        if proj_weight is not None:
+            feature_dim = proj_weight.shape[0]
+        elif stem_weight is not None and stem_weight.shape[0] >= 64:
+            feature_dim = stem_weight.shape[0]
+        else:
+            hp = ckpt.get("hyperparameters", {}) if isinstance(ckpt.get("hyperparameters"), dict) else {}
+            feature_dim = (
+                ckpt.get("feature_dim")
+                or hp.get("feature_dim")
+                or (hp.get("backbone", {}).get("feature_dim") if isinstance(hp.get("backbone"), dict) else None)
+                or 128
+            )
 
-    meta = _extract_grounder_metadata(ckpt)
-    model = GoalConditionedGrounder(feature_dim=feature_dim).to(args.device)
-    model.load_state_dict(state, strict=False)
-    if meta:
-        model._mark_loaded_checkpoint(meta)
+        meta = _extract_grounder_metadata(ckpt)
+        model = _select_grounder_architecture(state, feature_dim=feature_dim).to(args.device)
+        model.load_state_dict(state, strict=False)
+        if meta:
+            model._mark_loaded_checkpoint(meta)
     model.eval()
 
     print(f"Evaluating {ckpt_path} on split '{args.split}'...")
