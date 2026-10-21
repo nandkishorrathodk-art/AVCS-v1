@@ -380,9 +380,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run UI Grounding Held-Out Benchmark")
     parser.add_argument("--manifest", type=str, default="datasets/ui_grounding/manifest.json")
     default_ckpt = (
-        "runs/weights/human_eye_weights.pt"
-        if Path("runs/weights/human_eye_weights.pt").is_file()
-        else "runs/weights/goal_grounder_best.pt"
+        "runs/weights/goal_grounder_combined_best.pt"
+        if Path("runs/weights/goal_grounder_combined_best.pt").is_file()
+        else (
+            "runs/weights/human_eye_weights.pt"
+            if Path("runs/weights/human_eye_weights.pt").is_file()
+            else "runs/weights/goal_grounder_best.pt"
+        )
     )
     parser.add_argument("--checkpoint", type=str, default=default_ckpt)
     parser.add_argument("--split", type=str, default="test_held_out")
