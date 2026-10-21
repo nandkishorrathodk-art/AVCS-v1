@@ -35,6 +35,7 @@ def run_eyes_and_hands_stream(
     virtual_only: bool = False,
     video_path: Optional[str] = None,
     online_learning: bool = False,
+    commentary: bool = False,
 ) -> None:
     """Streams live desktop or video perception with continuous Eyes telemetry and Hand coordination."""
     print("=" * 78)
@@ -87,6 +88,7 @@ def run_eyes_and_hands_stream(
     start_t = time.perf_counter()
     tick_count = 0
     last_servo_time = 0.0
+    last_commentary_time = 0.0
 
     if sys.platform == "win32":
         try:
@@ -145,6 +147,17 @@ def run_eyes_and_hands_stream(
                 f"{loss_str}"
             )
             sys.stdout.flush()
+
+            # Live verbal commentary stream (talking while observing)
+            if commentary and (time.perf_counter() - last_commentary_time) >= 4.0:
+                last_commentary_time = time.perf_counter()
+                try:
+                    obs = state.scene_observation
+                    if obs and obs.description:
+                        sys.stdout.write(f"\n  [AI TALK] 👁️ {obs.primary_category.upper()}: {obs.description}\n")
+                        sys.stdout.flush()
+                except Exception:
+                    pass
 
             # Auto-servo demonstration: smoothly steer hand to top affordance every 3 seconds
             if auto_servo and (time.perf_counter() - last_servo_time) >= 3.0:
@@ -206,6 +219,7 @@ def main() -> None:
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic desktop frames instead of live monitor")
     parser.add_argument("--video", type=str, default=None, help="Stream from an MP4 screencast or video file instead of display")
     parser.add_argument("--learn", action="store_true", help="Enable online self-supervised stream learning in real time")
+    parser.add_argument("--talk", "--commentary", dest="commentary", action="store_true", help="Live conversational commentary while watching video")
     args = parser.parse_args()
 
     if args.gui:
@@ -221,6 +235,7 @@ def main() -> None:
             virtual_only=args.virtual,
             video_path=args.video,
             online_learning=args.learn,
+            commentary=args.commentary,
         )
 
 
