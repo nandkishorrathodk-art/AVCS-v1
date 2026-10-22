@@ -22,7 +22,7 @@ Strip away all marketing, hype, and academic sugar-coating. Here is the exact te
 * **Parameter Count:** **501,612 parameters (~0.5 Million / ~2.1 MB weight file)**.
   *(For comparison: Claude 3.5 Sonnet or GPT-4 are 100+ Billion parameters; small local LLMs like Llama-3 8B are 8,000,000,000 parameters. This model is 0.006% the size of an 8B LLM).*
 * **Execution Hardware:** Runs on a standard **4-core AMD64 CPU, 15 GB RAM, ZERO GPU**.
-* **Latency & Speed:** **9.3 – 10.2 ms CPU forward pass**, sustaining **95.4 – 103.9 FPS** continuous live capture and inference.
+* **Latency & Speed:** **9.7 ms CPU forward pass (p50)**, sustaining **95.4 FPS** continuous inference at the qualified 64×64 soak resolution. Throughput scales with input area: ~106 FPS at 256×256, ~2.2 FPS at a true 1920×1200 frame. The production path letterboxes the captured desktop to 128×128 first (`StreamingObserver._prepare`), which measures **~4.5 ms / ~223 FPS end-to-end** on this hardware. See [docs/REALITY_AUDIT.md](docs/REALITY_AUDIT.md) §4.
 * **Internal Neural Components:**
   1. **Multi-Scale Spatial Encoder:** 2D Convolutions (`scale_half`, `scale_quarter`, `scale_eighth`) downsampling raw desktop pixels into a 16×16 feature grid with 48 channels.
   2. **Recurrent Spatiotemporal Memory (`ConvGRUCell`):** Gated recurrent neural memory retaining visual context across consecutive frames to track motion and state changes.
@@ -40,7 +40,7 @@ This model was engineered to solve 6 specific, fatal bottlenecks that plague exi
 
 ### Problem 1: The 3–5 Second Screenshot Lag
 * **The Industry Flaw:** Tools like Anthropic Computer Use and OpenAI Operator grab a full screenshot every 3 to 5 seconds. In that multi-second gap, the AI is completely blind: it cannot see cursor movements, hover tooltips, smooth scroll animations, typing progress, or sudden confirmation pop-ups.
-* **How AVCS Solves It:** AVCS captures and processes desktop screen pixels continuously at **95.4 – 103.9 FPS (~10ms per tick)** on a standard 4-core CPU. Its 1-slot latest-value mailbox buffer drops stale backlog frames so the model always perceives the exact present instant with zero latency lag.
+* **How AVCS Solves It:** AVCS captures and processes desktop screen pixels continuously at **95.4 FPS (64×64 soak resolution, ~10 ms per tick)** on a standard 4-core CPU, and ~223 FPS end-to-end when the desktop is letterboxed to 128×128. Its 1-slot latest-value mailbox buffer drops stale backlog frames so the model always perceives the exact present instant with zero latency lag. (Full-resolution throughput is much lower — see [docs/REALITY_AUDIT.md](docs/REALITY_AUDIT.md) §4.)
 
 ### Problem 2: The "Cheating" Trap (UIAutomation / DOM Scraping)
 * **The Industry Flaw:** Most automation bots cheat by reading OS accessibility trees (Windows UIAutomation, MSAA) or web page DOMs (Selenium, Playwright). When an application uses custom GPU rendering, HTML5 Canvas, Electron without accessibility tags, video players, or games, these tools break completely.
@@ -223,16 +223,17 @@ When the **System 2 Cognitive VLM Bridge** is wired up with this **System 1 Visu
 
 ## 4. Where Does This Model Fail? (Current Limitations & Failure Modes — Zero Sugar-Coating)
 
-In live testing on the operator's actual 1920×1200 physical display, the model's hard limits and failure modes were exposed directly:
+In live testing on the operator's actual 1920×1200 physical display — and in held-out benchmark runs — the model's hard limits and failure modes were exposed directly:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        THE 4 BRUTAL FAILURES                           │
+│                        THE 5 BRUTAL FAILURES                           │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 1. Zero Arbitrary Text Reading (Cannot read typed text, code, or docs) │
 │ 2. Fragile Scene Classification (Mistook dark-mode VS Code for Browser)│
 │ 3. Fake "Speech" (Hardcoded Python string templates, NOT an LLM)       │
 │ 4. Zero Cognitive Planning (Cannot reason or break down tasks alone)   │
+│ 5. Generator-Specific Grounding (94.94% at home, 9.38% on new software)│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -253,6 +254,11 @@ In live testing on the operator's actual 1920×1200 physical display, the model'
 ### Failure 4: Zero Cognitive Reasoning & Task Planning
 * **The Reality:** If you tell System 1 *"Open Chrome and search for news"*, it cannot do it.
 * **Why it fails:** A 500k-parameter neural network on CPU is an **ocular reflex arc and motor cerebellum** (like a human retina, visual cortex, and motor nerves). It is NOT a prefrontal cortex. It has no conceptual understanding of goals, sequential logic, or user intent. It requires **System 2 (an LLM/VLM)** to tell it what subgoal to execute.
+
+### Failure 5: Generator-Specific Grounding (It Learned the Corpus, Not the Concept)
+* **The Reality:** The `avcs/` grounder (the bridge from "eyes" to "hand") scores **94.94% top-1 at 3.72 px median on its own test split** — and **9.38%** on a screen corpus produced by a different generator. If you hand it software it has not been trained on, it mostly points at the wrong place.
+* **Why it fails:** The `ui_grounding` split shares a frame generator with the training data, so a good score there mostly demonstrates that the model learned *that generator's* appearance — not a general notion of "button" or "input field". This is memorisation of the corpus, not the concept. AGENTS.md records a multi-generator training arm (86.1% home / 85.9% abroad) that closes the gap, but it has not been reproduced end-to-end on this branch.
+* **Do not quote the home number alone.** The cross-generator number is also **rule-dependent**: on the same checkpoint and split it is **0.00%** under the official runner's gate (`(in box or within 15 px) and confidence >= 0.35`) and **9.38%** ungated. The gate zeroes it because the calibrated presence head sits at chance on this corpus and rejects 48.4% of true targets, clipping confidence to 0.1. Quote the split, the generator, **and** the rule together, or the number is not reproducible.
 
 ---
 
@@ -319,6 +325,13 @@ py -3.14 -c "from avcs.control.controller import AVCSController; c = AVCSControl
 ```powershell
 py -3.14 benchmarks/benchmark_soak_test.py
 ```
+
+### Reproduce the Grounding Numbers (Home vs. New Software)
+```powershell
+py -3.14 -m benchmarks.run_ui_grounding_benchmark --checkpoint runs/weights/goal_grounder_best.pt --out benchmarks/results/ui_grounding_goal_grounder_best.json
+py -3.14 -m benchmarks.benchmark_cross_generator_grounding --out benchmarks/results/cross_generator_grounding_goal_grounder_best.json
+```
+The first prints the home split (94.94% top-1 / 3.72 px median). The second prints the same checkpoint on a different frame generator, and reports **both** the gated (0.00%) and ungated (9.38%) numbers so the decision rule is never ambiguous. Both reports record the checkpoint sha256. See Failure 5 above. Note: `runs/weights/` is gitignored, so these commands need the trained checkpoint present locally; the runner reports a missing checkpoint rather than scoring an untrained one.
 
 ---
 

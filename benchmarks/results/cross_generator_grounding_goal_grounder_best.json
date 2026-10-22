@@ -1,0 +1,92 @@
+{
+  "benchmark": "cross_generator_grounding",
+  "checkpoint": "runs/weights/goal_grounder_best.pt",
+  "checkpoint_sha256": "a6b4aaf3461f2a78b8a1776925bf6a1454d886cde9d6e54dd30b9164bd8259f4",
+  "checkpoint_architecture": "avcs.goal_grounder",
+  "is_trained": true,
+  "device": "cpu",
+  "hit_rule": "(inside gt box or within 15 px) and confidence >= 0.35",
+  "ui_grounding": {
+    "total_positive_samples": 316,
+    "top_1_accuracy_pct": 94.94,
+    "top_1_hits": 300,
+    "median_centroid_error_px": 3.72,
+    "mean_centroid_error_px": 7.95,
+    "p95_centroid_error_px": 16.37,
+    "mean_iou": 0.282,
+    "iou_at_50_pct": 6.33,
+    "total_negative_queries": 200,
+    "negative_query_rejection_pct": 100.0,
+    "total_blank_screens": 30,
+    "blank_screen_fp_count": 0,
+    "blank_screen_false_alarm_rate": 0.0,
+    "center_collapse_detected": false,
+    "passed_all_gates": true,
+    "breakdown_by_category": {
+      "desktop_canvas": {
+        "accuracy_pct": 97.37,
+        "median_error_px": 4.68
+      },
+      "editor_code": {
+        "accuracy_pct": 94.34,
+        "median_error_px": 4.11
+      },
+      "browser_webpage": {
+        "accuracy_pct": 85.45,
+        "median_error_px": 4.41
+      },
+      "terminal_shell": {
+        "accuracy_pct": 100.0,
+        "median_error_px": 3.04
+      },
+      "modal_dialog": {
+        "accuracy_pct": 95.0,
+        "median_error_px": 2.56
+      },
+      "form_input": {
+        "accuracy_pct": 100.0,
+        "median_error_px": 3.35
+      },
+      "media_playback": {
+        "accuracy_pct": 100.0,
+        "median_error_px": 3.11
+      },
+      "settings_panel": {
+        "accuracy_pct": 94.0,
+        "median_error_px": 4.32
+      }
+    },
+    "breakdown_by_element_kind": {
+      "button": {
+        "accuracy_pct": 93.1,
+        "median_error_px": 3.22
+      },
+      "input_field": {
+        "accuracy_pct": 97.78,
+        "median_error_px": 9.56
+      },
+      "icon": {
+        "accuracy_pct": 96.43,
+        "median_error_px": 4.17
+      },
+      "tab": {
+        "accuracy_pct": 100.0,
+        "median_error_px": 4.18
+      }
+    }
+  },
+  "cleanroom_system1_v1": {
+    "positives": 64,
+    "hits": 0,
+    "top1_accuracy_pct": 0.0,
+    "hits_ungated": 6,
+    "top1_accuracy_pct_ungated": 9.38,
+    "median_error_px": 133.64,
+    "negatives": 16,
+    "rejection_rate_pct": 100.0
+  },
+  "ui_grounding_top1_pct": 94.94,
+  "cross_generator_gap_pct": 94.94,
+  "cleanroom_manifest_hashes_verified": false,
+  "cleanroom_manifest_note": "The shipped corpus fails its own manifest hash check, so samples are loaded with verification off. This measures the checkpoint, not the corpus."
+}

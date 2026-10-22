@@ -1,13 +1,18 @@
-"""End-to-End System 2 (LLM) + System 1 (AVCS Eyes & Hands) Live Closed-Loop Demo.
+"""End-to-End System 2 (LLM) + System 1 (AVCS Eyes & Hands) Closed-Loop Demo.
 
-Demonstrates:
+Demonstrates the fail-closed wiring of the System 1 <-> System 2 boundary:
 1. System 2 Intent Interface (Zero Coordinates Leaked to LLM)
 2. Pure-Pixel Evidence-Backed Scene Understanding (Zero Hallucination)
-3. Dynamic Neural Grounding via GoalConditionedGrounder (93.3% Accuracy, 2.2px Error)
+3. Neural Grounding via GoalConditionedGrounder
 4. Neuromuscular 5th-Order Minimum-Jerk Actuation & Biological Jitter
 5. Fresh Post-Action Verification via VisualRippleVerifier
-6. Real-Time 60 FPS Sensory-Motor Telemetry Stream
+6. Real-Time Sensory-Motor Telemetry Stream
 7. Fail-Closed Keyboard Focus Verification
+
+Note: with no trained grounding checkpoint present the grounder abstains, so
+every natural-language action below is expected to be refused. That refusal is
+the correct behaviour, not a demo failure. The demo exits non-zero when any
+step reports an unexpected outcome.
 """
 from __future__ import annotations
 
@@ -102,9 +107,19 @@ def run_avcs_system2_demo() -> None:
     unsub()
     if hasattr(source, "close"):
         source.close()
+
+    # A refusal is the expected outcome when no trained grounder is present.
+    # The demo is only "successful" if the wiring behaved as declared: abstain
+    # without a trained checkpoint, and never claim a verified action.
+    refused = (not act1.success) and (not act2.success) and (not act3.success)
     print("\n" + "=" * 70)
-    print("   CLOSED-LOOP DEMO SUCCESSFULLY VERIFIED END-TO-END!   ")
+    if refused:
+        print("   CLOSED-LOOP WIRING VERIFIED: all actions fail-closed (no trained grounder).   ")
+    else:
+        print("   UNEXPECTED OUTCOME: an action reported success without a trained grounder.   ")
     print("=" * 70)
+    if not refused:
+        raise SystemExit(1)
 
 
 main = run_avcs_system2_demo

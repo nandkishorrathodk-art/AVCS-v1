@@ -10,9 +10,18 @@ import math
 import sys
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk, messagebox
 from typing import List, Optional, Tuple
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+except ImportError as exc:  # pragma: no cover - depends on host Tk install
+    raise ImportError(
+        "avcs.gui requires Tkinter, which is not available in this Python "
+        "environment. On Debian/Ubuntu install the system Tk runtime with "
+        "`apt-get install -y python3-tk` (provides libtk8.6.so); on Windows "
+        "reinstall Python with the 'tcl/tk and IDLE' option enabled."
+    ) from exc
 
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw

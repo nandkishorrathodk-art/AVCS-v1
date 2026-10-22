@@ -193,6 +193,34 @@ fixing the echo problem (see below).
   asserts `set(Op) == MUTATING_OPS | OBSERVING_OPS` so a new op cannot be
   added in one place and forgotten in another.
 
+## Fully-learned cortex (`forge/vision/cortex/`)
+
+`core/learned.py` holds the heads that replaced hand-written inference rules:
+`LearnedTextEncoder` (trainable byte encoder, replaced the parameter-free hash),
+`SlotDetector` (DETR-style slots, replaced greedy NMS), `SceneUnderstandingHead`
+(multi-label attributes + regressed count), `ActionPolicyHead` (the model now
+chooses the action) and `LearnedStabilityHead` (replaced the Schmitt-trigger
+thresholds 0.55/0.22/0.08).
+
+Facts to keep straight:
+
+- The model is `1,678,779` params. The learned heads add under 1 ms; the
+  backbone dominates and scales with the square of the retinal input size.
+  `realtime_config()` (128x128 retina) holds ~95 FPS on 4 CPU cores; the default
+  256x256 retina is ~37 FPS. Quote the input size with any latency number.
+- Training runs all ten loss terms in one pass (predictive, affordance,
+  category, grounding, slots, attributes, count, action, stability). The
+  affordance loss resamples targets to the logits' grid, so a checkpoint is not
+  tied to one input resolution.
+- Legacy checkpoints predate these heads. `load_avcs_weights` treats the new
+  head prefixes as optional, so an old checkpoint still loads and reports
+  `weights_loaded=True` with the new heads left at initialisation. If you change
+  a head name, update `learned_head_prefixes` in `avcs/weights.py` or every old
+  checkpoint silently stops loading.
+- Timing tests must take the minimum over repeated runs, not the mean. On a
+  loaded CI box the mean is dominated by scheduler preemption and a real-time
+  assertion flakes; the minimum is the achievable latency.
+
 ## Real-time screen vision (`forge/vision/`)
 
 Pure-pixel visual awareness of the desktop. Read `docs/SCREEN_VISION.md`. The
@@ -227,6 +255,229 @@ oversight. Traps, both learned the hard way:
   words (`screen`, `mid-tone`, `detailed`) and reads ~0.9 even for a model that
   discriminates nothing. Use `word_report` (macro-F1 + informative accuracy) on
   held-out draws and on a withheld scene category.
+
+## AVCS System 1 (`avcs/`) — audit facts
+
+`avcs/` is a separate system in this repo from `forge/`. Read
+`docs/REALITY_AUDIT.md` before making any claim about it.
+
+- The packaged `runs/weights/candidates/avcs_streaming_cortex_v1.pt`
+  (501,612 params) is **untrained clean random initialization**, reproducible
+  from `create_clean_random_cortex(seed=20261018)` to float32 rounding
+  (max diff 1.7e-7). It qualifies plumbing, not perception. Do not attach
+  accuracy claims to it.
+- System 1 has **no text decoder**. The "description" is deterministic string
+  templating in `avcs/observation.py::_synthesize_description`, not generation.
+  Reading screen text and speaking are System 2's job.
+- Throughput must be quoted with its resolution. The 95.4 FPS headline is a
+  64x64 soak number. Raw forward: 564 FPS @64x64, 106 @256x256, 2.2 @1920x1200.
+  Production letterboxes to 128x128 first (~223 FPS end-to-end).
+- `runs/weights/human_eye_weights.pt` is produced by the real trainer
+  (`avcs/training/train_affordance.py`); when present `HumanEye` loads it
+  (`weights_loaded=True`). It is gitignored, so a fresh checkout lacks it and
+  the tests that need it fail correctly. Never fabricate a placeholder
+  checkpoint to make them pass. Its acceptance numbers are same-distribution
+  synthetic figures, not a generalisation claim.
+- `runs/weights/goal_grounder_best.pt` **is** trained (200,883 params, schema 2,
+  `is_trained=True`). On `datasets/ui_grounding` `test_held_out` it reproduces
+  94.94% top-1 / 3.72 px median via
+  `python3 -m benchmarks.run_ui_grounding_benchmark`. But that split shares a
+  generator with train. On `datasets/cleanroom_system1_v1` (a different
+  generator) the same checkpoint collapses: **0.00% top-1 under the official
+  benchmark's decision rule** (`(in box or within 15 px) and confidence >= 0.35`),
+  and **9.38%** if the confidence gate is dropped and only the argmax within
+  15 px is counted (n=64). The confidence gate is what zeroes it: the shipped
+  checkpoint's calibrated presence threshold sits at **chance** and rejects
+  48.4% of true targets, so `combined_conf` is clipped to 0.1 on the failures
+  and never reaches 0.35. Always quote the split, the generator, *and* the
+  decision rule — the same checkpoint reads 0.00%, 7.81%, or 9.38% depending on
+  which rule is applied, and earlier revisions of this file quoted 28.1% and
+  then 7.81% without naming one.
+- Actuation is hardcoded off: `GoalConditionedGrounder.predict` returns
+  `action_authorized=False` on every call and `AVCSController.locate` raises
+  unless it is true. `test_locate_with_trained_grounder` asserts this, so it is
+  an intended fail-closed invariant. `action_authorized` is never set true
+  anywhere in the repo.
+- `AVCSSystem2Bridge` defaults to `MockReasoningProvider` (a rule engine), not
+  the real `LLMReasoningProvider`. No free-form language is produced by the
+  shipped pipeline; System 1 emits template sentences only.
+- `avcs_system1_v1.pt` is lightly trained (3 epochs, val loss 0.87, 13 s) and
+  `candidate_m3_word_recognizer_v1.pt` is a 132-way closed-vocabulary
+  classifier (69.21% acc), not OCR. Neither implies a perception capability.
+- Test-suite baseline is **dependency-dependent**: install
+  `pyproject.toml [dev]` (`pytest pytest-asyncio build wheel`) plus
+  `torch numpy psutil cryptography fastapi httpx requests Pillow`. With those
+  present, the full suite is **2 failed / 1194 passed / 16 skipped**. The two
+  failures are pre-existing and environment-dependent: the cleanroom-rights
+  test (the shipped attestation binds manifest hash `abde4338…` but the current
+  manifest hashes to `06c6050d…`, so the fail-closed gate reports a binding
+  mismatch first) and the R3 latency test (passes in isolation, fails under
+  full-suite CPU contention). Always quote the installed deps with the number.
+  The Tkinter GUI tests need a display; run them under `Xvfb` and install the
+  `tk8.6` system package (`libtk8.6.so`).
+- Tkinter GUI modules (`avcs/gui.py`, `avcs/runtime/live.py`, the m7 harness)
+  need the system `libtk8.6.so`. They now raise an actionable ImportError
+  instead of an opaque loader error.
+
+## AVCS `forge/vision/cortex/` System 1 — what it actually does
+
+Read `docs/AVCS_CORTEX_REALITY.md`. It is the corrected record; an earlier
+version of this section described the model from its code and was wrong.
+
+- `ArtificialVisualCortex` is **1,678,780 params**. Checkpoint:
+  `runs/weights/avcs_cortex_weights.pt` (loads with 0 missing / 0 unexpected).
+- The cortex **inference path contains no hand-written decision rules**. The
+  Schmitt-trigger stability thresholds, the 2D spatial NMS for hotspots, the
+  `hotspots[:4]` cap, the `("clickable","typeable")` action filter, the
+  char-n-gram hash query embedding and the `* 0.15` residual scale are all
+  gone, replaced by learned heads (`LearnedStabilityHead`, `SlotDetector`,
+  `LearnedTextEncoder`, learned `residual_scale`). Do not reintroduce a
+  threshold in this path.
+- **The remaining collapses are in the corpus, not the model.** Measured
+  (1.7M params, 8 epochs, held-out seeds):
+  - grounding target spread across queries 0.083 (was 0.0046); grounding error
+    0.37 (was 0.53, ≈ random). Text now moves the gaze, but it is not a usable
+    pointer.
+  - action head predicts `click` on 100% of frames: 101/101 correct for
+    clickable scenes, 0/11 for typeable, 0/8 for scrollable. The corpus is ~93%
+    clickable, so the head sits at the majority class.
+  - category accuracy 33%, but **five of eight `UI_CATEGORIES` are rendered by
+    identical code paths** (`browser_webpage`/`form_input` share one branch;
+    `settings_panel`/`media_player`/`desktop_canvas` share another). Confusion
+    is `browser_webpage→form_input` 20/20 and `settings_panel→desktop_canvas`
+    20/20. `editor_code` is 20/20. The model is right; the generator is
+    ambiguous. Do not quote 33% as a model failure without this caveat.
+- Two dataset-level hardcodes were the real cause of the old "degenerate"
+  readings and are now removed: `_action_target` no longer uses a
+  `click > type > scroll` precedence list, and the grounding target is no
+  longer the same titlebar pixel for every frame (`choose_primary()` picks a
+  random element; `points_from_mask()` derives points from the painted mask
+  instead of a hand-maintained list). **If a head collapses again, check the
+  label function before blaming the model.**
+- Kept on purpose: foveal optics constants and architecture hyperparameters
+  (sensor geometry, not decision rules); `_AFFORDANCE_QUERY_NAMES` /
+  `_CATEGORY_TARGET_LABELS` (vocabulary); `CharNGramEncoder`, which is live in
+  the separate legacy `avcs/` HumanEye subsystem.
+- It is **not** a screen-understanding model and it has **no text decoder**.
+  Prose about the screen is System 2, which is not in this repo. Describing
+  System 1 output as natural language is the exact overclaim this section
+  corrects.
+
+
+## Cross-generator grounding: the gap is corpus diversity, not architecture
+
+The `avcs/` grounder is the bridge from "eyes" to "hand". Its real question is
+whether it works on software it has never seen. Measured directly (n=64 cleanroom
+/ n=316 ui_grounding, 15 px tolerance, seed 7, ~950 steps per arm, 200,883-param
+`avcs.goal_grounder.GoalConditionedGrounder`). The scoring rule for these earlier
+arms was not recorded, and the rule changes the number materially — see
+"Decision-rule sensitivity" below. Treat the table as directional and reproduce
+any single cell before quoting it. The rule-named, reproducible numbers are the
+shipped checkpoint's: 94.94% home, 0.00% gated / 9.38% ungated cross-generator.
+
+| arm | train data | steps | ui_grounding | cleanroom |
+|---|---|---|---|---|
+| A | ui_grounding only | 936 | 82.3% | 23.4% |
+| B | cleanroom only | 192 | 5.4% | 64.1% |
+| B_matched | cleanroom only | 928 | 7.6% | 73.4% |
+| C | combined, natural proportions | 936 | 85.1% | 75.0% |
+| C_matched | combined, natural proportions | 950 | **86.1%** | **85.9%** |
+| D2 | combined, full epoch per generator | 1884 | 88.6% | 81.2% |
+
+Reading:
+
+1. **The gap is real and it is memorisation of the generator, not of the
+   concept.** A ui-only model is 82.3% at home and 23.4% abroad.
+2. **It is not undertraining.** B_matched gives cleanroom-only 6x more steps
+   (192 -> 928) and moves the other generator from 5.4% to 7.6%. Ruled out.
+3. **Training on both generators fixes it, at no cost.** C_matched is 86.1% on
+   ui and 85.9% on cleanroom. Adding the second generator also *raised* cleanroom
+   accuracy over the cleanroom-only arm (73.4% -> 85.9%). Multi-generator data
+   regularises rather than trades off.
+4. **Balanced sampling must not shrink either arm's budget.** Arm D in the first
+   run was misbuilt: "balanced" capped each epoch at 512 samples, starving the
+   1256-sample ui arm, and it scored 35.8%/54.7%. D2, which gives each generator
+   a full epoch, is the correct construction. Do not quote D as a result.
+
+### Negative results (do not retry)
+
+- **Photometric augmentation does not close the gap.** Matching cleanroom's
+  appearance onto ui_grounding drops ui from 91.5% to 36.1%; matching
+  ui_grounding's appearance onto cleanroom drops cleanroom from 7.81% to 0.00%.
+  (Rule for these earlier arms was not recorded; the same checkpoint reads 0.00%
+  or 9.38% on cleanroom depending on the gate — see "Decision-rule sensitivity".)
+  Training cleanroom with brightness/contrast/gamma/gain jitter moved the other
+  generator 5.4% -> 7.3% (within noise) while costing 8 points at home. The gap
+  is structural, not a white-balance problem.
+- **`streaming_v1_synthetic_0_1` cannot test this.** Its annotations record
+  `object_identity: not_collected`; it has no grounding targets. A third-generator
+  generalisation claim is not measurable with the corpora present.
+
+### Decision-rule sensitivity
+
+The clean-room number is not a single fact; it depends on the rule applied, so a
+figure without its rule is not reproducible. On the same checkpoint, same split
+(n=64), same 15 px tolerance:
+
+| rule | cleanroom top-1 |
+|---|---|
+| argmax within 15 px, no gate | **9.38%** (6/64) |
+| `(in box or 15 px) and confidence >= 0.35` (official runner) | **0.00%** (0/64) |
+
+The official runner's gate is what zeroes it. `predict_point` clips
+`combined_conf` to 0.1 whenever the calibrated presence head says the target is
+absent, and on this corpus that head sits at chance: it rejects 48.4% of true
+targets, so `confidence >= 0.35` is never satisfied on a hit. The checkpoint is
+not more broken than the ungated 9.38% implies; the gate is simply calibrated on
+a distribution that does not transfer.
+
+Reproduce both with
+`python3 -m benchmarks.benchmark_cross_generator_grounding --out benchmarks/results/cross_generator_grounding_goal_grounder_best.json`.
+That command prints both clean-room numbers (gated and ungated) plus the home
+split, and writes the full report including the checkpoint sha256.
+
+### Two architectures share the name `GoalConditionedGrounder`
+
+`avcs/goal_grounder.py` and `avcs/perception/goal_grounder.py` both define a
+class of that name, and they are **different networks**, not duplicates:
+
+| module | keys | params | discriminator | loads |
+|---|---|---|---|---|
+| `avcs/goal_grounder.py` | 81 | 200,883 | `head_conv1` / `heatmap_head` | `goal_grounder_best.pt` |
+| `avcs/perception/goal_grounder.py` | 195 | 1,354,050 | `lateral_*` / `decode_*` FPN | `candidate_m3_highres_v2.pt` |
+
+Both are loadable by their own loader, so neither is stale. The bug is that the
+public API (`avcs.load_grounding_checkpoint`, re-exported from the perception
+module) was hard-wired to the 195-key class, so calling it on the shipped
+81-key checkpoint raised
+`RuntimeError: size mismatch for visual_encoder.stem.conv.weight`. The loader
+now selects the architecture by inspecting the checkpoint's key names and
+fails closed on a mismatch instead of raising an opaque shape error. Add a new
+grounder architecture in one place and update the discriminator, or the
+fail-closed path will reject it.
+
+Note also: `validate_dataset('datasets/cleanroom_system1_v1')` raises
+`SHA-256 mismatch for annotations/train/train_00000.json` — the corpus on disk
+does not match its own manifest, independent of the rights gate.
+
+### Reproducing the combined arm
+
+`avcs/training/train_combined_grounder.py` trains the canonical 200,883-param
+grounder on any subset of `ui_grounding` and `cleanroom_system1_v1` and reports
+per-generator held-out top-1 / rejection / median-error. It reuses the existing
+rights gate (`validate_rights_attestation`) and fails closed: the clean-room arm
+raises rather than silently dropping when the signed approval bundle or an
+intact corpus is missing. Combined checkpoints carry the new
+`multi_generator_grounding_corpus_v1` provenance, accepted by both loaders and
+both `is_trained` gates. `--sampling natural` (default) keeps the proportions in
+the table above; `balanced` equalises expected draws per generator so a small
+corpus is not drowned by a large one. The sampler is the knob the arm-D failure
+turned on: any policy that starves one generator reproduces that failure. Score
+any resulting checkpoint on both splits with
+`python3 -m benchmarks.benchmark_cross_generator_grounding`; a combined model
+should show a small gap, and the gated/ungated pair bounds how much of a
+cross-generator number is the model versus the confidence gate.
+
 
 ## Honest limits
 

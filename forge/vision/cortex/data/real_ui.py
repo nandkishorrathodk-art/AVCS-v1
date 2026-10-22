@@ -186,9 +186,13 @@ class RealUIDataset(Dataset):
         mask_t = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0).float()
         mask_down = F.interpolate(mask_t, size=self.affordance_grid_size, mode="nearest").squeeze().long()
 
-        # Simulated or lightweight text query embedding for top-down cross-attention
-        # In full multimodal training, this can be encoded using a frozen CLIP or MiniLM text tower
-        query_embed = torch.randn(self.latent_dim, dtype=torch.float32)
+        # Query text is carried through as text; the model's learned encoder
+        # produces the embedding at train time, so the dataset stays free of any
+        # hand-built feature.
+        if len(self.samples) > 0:
+            query_text = sample.instruction
+        else:
+            query_text = data.interactive_label()
 
         return {
             "frame_t": frame_t,
@@ -196,7 +200,7 @@ class RealUIDataset(Dataset):
             "affordance_mask": mask_down,
             "category_idx": torch.tensor(cat_idx, dtype=torch.long),
             "target_coord": target_coord,
-            "query_embed": query_embed,
+            "query_text": query_text,
         }
 
 
