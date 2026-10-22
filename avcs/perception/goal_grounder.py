@@ -251,10 +251,13 @@ class GoalConditionedGrounder(nn.Module):
         row, column = divmod(flat_index, heat_w)
         canvas_point = ((column + 0.5) / heat_w, (row + 0.5) / heat_h)
         point = transform.canvas_to_original(canvas_point)
-        if not target_present or not (0.0 <= point[0] < 1.0 and 0.0 <= point[1] < 1.0):
+        px = max(0.0, min(0.999, float(point[0])))
+        py = max(0.0, min(0.999, float(point[1])))
+        in_bounds = (-0.08 <= point[0] <= 1.08) and (-0.08 <= point[1] <= 1.08)
+        if not target_present or not in_bounds:
             point_result = None
         else:
-            point_result = point
+            point_result = (px, py)
         return GroundingPrediction(
             candidate_point_norm=point_result,
             peak_probability=float(logits.sigmoid().flatten()[flat_index]),

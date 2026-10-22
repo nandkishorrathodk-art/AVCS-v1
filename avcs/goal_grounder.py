@@ -484,10 +484,14 @@ class GoalConditionedGrounder(nn.Module):
         threshold = float(self._checkpoint_metadata.get("target_presence_threshold", 0.5))
         target_present = exist_prob >= threshold
 
-        if not target_present or not (0.0 <= orig_point[0] < 1.0 and 0.0 <= orig_point[1] < 1.0):
+        orig_x = max(0.0, min(0.999, float(orig_point[0])))
+        orig_y = max(0.0, min(0.999, float(orig_point[1])))
+        in_bounds = (-0.08 <= orig_point[0] <= 1.08) and (-0.08 <= orig_point[1] <= 1.08)
+
+        if not target_present or not in_bounds:
             point_result = None
         else:
-            point_result = orig_point
+            point_result = (orig_x, orig_y)
 
         probs = torch.sigmoid(hm_logits)
         peak_prob = float(peak_conf[0].item())

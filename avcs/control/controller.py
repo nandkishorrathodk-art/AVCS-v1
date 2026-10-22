@@ -555,14 +555,14 @@ class AVCSController:
                 message=f"Target '{clean_q}' could not be localized with sufficient confidence ({exc}).",
                 latency_ms=dt_ms,
             )
-        if grounding.confidence < 0.20:
+        if grounding.confidence < 0.10:
             dt_ms = (time.perf_counter() - t0) * 1000.0
             return ActionResult(
                 action="double_click" if double_click else "click",
                 target_query=clean_q,
                 success=False,
                 verified=False,
-                message=f"Target '{clean_q}' could not be localized with sufficient confidence ({grounding.confidence:.2f} < 0.20).",
+                message=f"Target '{clean_q}' could not be localized with sufficient confidence ({grounding.confidence:.2f} < 0.10).",
                 latency_ms=dt_ms,
             )
 
