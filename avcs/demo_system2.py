@@ -31,9 +31,15 @@ def run_avcs_system2_demo() -> None:
     # 1. Initialize Central Orchestration Controller
     print("\n[Step 1] Initializing Central AVCSController on CPU...")
     source = SyntheticScreen(width=320, height=240)
+    from pathlib import Path
+    weights_to_use = (
+        "runs/weights/goal_grounder_combined_best.pt"
+        if Path("runs/weights/goal_grounder_combined_best.pt").is_file()
+        else "runs/weights/goal_grounder_best.pt"
+    )
     controller = AVCSController(
         source=source,
-        weights_path="runs/weights/goal_grounder_best.pt",
+        weights_path=weights_to_use,
         device="cpu",
         target_fps=60,
         force_virtual_motor=True,

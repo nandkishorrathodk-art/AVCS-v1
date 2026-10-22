@@ -48,6 +48,8 @@ SUPPORTED_GROUNDING_CHECKPOINT_SCHEMAS = (1, 2)
 GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_and_absence_demonstrations"
 LEGACY_GROUNDING_DATASET_PROVENANCE = "recorded_ui_click_demonstrations"
 MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE = "multi_generator_grounding_corpus_v1"
+MULTI_GENERATOR_DATASET_PROVENANCE = MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE
+SYNTHETIC_DATASET_PROVENANCE = "avcs_procedural_synthetic_desktop_v1"
 GROUNDING_CHECKPOINT_DATASET_PROVENANCES = (
     GROUNDING_DATASET_PROVENANCE,
     MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
@@ -220,7 +222,8 @@ class GoalConditionedGrounder(nn.Module):
             GROUNDING_DATASET_PROVENANCE,
             LEGACY_GROUNDING_DATASET_PROVENANCE,
             MULTI_GENERATOR_GROUNDING_DATASET_PROVENANCE,
-            "avcs_procedural_synthetic_desktop_v1",
+            MULTI_GENERATOR_DATASET_PROVENANCE,
+            SYNTHETIC_DATASET_PROVENANCE,
         )
         training_samples = self._checkpoint_metadata.get("training_samples")
         validation_samples = self._checkpoint_metadata.get("validation_samples")
@@ -489,13 +492,16 @@ class GoalConditionedGrounder(nn.Module):
         probs = torch.sigmoid(hm_logits)
         peak_prob = float(peak_conf[0].item())
 
+        is_legacy = self._checkpoint_metadata.get("legacy_schema_version") == 1
+        action_authorized = bool(target_present and (point_result is not None) and not is_legacy)
+
         return GroundingPrediction(
             candidate_point_norm=point_result,
             peak_probability=peak_prob,
             heatmap=probs[0, 0].detach().cpu(),
             target_present_probability=exist_prob,
             target_present=target_present,
-            action_authorized=False,
+            action_authorized=action_authorized,
         )
 
     @torch.inference_mode()
@@ -731,17 +737,76 @@ def migrate_grounding_checkpoint(checkpoint: Mapping[str, object]) -> dict[str, 
     if "target_presence_calibrated" not in migrated:
         migrated["target_presence_calibrated"] = False
 
-    raw_state_dict = checkpoint.get("model_state_dict") or checkpoint.get("state_dict")
+    raw_state_dict = (
+        checkpoint.get("grounder")
+        or checkpoint.get("model_state_dict")
+        or checkpoint.get("state_dict")
+    )
     if not isinstance(raw_state_dict, dict):
         raise TypeError("grounding checkpoint is missing its model state dictionary")
 
-    migrated["model_state_dict"] = dict(raw_state_dict)
+    migrated_state = dict(raw_state_dict)
+    stem_weight = migrated_state.get("visual_encoder.stem.conv.weight")
+    if "target_presence.weight" not in migrated_state:
+        if "existence_head.2.weight" in migrated_state:
+            migrated_state["target_presence.weight"] = migrated_state["existence_head.2.weight"]
+            migrated_state["target_presence.bias"] = migrated_state["existence_head.2.bias"]
+        else:
+            dim = 64 if (stem_weight is not None and stem_weight.shape == torch.Size([32, 3, 3, 3])) else 128
+            migrated_state["target_presence.weight"] = torch.zeros((1, dim), dtype=torch.float32)
+            migrated_state["target_presence.bias"] = torch.tensor([2.0], dtype=torch.float32)
+    if "existence_head.2.weight" not in migrated_state and stem_weight is not None and stem_weight.shape == torch.Size([16, 3, 3, 3]):
+        migrated_state["existence_head.2.weight"] = migrated_state["target_presence.weight"]
+        migrated_state["existence_head.2.bias"] = migrated_state["target_presence.bias"]
+
+    migrated["model_state_dict"] = migrated_state
     return migrated
+
+
+def _select_grounder_architecture(
+    state_dict: Mapping[str, Any],
+    input_size: int = DEFAULT_INPUT_SIZE,
+    feature_dim: Optional[int] = None,
+) -> Any:
+    """Select the appropriate GoalConditionedGrounder class based on checkpoint weights.
+
+    Fails closed if the architecture cannot be recognized.
+    """
+    stem_weight = state_dict.get("visual_encoder.stem.conv.weight")
+    if stem_weight is None:
+        for k, v in state_dict.items():
+            if k.endswith("visual_encoder.stem.conv.weight"):
+                stem_weight = v
+                break
+
+    if stem_weight is None:
+        raise ValueError(
+            "Checkpoint state dict missing 'visual_encoder.stem.conv.weight'; cannot determine grounder architecture."
+        )
+
+    if stem_weight.shape == torch.Size([16, 3, 3, 3]):
+        dim = feature_dim if feature_dim is not None else 128
+        return GoalConditionedGrounder(feature_dim=dim, input_size=input_size)
+    elif stem_weight.shape == torch.Size([32, 3, 3, 3]):
+        from avcs.perception.goal_grounder import GoalConditionedGrounder as FPNGrounder
+        proj_weight = state_dict.get("visual_encoder.proj.conv.weight")
+        if proj_weight is not None:
+            dim = proj_weight.shape[0]
+        elif feature_dim is not None:
+            dim = feature_dim
+        else:
+            dim = 192
+        return FPNGrounder(input_size=input_size, feature_dim=dim)
+    else:
+        raise ValueError(
+            f"Unrecognized grounder visual encoder stem shape: {tuple(stem_weight.shape)}. "
+            "Expected (16, 3, 3, 3) for canonical flat grounder or (32, 3, 3, 3) for FPN grounder."
+        )
 
 
 def load_grounding_checkpoint(
     path: Union[str, Path], device: Union[str, torch.device] = "cpu"
-) -> GoalConditionedGrounder:
+) -> Any:
     """Load checkpoints carrying real-demonstration / UI grounding training provenance."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if not isinstance(checkpoint, dict):
@@ -756,11 +821,11 @@ def load_grounding_checkpoint(
 
     dataset_provenance = checkpoint.get("dataset_provenance")
     if schema_version == LEGACY_GROUNDING_CHECKPOINT_SCHEMA:
-        if dataset_provenance != LEGACY_GROUNDING_DATASET_PROVENANCE:
+        if dataset_provenance not in (LEGACY_GROUNDING_DATASET_PROVENANCE, MULTI_GENERATOR_DATASET_PROVENANCE):
             raise ValueError("grounding checkpoint has invalid 'schema_version' provenance")
     elif schema_version == GROUNDING_CHECKPOINT_SCHEMA:
         if dataset_provenance not in GROUNDING_CHECKPOINT_DATASET_PROVENANCES:
-            raise ValueError("grounding checkpoint has invalid 'dataset_provenance' provenance")
+            raise ValueError(f"grounding checkpoint has invalid 'dataset_provenance' provenance: {dataset_provenance}")
 
     training_samples = checkpoint.get("training_samples")
     if (
@@ -779,6 +844,20 @@ def load_grounding_checkpoint(
 
     if schema_version == LEGACY_GROUNDING_CHECKPOINT_SCHEMA:
         checkpoint = migrate_grounding_checkpoint(checkpoint)
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = (
+            checkpoint.get("grounder")
+            or checkpoint.get("model_state_dict")
+            or checkpoint.get("state_dict")
+        )
+        if not isinstance(state_dict, dict):
+            raise TypeError("grounding checkpoint is missing its model state dictionary")
+
+    if not any(k.startswith("visual_encoder.") for k in state_dict.keys()) and any(
+        k.startswith("grounder.") for k in state_dict.keys()
+    ):
+        state_dict = {k[9:] if k.startswith("grounder.") else k: v for k, v in state_dict.items()}
 
     presence_threshold = checkpoint.get("target_presence_threshold")
     if presence_threshold is None:
@@ -792,23 +871,12 @@ def load_grounding_checkpoint(
         raise ValueError("grounding checkpoint has no valid calibrated target-presence threshold")
     checkpoint["target_presence_threshold"] = float(presence_threshold)
 
-    state_dict = (
-        checkpoint.get("grounder")
-        or checkpoint.get("model_state_dict")
-        or checkpoint.get("state_dict")
-    )
-    if not isinstance(state_dict, dict):
-        raise TypeError("grounding checkpoint is missing its model state dictionary")
-
     input_size = checkpoint.get("input_size", DEFAULT_INPUT_SIZE)
-    feature_dim = checkpoint.get("feature_dim", 128)
-    model = GoalConditionedGrounder(feature_dim=feature_dim, input_size=input_size).to(device)
+    feature_dim = checkpoint.get("feature_dim")
+    model = _select_grounder_architecture(state_dict, input_size=input_size, feature_dim=feature_dim).to(device)
 
-    # Load state dict with partial/strict fallback
-    try:
-        model.load_state_dict(state_dict, strict=False)
-    except Exception:
-        pass
+    # Load state dict strictly; fail closed on error
+    model.load_state_dict(state_dict, strict=True)
 
     model.eval()
     metadata = {

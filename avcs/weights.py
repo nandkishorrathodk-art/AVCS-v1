@@ -22,6 +22,7 @@ DEFAULT_WEIGHTS_URL = (
 WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
 HUMAN_EYE_WEIGHTS_FILENAME = "human_eye_weights.pt"
 GOAL_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_best.pt"
+COMBINED_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_combined_best.pt"
 
 
 def get_default_cache_dir() -> Path:
@@ -85,6 +86,11 @@ def get_human_eye_weights_path(custom_path: Optional[str] = None) -> Optional[st
 
 def get_grounding_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
     """Finds the path to pre-trained GoalConditionedGrounder neural weights."""
+    if custom_path and os.path.isfile(custom_path):
+        return custom_path
+    combined_path = get_weights_path(filename=COMBINED_GROUNDER_WEIGHTS_FILENAME)
+    if combined_path and os.path.isfile(combined_path):
+        return combined_path
     path = get_weights_path(custom_path=custom_path, filename=GOAL_GROUNDER_WEIGHTS_FILENAME)
     if path and os.path.isfile(path):
         return path
