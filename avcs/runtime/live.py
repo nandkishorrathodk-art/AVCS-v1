@@ -149,7 +149,7 @@ class CausalActionMiner:
 
 
 def run_eyes_and_hands_stream(
-    seconds: float = 10.0,
+    seconds: float = 0.0,
     fps: int = 60,
     capture_mode: str = "desktop",
     auto_servo: bool = False,
@@ -159,6 +159,8 @@ def run_eyes_and_hands_stream(
     commentary: bool = False,
     fast: bool = False,
     loop_video: bool = False,
+    stride: int = 1,
+    device: Optional[str] = None,
 ) -> None:
     """Streams live desktop or video perception with continuous Eyes telemetry and Hand coordination."""
     print("=" * 78)
@@ -166,14 +168,30 @@ def run_eyes_and_hands_stream(
     print("=" * 78)
 
     video_ended = False
+    total_video_frames = 0
+    stride = max(1, stride)
+    if device is None:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            device = "cpu"
+
     if video_path:
         try:
             import cv2
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 raise FileNotFoundError(f"Cannot open video stream or file: {video_path}")
+            total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            v_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            dur_mins = (total_video_frames / v_fps) / 60.0 if total_video_frames > 0 else 0.0
+
             def grab_video_frame() -> np.ndarray:
                 nonlocal video_ended
+                if stride > 1:
+                    for _ in range(stride - 1):
+                        cap.grab()
                 ret, frame = cap.read()
                 if not ret:
                     if loop_video:
@@ -190,13 +208,14 @@ def run_eyes_and_hands_stream(
             source_to_use = FrameSource(grab_video_frame)
             mode_tag = "Fast Video Stream" if fast else f"Video Stream (Target: {fps} FPS)"
             print(f"[*] Initializing {mode_tag}: {video_path}...")
+            print(f"[*] Video Scope: {total_video_frames:,} total frames (~{dur_mins:.1f} mins) | Device: {device.upper()} | Stride: {stride}x")
         except ImportError:
             raise ImportError("OpenCV (cv2) is required to stream video files. Install via: pip install opencv-python")
     else:
         source_to_use = capture_mode
         print(f"[*] Initializing Biological Vision Stream (Source: {capture_mode}, Target: {fps} FPS)...")
 
-    client = avcs.eye(source=source_to_use, fps=fps, force_virtual_motor=virtual_only)
+    client = avcs.eye(source=source_to_use, fps=fps, force_virtual_motor=virtual_only, device=device)
     state = client.perceive()
     print(f"[*] Human Eye Online. Initial Gaze Fixation: ({state.gaze_fixation[0]:.3f}, {state.gaze_fixation[1]:.3f})")
     print(f"[*] Motor Servoing Driver: {'Virtual Driver' if virtual_only else 'Native Win32 Driver'}")
@@ -310,6 +329,11 @@ def run_eyes_and_hands_stream(
 
             # Real-time streaming status line
             mined_str = f" | Actions: {miner.mined_count}" if miner.mined_count > 0 else ""
+            progress_str = ""
+            if total_video_frames > 0:
+                pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) if 'cv2' in sys.modules else 0
+                pct = min(100.0, (pos / total_video_frames) * 100.0) if total_video_frames > 0 else 0.0
+                progress_str = f" | Video: {pct:4.1f}%"
             sys.stdout.write(
                 f"\r[TICK #{state.frame_index:04d}] "
                 f"FPS: {state.fps:4.1f} | "
@@ -318,6 +342,7 @@ def run_eyes_and_hands_stream(
                 f"Affordances: {aff_count:2d} | "
                 f"Motion: {state.motion_magnitude:.3f} ({moving_str}) | "
                 f"Stability: {state.stability:<8}"
+                f"{progress_str}"
                 f"{loss_str}"
                 f"{mined_str}"
             )
@@ -401,6 +426,8 @@ def main() -> None:
     parser.add_argument("--talk", "--commentary", dest="commentary", action="store_true", help="Live conversational commentary while watching video")
     parser.add_argument("--fast", action="store_true", help="Process video at maximum compute speed without artificial FPS delays")
     parser.add_argument("--loop", action="store_true", help="Loop video infinitely until --seconds duration is reached")
+    parser.add_argument("--stride", type=int, default=1, help="Process every Nth frame (e.g. 2 or 3 to accelerate full-length video)")
+    parser.add_argument("--device", type=str, default=None, help="Hardware device (cuda or cpu)")
     args = parser.parse_args()
 
     if args.gui:
@@ -419,6 +446,8 @@ def main() -> None:
             commentary=args.commentary,
             fast=args.fast,
             loop_video=args.loop,
+            stride=args.stride,
+            device=args.device,
         )
 
 
