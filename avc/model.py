@@ -254,6 +254,7 @@ class ArtificialVisualCortex(nn.Module):
         target_fixation: Optional[Tuple[float, float]] = None,
         cursor_position: Optional[Tuple[float, float]] = None,
         text_embedding: Optional[torch.Tensor] = None,
+        text_query: Optional[str] = None,
         device: Optional[torch.device | str] = None,
     ) -> CortexState:
         """High-level real-time perception interface."""
@@ -266,6 +267,10 @@ class ArtificialVisualCortex(nn.Module):
         retinal_view = self.retina.extract_views(frame, target_fixation=target_fixation)
         periph = retinal_view.peripheral.to(device)
         fov = retinal_view.foveal.to(device)
+
+        if text_embedding is None and text_query:
+            if hasattr(self.learned_heads, "text_encoder"):
+                text_embedding = self.learned_heads.text_encoder(text_query)
 
         if text_embedding is not None:
             text_embedding = text_embedding.to(device)

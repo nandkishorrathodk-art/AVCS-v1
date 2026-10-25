@@ -1,6 +1,6 @@
 """AVC Enterprise Locked Distribution Builder.
 
-Packages the Artificial Visual Cortex (AVC) standalone neural package with:
+Packages the Artificial Visual Cortex (AVC) standalone neural package from packages/avc:
 1. AES-256-GCM encrypted weights vault (.avcs)
 2. 100% Volatile RAM in-memory decryption
 3. Zero plaintext .pt files in final distribution wheel
@@ -17,7 +17,8 @@ import zipfile
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT_DIR))
+PACKAGE_DIR = ROOT_DIR / "packages" / "avc"
+sys.path.insert(0, str(PACKAGE_DIR))
 
 from avc.vault import ModelVault
 
@@ -25,13 +26,18 @@ DEFAULT_COMMUNITY_KEY = "avc-community-free-2026"
 
 
 def encrypt_weights(api_key: str = DEFAULT_COMMUNITY_KEY) -> Path:
-    """Encrypts avcs_cortex_weights.pt into avcs_cortex_weights.avcs vault."""
-    weights_dir = ROOT_DIR / "avc" / "weights"
+    """Encrypts avcs_cortex_weights.pt into avcs_cortex_weights.avcs vault in package tree."""
+    weights_dir = PACKAGE_DIR / "avc" / "weights"
     pt_path = weights_dir / "avcs_cortex_weights.pt"
     vault_path = weights_dir / "avcs_cortex_weights.avcs"
 
     if not pt_path.exists():
-        raise FileNotFoundError(f"Source weight checkpoint not found: {pt_path}")
+        # Fallback to root avc weights if needed
+        root_pt = ROOT_DIR / "avc" / "weights" / "avcs_cortex_weights.pt"
+        if root_pt.exists():
+            shutil.copy2(str(root_pt), str(pt_path))
+        else:
+            raise FileNotFoundError(f"Source weight checkpoint not found: {pt_path}")
 
     print(f"\n[1/5] Encrypting AVC Neural Weights -> {vault_path.name}...")
     ModelVault.encrypt_checkpoint(pt_path, vault_path, api_key=api_key)
@@ -43,71 +49,81 @@ def encrypt_weights(api_key: str = DEFAULT_COMMUNITY_KEY) -> Path:
     state = ModelVault.decrypt_to_ram(vault_path, api_key=api_key)
     print(f"      * Verification Passed: {len(state)} tensors loaded into RAM (0 disk leaks).")
 
+    # Also sync vault to root avc for local development
+    root_vault = ROOT_DIR / "avc" / "weights" / "avcs_cortex_weights.avcs"
+    shutil.copy2(str(vault_path), str(root_vault))
+
     return vault_path
 
 
 def compile_bytecode() -> None:
     """Pre-compile AVC Python modules to bytecode."""
     print("\n[3/5] Pre-compiling AVC modules to bytecode...")
-    avc_dir = ROOT_DIR / "avc"
+    avc_dir = PACKAGE_DIR / "avc"
     compileall.compile_dir(str(avc_dir), force=True, quiet=1)
     print("      * Bytecode pre-compilation complete.")
 
 
 def build_wheel() -> Path:
-    """Builds the binary wheel package using setup_avc.py."""
+    """Builds the binary wheel package from packages/avc with zero plaintext .pt leaks."""
     print("\n[4/5] Building AVC distribution wheel (.whl)...")
-    dist_dir = ROOT_DIR / "packages" / "avc" / "dist"
-    dist_dir.mkdir(parents=True, exist_ok=True)
+    dist_dir = PACKAGE_DIR / "dist"
+    build_dir = PACKAGE_DIR / "build"
+    egg_info_dir = PACKAGE_DIR / "avc.egg-info"
+    backup_pt_dir = PACKAGE_DIR / ".pt_weights_backup_avc"
+    weights_dir = PACKAGE_DIR / "avc" / "weights"
 
-    setup_path = ROOT_DIR / "setup_avc.py"
-    with open(setup_path, "r", encoding="utf-8") as f:
-        original_setup = f.read()
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    if egg_info_dir.exists():
+        shutil.rmtree(egg_info_dir)
 
-    # Modify package_data to bundle .avcs and exclude .pt, and ensure cryptography in install_requires
-    locked_setup = original_setup.replace(
+    # Stash .pt weights outside package tree during build
+    backup_pt_dir.mkdir(parents=True, exist_ok=True)
+    moved_pts: list[tuple[Path, Path]] = []
+    for pt_file in weights_dir.glob("*.pt"):
+        dest = backup_pt_dir / pt_file.name
+        shutil.move(str(pt_file), str(dest))
+        moved_pts.append((dest, pt_file))
+
+    pyproject_path = PACKAGE_DIR / "pyproject.toml"
+    with open(pyproject_path, "r", encoding="utf-8") as f:
+        original_pyproject = f.read()
+
+    locked_pyproject = original_pyproject.replace(
         '"weights/*.pt"',
         '"weights/*.avcs"',
     )
-    if '"cryptography>=3.4.0"' not in locked_setup:
-        locked_setup = locked_setup.replace(
-            '"Pillow>=9.0.0",',
-            '"Pillow>=9.0.0",\n        "cryptography>=3.4.0",',
-        )
 
     try:
-        with open(setup_path, "w", encoding="utf-8") as f:
-            f.write(locked_setup)
+        with open(pyproject_path, "w", encoding="utf-8") as f:
+            f.write(locked_pyproject)
 
         cmd = [
             sys.executable,
             "-m",
-            "pip",
-            "wheel",
-            ".",
-            "-f",
-            "setup_avc.py",
-            "--no-deps",
-            "--wheel-dir",
+            "build",
+            "--wheel",
+            "--outdir",
             str(dist_dir),
         ]
-        # Alternatively use setup.py bdist_wheel directly
-        cmd = [
-            sys.executable,
-            "setup_avc.py",
-            "bdist_wheel",
-            "--dist-dir",
-            str(dist_dir),
-        ]
-        subprocess.check_call(cmd, cwd=str(ROOT_DIR))
+        subprocess.check_call(cmd, cwd=str(PACKAGE_DIR))
 
     finally:
-        with open(setup_path, "w", encoding="utf-8") as f:
-            f.write(original_setup)
+        with open(pyproject_path, "w", encoding="utf-8") as f:
+            f.write(original_pyproject)
 
-    wheels = sorted(dist_dir.glob("*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Restore .pt files
+        for backup_dest, original_pt in moved_pts:
+            if backup_dest.exists():
+                shutil.move(str(backup_dest), str(original_pt))
+        if backup_pt_dir.exists():
+            shutil.rmtree(backup_pt_dir)
+
+    # Find the newest wheel starting with avc-
+    wheels = sorted(dist_dir.glob("avc-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not wheels:
-        raise RuntimeError("Wheel generation failed; no .whl found in dist/")
+        raise RuntimeError("Wheel generation failed; no avc-*.whl found in packages/avc/dist/")
     return wheels[0]
 
 

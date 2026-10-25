@@ -1,6 +1,7 @@
 """ScreenEye: Developer-facing Sensory Vision SDK for Computer-Use AI Agents."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple, Union
@@ -8,15 +9,19 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from avc.model import ArtificialVisualCortex, CortexState
 from avc.config import CortexConfig, realtime_config
+from avc.model import ArtificialVisualCortex, CortexState
 
 
 def default_weights_path() -> Path:
+    key = os.environ.get("AVC_API_KEY") or os.environ.get("AVCS_API_KEY") or os.environ.get("AVCS_KEY")
     vault_path = Path(__file__).parent / "weights" / "avcs_cortex_weights.avcs"
-    if vault_path.exists():
+    pt_path = Path(__file__).parent / "weights" / "avcs_cortex_weights.pt"
+    if vault_path.exists() and (key or not pt_path.exists()):
         return vault_path
-    return Path(__file__).parent / "weights" / "avcs_cortex_weights.pt"
+    if pt_path.exists():
+        return pt_path
+    return vault_path
 
 
 class ScreenEye:
@@ -66,37 +71,31 @@ class ScreenEye:
         if self._sct is not None:
             monitor = self._sct.monitors[1] if len(self._sct.monitors) > 1 else self._sct.monitors[0]
             sct_img = self._sct.grab(monitor)
-            # Convert BGRA to RGB
-            img = np.frombuffer(sct_img.raw, dtype=np.uint8)
-            img = img.reshape((sct_img.height, sct_img.width, 4))
-            return np.ascontiguousarray(img[:, :, :3][:, :, ::-1])
-        # Synthetic fallback if mss is not installed
+            # BGRA -> RGB
+            frame = np.array(sct_img, dtype=np.uint8)[:, :, :3][:, :, ::-1]
+            return np.ascontiguousarray(frame)
+
+        # Fallback if mss is unavailable or headless
         return np.zeros((1080, 1920, 3), dtype=np.uint8)
 
     def perceive(
         self,
         frame: Optional[np.ndarray] = None,
-        query: Optional[str] = None,
         cursor_position: Optional[Tuple[float, float]] = None,
+        task_query: Optional[str] = None,
     ) -> CortexState:
-        """Perceive a provided frame or grab a fresh frame from the display."""
-        if frame is None:
-            frame = self.grab_frame()
-
-        text_emb = None
-        if query:
-            text_emb = self.cortex.encode_query(query, device=torch.device(self.device))
-
+        """Run real-time neural perception on the provided or captured screen frame."""
+        target_frame = frame if frame is not None else self.grab_frame()
         return self.cortex.perceive(
-            frame=frame,
+            frame=target_frame,
             cursor_position=cursor_position,
-            text_embedding=text_emb,
+            text_query=task_query,
             device=self.device,
         )
 
-    def capture_and_perceive(self, query: Optional[str] = None) -> CortexState:
-        """One-call screen grab and perception."""
-        return self.perceive(frame=None, query=query)
+    def capture_and_perceive(self, task_query: Optional[str] = None) -> CortexState:
+        """Capture primary display and execute full cortical perception pipeline."""
+        return self.perceive(task_query=task_query)
 
     def close(self) -> None:
         if self._sct is not None:

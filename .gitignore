@@ -17,6 +17,7 @@ runs/weights/*
 !runs/weights/candidates/*.pt
 !runs/weights/candidates/*.json
 !avc/weights/*.pt
+!packages/avc/avc/weights/*.pt
 *.pth
 *.safetensors
 *.onnx
@@ -24,6 +25,9 @@ kaggle_logs*/
 build/
 dist/
 *.egg-info/
+packages/**/build/
+packages/**/dist/
+packages/**/.pt_weights_backup_avc/
 pilot-results/
 m7-results/
 m8-live-results/

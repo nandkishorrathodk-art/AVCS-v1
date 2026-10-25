@@ -15,14 +15,17 @@ from avc import (
     ModelVault,
     ScreenEye,
     VaultSecurityError,
-    default_weights_path,
     load_cortex,
 )
 
 
+def get_pt_checkpoint() -> Path:
+    return Path(__file__).parent.parent / "avc" / "weights" / "avcs_cortex_weights.pt"
+
+
 def test_avc_vault_encrypt_and_decrypt(tmp_path: Path):
     """Test encrypting and decrypting full 1.68M parameter AVC cortex model."""
-    pt_path = default_weights_path()
+    pt_path = get_pt_checkpoint()
     if not pt_path.exists():
         pytest.skip("avcs_cortex_weights.pt not found")
 
@@ -48,7 +51,7 @@ def test_avc_vault_encrypt_and_decrypt(tmp_path: Path):
 
 def test_avc_load_cortex_from_vault(tmp_path: Path):
     """Test load_cortex instantiating directly from encrypted .avcs vault."""
-    pt_path = default_weights_path()
+    pt_path = get_pt_checkpoint()
     if not pt_path.exists():
         pytest.skip("avcs_cortex_weights.pt not found")
 
@@ -76,7 +79,7 @@ def test_avc_load_cortex_from_vault(tmp_path: Path):
 
 def test_screen_eye_with_vault(tmp_path: Path):
     """Test ScreenEye SDK initializing from encrypted .avcs vault."""
-    pt_path = default_weights_path()
+    pt_path = get_pt_checkpoint()
     if not pt_path.exists():
         pytest.skip("avcs_cortex_weights.pt not found")
 

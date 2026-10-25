@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import List, Optional
@@ -298,7 +299,7 @@ def run_check() -> int:
     # 2. Fovea Reader
     try:
         reader = FoveaReader()
-        print(f"[*] Fovea Reader (Pure-Pixel): OK (zoom_res={reader.zoom_res}px)")
+        print(f"[*] Fovea Reader (Pure-Pixel): OK (crop_size={reader.crop_size}px)")
     except Exception as e:
         print(f"[!] Fovea Reader: FAILED ({e})")
         return 1
@@ -342,7 +343,11 @@ def main() -> None:
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
     parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks")
+    parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
     args = parser.parse_args()
+
+    if args.api_key:
+        os.environ["AVCS_API_KEY"] = args.api_key
 
     if args.check:
         sys.exit(run_check())
