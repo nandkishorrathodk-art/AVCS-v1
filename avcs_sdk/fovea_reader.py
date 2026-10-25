@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,6 +22,24 @@ class FovealElement:
     center_norm: Tuple[float, float]  # Exact normalized centroid (x, y)
     bbox_pixels: Tuple[int, int, int, int] # (left, top, width, height) in native frame
     confidence: float                 # Confidence score [0, 1]
+    # The high-acuity native crop itself. Held locally only; it must not be
+    # forwarded to System 2 (see docs/AVCS_ENGINEERING_RULES.md). Excluded from
+    # equality/hash so the frozen dataclass keeps working with an array field.
+    patch: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
+    contrast: float = 0.0             # std of the grayscale crop (texture metric)
+    edge_density: float = 0.0         # mean gradient magnitude of the crop (texture metric)
+
+    def describe(self) -> str:
+        """Short pixel-derived label, e.g. ``interactive_control at (0.50, 0.50)``.
+
+        The ``at (x, y)`` suffix is deliberate: ``LiveNarrator`` rewrites it into
+        a spatial region name, and the System 2 prompt strips it, so raw
+        coordinates never leave System 1.
+        """
+        label = self.text.strip() or self.category
+        x, y = self.center_norm
+        return f"{label} at ({x:.2f}, {y:.2f})"
+
 
 
 class FoveaReader:
@@ -63,6 +81,23 @@ class FoveaReader:
         y1 = max(0, y2 - crop_h)
         return full_frame[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1)
 
+    def measure_texture(self, crop: np.ndarray) -> Tuple[float, float]:
+        """Return (contrast, edge_density) for a crop, computed once and shared.
+
+        ``contrast`` is the grayscale standard deviation; ``edge_density`` is the
+        mean gradient magnitude. Both are the same quantities
+        ``summarize_foveal_patches`` reports, so a caller can rank elements on
+        the same scale it already sees in the System 2 prompt.
+        """
+        if crop.size == 0 or crop.ndim < 2:
+            return 0.0, 0.0
+        gray = np.mean(crop, axis=-1) if crop.ndim == 3 else crop
+        gray = gray.astype(np.float32)
+        contrast = float(np.std(gray))
+        gy, gx = np.gradient(gray)
+        edge_density = float(np.mean(np.hypot(gx, gy)))
+        return contrast, edge_density
+
     def read_text(self, crop: np.ndarray) -> str:
         """Extracts text from a cropped UI patch with zero vocabulary limits."""
         if crop.size == 0:
@@ -96,6 +131,7 @@ class FoveaReader:
             conf = float(spot[3]) if len(spot) > 3 else 1.0
 
             crop, bbox = self.crop_element(full_frame, x, y)
+            contrast, edge_density = self.measure_texture(crop)
             text = self.read_text(crop)
             elements.append(
                 FovealElement(
@@ -104,6 +140,9 @@ class FoveaReader:
                     center_norm=(x, y),
                     bbox_pixels=bbox,
                     confidence=conf,
+                    patch=crop,
+                    contrast=contrast,
+                    edge_density=edge_density,
                 )
             )
         return elements
