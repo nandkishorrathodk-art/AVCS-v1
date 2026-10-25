@@ -127,7 +127,7 @@ class LLMBridge:
         self.model_name = (
             model_name
             or os.environ.get("AVCS_LLM_MODEL")
-            or "gemini-2.5-flash"
+            or "gemini-flash-lite-latest"
         )
         self.base_url = (
             base_url
