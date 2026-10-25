@@ -434,6 +434,16 @@ class FastAffordanceHead(nn.Module):
             is_peak = (heat == max_pool) & (heat >= threshold)
             if margin > 0.0:
                 is_peak = is_peak & ((heat - static_heat) >= margin)
+            # The 3x3 conv stack zero-pads at the image border, which drives the
+            # outermost feature cells to a spurious high activation on bright
+            # frames (a uniform white frame peaks at 0.83 in cell (0,0)). Those
+            # cells carry no spatial evidence, so exclude the 1-cell border ring
+            # from being a peak. Positive frames lose at most 0.4% of their
+            # detections to this.
+            is_peak[0, :] = False
+            is_peak[-1, :] = False
+            is_peak[:, 0] = False
+            is_peak[:, -1] = False
 
             peak_indices = torch.nonzero(is_peak, as_tuple=False)
             if len(peak_indices) == 0:
@@ -466,6 +476,16 @@ class FastAffordanceHead(nn.Module):
                 heat_4d = heat.unsqueeze(0).unsqueeze(0)
                 max_pool = F.max_pool2d(heat_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
                 is_peak = (heat == max_pool) & (heat >= 0.15) & (heat > heat.min() + 0.02)
+                # The lower absolute threshold must not bypass the competitive
+                # margin against static background, or flat frames (blank
+                # wallpapers, mid-gray) produce false-positive hotspots.
+                if margin > 0.0:
+                    is_peak = is_peak & ((heat - static_heat) >= margin)
+                # Same padding-artifact exclusion as the primary path.
+                is_peak[0, :] = False
+                is_peak[-1, :] = False
+                is_peak[:, 0] = False
+                is_peak[:, -1] = False
                 peak_indices = torch.nonzero(is_peak, as_tuple=False)
                 if len(peak_indices) == 0:
                     continue
@@ -485,31 +505,11 @@ class FastAffordanceHead(nn.Module):
                         best_at_cell[(py, px)] = item
             candidate_peaks = list(best_at_cell.values())
 
-        if not candidate_peaks and feat.abs().max() > 1e-4:
-            # 2. Saliency Fallback: High-contrast cortical feature activations
-            sal = feat.abs().mean(dim=1)[0]  # (H, W)
-            if (sal.max() - sal.min()) > 0.05 and sal.std() > 0.01:
-                sal_min = sal.min()
-                sal_max = sal.max()
-                sal_norm = (sal - sal_min) / (sal_max - sal_min + 1e-6)
-                sal_4d = sal_norm.unsqueeze(0).unsqueeze(0)
-                max_pool = F.max_pool2d(sal_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
-                is_peak = (sal_norm == max_pool) & (sal_norm >= 0.35) & (sal_norm > sal_norm.min() + 0.05)
-                peak_indices = torch.nonzero(is_peak, as_tuple=False)
-                if len(peak_indices) > 0:
-                    vals = sal_norm[peak_indices[:, 0], peak_indices[:, 1]]
-                    if len(vals) > top_k:
-                        top_order = torch.argsort(vals, descending=True)[:top_k]
-                        peak_indices = peak_indices[top_order]
-                        vals = vals[top_order]
-                    for idx in range(len(peak_indices)):
-                        py = int(peak_indices[idx, 0].item())
-                        px = int(peak_indices[idx, 1].item())
-                        val = float(vals[idx].item())
-                        norm_x = (px + 0.5) / float(W)
-                        norm_y = (py + 0.5) / float(H)
-                        best_at_cell[(py, px)] = (float(norm_x), float(norm_y), 'clickable', round(val, 3))
-                candidate_peaks = list(best_at_cell.values())
+        # A pure-saliency fallback used to run here: any spatial variation in the
+        # cortical features (including blank wallpapers and flat gradients) was
+        # relabelled "clickable" with a normalised confidence of 1.0. That is a
+        # fabricated affordance with no support from the learned head, so the
+        # function now returns no hotspots when the affordance head is silent.
 
         # Sort candidate peaks by confidence descending
         candidate_peaks.sort(key=lambda x: x[3], reverse=True)

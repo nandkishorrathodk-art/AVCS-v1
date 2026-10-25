@@ -5,20 +5,20 @@ and dynamic obstacle recovery.
 """
 from __future__ import annotations
 
-from avcs.cognitive.planner import (
+from .planner import (
     CognitivePlanner,
     ExecutionState,
     PlanGraph,
     PlanStep,
     StepStatus,
 )
-from avcs.cognitive.recovery import (
+from .recovery import (
     ObstacleEvent,
     ObstacleRecoveryManager,
     ObstacleType,
     RecoveryDirective,
 )
-from avcs.cognitive.workflow import (
+from .workflow import (
     ApplicationRole,
     DataTransferBuffer,
     WindowContext,

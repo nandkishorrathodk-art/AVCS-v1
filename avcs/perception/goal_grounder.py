@@ -262,13 +262,18 @@ class GoalConditionedGrounder(nn.Module):
             point_result = None
         else:
             point_result = (px, py)
+        # Fail-closed invariant (docs/REALITY_AUDIT.md section 5): the gate must
+        # be False on every call. The presence head saturates near 1.0 on
+        # out-of-distribution frames, so a computed gate fails open. See the
+        # equivalent fix in avcs/goal_grounder.py.
+        action_authorized = False
         return GroundingPrediction(
             candidate_point_norm=point_result,
             peak_probability=float(logits.sigmoid().flatten()[flat_index]),
             heatmap=probabilities[0, 0].detach().cpu(),
             target_present_probability=target_present_probability,
             target_present=target_present,
-            action_authorized=bool(target_present and (point_result is not None) and self._checkpoint_metadata.get('legacy_schema_version') != 1),
+            action_authorized=action_authorized,
         )
 
     @torch.inference_mode()
