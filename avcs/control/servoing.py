@@ -66,7 +66,7 @@ class NeuromuscularServoingResult:
     total_waypoints: int
     fitts_index_of_difficulty: float
     success: bool
-    trajectory: Optional[List[NeuromuscularWaypoint]] = None
+    trajectory: Optional[List[NeuromuscularTrajectoryPoint]] = None
 @dataclass(frozen=True)
 class MotorAction:
     """Action representation for motor execution matching PROJECT.md:67."""

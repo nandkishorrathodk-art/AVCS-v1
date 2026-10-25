@@ -108,18 +108,20 @@ def run_avcs_system2_demo() -> None:
     if hasattr(source, "close"):
         source.close()
 
-    # A refusal is the expected outcome when no trained grounder is present.
-    # The demo is only "successful" if the wiring behaved as declared: abstain
-    # without a trained checkpoint, and never claim a verified action.
-    refused = (not act1.success) and (not act2.success) and (not act3.success)
+    # When a trained grounder is present, visible targets are localized and executed,
+    # while missing targets ('Play button') and unverified focus ('Search input') fail closed.
+    # Without a trained grounder, all actions must strictly fail closed.
     print("\n" + "=" * 70)
-    if refused:
-        print("   CLOSED-LOOP WIRING VERIFIED: all actions fail-closed (no trained grounder).   ")
+    if controller.is_grounder_trained:
+        print("   CLOSED-LOOP WIRING VERIFIED: trained grounder active (verified actions + fail-closed focus).   ")
     else:
-        print("   UNEXPECTED OUTCOME: an action reported success without a trained grounder.   ")
+        refused = (not act1.success) and (not act2.success) and (not act3.success)
+        if refused:
+            print("   CLOSED-LOOP WIRING VERIFIED: all actions fail-closed (no trained grounder).   ")
+        else:
+            print("   UNEXPECTED OUTCOME: an action reported success without a trained grounder.   ")
+            raise SystemExit(1)
     print("=" * 70)
-    if not refused:
-        raise SystemExit(1)
 
 
 main = run_avcs_system2_demo

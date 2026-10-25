@@ -160,6 +160,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "AVCSSystem1V1": ("avcs.perception.system1_v1", "AVCSSystem1V1"),
     "VisualStateObservation": ("avcs.perception.visual_state", "VisualStateObservation"),
     "load_system1": ("avcs.perception.system1_v1", "load_system1"),
+    "execute_goal": ("avcs", "execute_goal"),
 }
 
 __all__ = [
@@ -267,8 +268,17 @@ __all__ = [
     "AVCSSystem1V1",
     "VisualStateObservation",
     "load_system1",
+    "execute_goal",
     "__version__",
 ]
+
+
+def execute_goal(goal_description: str, **kwargs: Any) -> Any:
+    """Convenience helper to instantiate an AVCSController and execute a goal."""
+    from avcs.control.controller import AVCSController
+
+    controller = AVCSController()
+    return controller.execute_goal(goal_description, **kwargs)
 
 
 def __getattr__(name: str) -> Any:

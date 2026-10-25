@@ -167,28 +167,4 @@ class SemanticSceneTreeExtractor:
 
     def _synthesize_label(self, x: float, y: float, action: str, category: str, index: int) -> str:
         """Synthesizes human-readable label based on spatial position and category."""
-        # Top bar / menu
-        if y < 0.10:
-            if x < 0.15:
-                return "App Menu"
-            elif x > 0.85:
-                return "Close Window" if x > 0.93 else "Window Controls"
-            return f"Header Nav {index}"
-
-        # Sidebar
-        if x < 0.20:
-            return f"Sidebar Option {index}"
-
-        # Footer / bottom actions
-        if y > 0.88:
-            if x > 0.70:
-                return "Submit / Confirm" if action == "clickable" else "Bottom Action"
-            elif x < 0.30:
-                return "Status Item"
-
-        # General content region
-        if action == "typeable":
-            return "Search or Input Field"
-        elif action == "scrollable":
-            return "Content Scroll View"
-        return f"Action Button {index}"
+        return f"{action.capitalize()} {index}"

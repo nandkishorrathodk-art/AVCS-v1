@@ -1,0 +1,197 @@
+{
+  "schema_version": "2.0.0",
+  "timestamp_utc": "2026-10-24T16:49:25.879856+00:00",
+  "milestone": "M5",
+  "verdict": "APPROVE",
+  "all_passed": true,
+  "gates_requested": [
+    "security",
+    "theme",
+    "cross_gen",
+    "blank",
+    "temporal",
+    "latency"
+  ],
+  "gates_passed_count": 6,
+  "gates_failed_count": 0,
+  "checkpoint": {
+    "path": "runs\\weights\\staging\\candidate_streaming_v2.pt",
+    "sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+    "parameter_count": 400765
+  },
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python_version": "3.14.7",
+    "torch_version": "2.14.1+cpu",
+    "threads": 4,
+    "device": "cpu"
+  },
+  "gates": {
+    "security": {
+      "gate_id": "security",
+      "gate_name": "Gate 1: Pure-Pixel Security & Integrity",
+      "passed": true,
+      "threshold_description": "0 prohibited imports, PWR decoupled, SHA-256 matched, params in [400k, 500k], 3 baselines untouched",
+      "measured_value": {
+        "prohibited_violations_count": 0,
+        "parameter_count": 400765,
+        "sha256_match": true,
+        "baselines_ok": true
+      },
+      "sub_metrics": {
+        "files_scanned": 387,
+        "lines_scanned": 112731,
+        "violations": {},
+        "parameter_count": 400765,
+        "computed_sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+        "baseline_hashes": {
+          "runs/weights/goal_grounder_best.pt": "a6b4aaf3461f2a78b8a1776925bf6a1454d886cde9d6e54dd30b9164bd8259f4",
+          "runs/weights/candidates/candidate_m3_word_recognizer_v1.pt": "2a63534dde9545d0f33d0632534349935e0f190646e2ecfd273caecfa5065639",
+          "runs/weights/candidates/avcs_streaming_cortex_v1.pt": "418c541e97b93615eccccd3cf488efaded84cd25f0384b865e3f5022c8c6032d"
+        }
+      },
+      "status_message": "AST Violations: 0, PWR Decoupled: True, Params: 400765 [400k-500k], Checkpoint SHA Match: True, Baselines Verified: True"
+    },
+    "theme": {
+      "gate_id": "theme",
+      "gate_name": "Gate 2: Theme Robustness",
+      "passed": true,
+      "threshold_description": "Edge IoU >= 0.90 under inversion; Inverted UI detection recall >= 85.0%",
+      "measured_value": {
+        "mean_edge_iou": 1.0,
+        "inverted_detection_recall_pct": 99.32,
+        "spatial_proposal_recall_pct": 92.78
+      },
+      "sub_metrics": {
+        "min_edge_iou": 1.0,
+        "frames_tested": 56,
+        "total_positive_cells": 443
+      },
+      "status_message": "Mean Edge-map IoU: 1.0000 (>= 0.90), Inverted 5-Class Detection Recall: 99.32% (>= 85.0%), Spatial Proposal Recall: 92.78%"
+    },
+    "cross_gen": {
+      "gate_id": "cross_gen",
+      "gate_name": "Gate 3: Cross-Generator Generalization",
+      "passed": true,
+      "threshold_description": "ui_grounding >= 80.0%, cleanroom >= 80.0%, gap <= 10.0 pp",
+      "measured_value": {
+        "ui_acc_pct": 100.0,
+        "cleanroom_acc_pct": 98.96,
+        "gap_pp": 1.04
+      },
+      "sub_metrics": {
+        "ui_frames_count": 40,
+        "cleanroom_frames_count": 16,
+        "ui_positive_cells": 347,
+        "cleanroom_positive_cells": 96
+      },
+      "status_message": "UI Grounding Acc: 100.00% (>= 80.0%), Cleanroom Acc: 98.96% (>= 80.0%), Performance Gap: 1.04 pp (<= 10.0 pp)"
+    },
+    "blank": {
+      "gate_id": "blank",
+      "gate_name": "Gate 4: Blank-Screen Safety",
+      "passed": true,
+      "threshold_description": "Exactly 0 false positives across 66 negative screens at thresholds 0.35 and 0.50",
+      "measured_value": {
+        "false_positives_0_35": 0,
+        "false_positives_0_50": 0,
+        "overall_max_prob": 0.3232,
+        "safety_margin": 0.0268
+      },
+      "sub_metrics": {
+        "total_negative_screens": 66,
+        "breakdown_by_subcategory": {
+          "cleanroom_empty": {
+            "count": 16,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.312
+          },
+          "desktop_wallpaper": {
+            "count": 10,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.3232
+          },
+          "solid_gradient": {
+            "count": 20,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.1395
+          },
+          "synthetic_flat": {
+            "count": 6,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.0899
+          },
+          "synthetic_gradient": {
+            "count": 6,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.0518
+          },
+          "synthetic_noise": {
+            "count": 8,
+            "fp_at_0_35": 0,
+            "fp_at_0_50": 0,
+            "max_p": 0.0389
+          }
+        }
+      },
+      "status_message": "False Positives: 0/66 @ 0.35, 0/66 @ 0.50, Overall Max Prob: 0.3232 (< 0.35), Safety Margin: +0.0268"
+    },
+    "temporal": {
+      "gate_id": "temporal",
+      "gate_name": "Gate 5: Temporal & Response Heads",
+      "passed": true,
+      "threshold_description": "Change IoU >= 0.40 (or F1 >= 0.85), Spinner Rec >= 0.85, Action AUC >= 0.85 & Margin >= 0.50",
+      "measured_value": {
+        "change_mean_iou": 0.4606,
+        "change_pixel_f1": 0.4972,
+        "spinner_acc_pct": 100.0,
+        "spinner_recall": 1.0,
+        "spinner_roc_auc": 1.0,
+        "response_acc_pct": 100.0,
+        "response_roc_auc": 1.0,
+        "discrimination_margin": 0.9989
+      },
+      "sub_metrics": {
+        "change_precision": 0.3494,
+        "change_recall": 0.8612,
+        "mean_positive_response_prob": 0.9996,
+        "mean_negative_response_prob": 0.0008
+      },
+      "status_message": "Change IoU: 0.4606 (>= 0.40), Change F1: 0.4972, Spinner Acc: 100.0% (>= 85%), Recall: 1.00 (>= 0.85), Post-Action AUC: 1.0000 (>= 0.85), Margin: 0.9989 (>= 0.50)"
+    },
+    "latency": {
+      "gate_id": "latency",
+      "gate_name": "Gate 6: CPU Inference Performance",
+      "passed": true,
+      "threshold_description": "Preprocessor P50 <= 1.5 ms, Model forward P50/min <= 10.0 ms on 4 CPU threads",
+      "measured_value": {
+        "preprocessor_p50_ms": 0.481,
+        "preprocessor_min_ms": 0.365,
+        "model_p50_ms": 15.574,
+        "model_min_ms": 8.185,
+        "fps": 62.3
+      },
+      "sub_metrics": {
+        "threads": 4,
+        "warmup_iterations": 50,
+        "measured_iterations": 100,
+        "preprocessor_times": {
+          "min": 0.365,
+          "p50": 0.481,
+          "p95": 1.127
+        },
+        "model_times": {
+          "min": 8.185,
+          "p50": 15.574,
+          "p95": 74.871
+        }
+      },
+      "status_message": "Preprocessor: P50=0.481 ms, min=0.365 ms (budget <= 1.5 ms); Model Forward: P50=15.574 ms, min=8.185 ms, P95=74.871 ms (budget <= 10.0 ms); Sustained Throughput: 62.3 FPS"
+    }
+  }
+}

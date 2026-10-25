@@ -1,0 +1,44 @@
+{
+  "schema_version": "2.0.0",
+  "timestamp_utc": "2026-10-25T04:01:34.483179+00:00",
+  "milestone": "M5",
+  "verdict": "APPROVE",
+  "all_passed": true,
+  "gates_requested": [
+    "cross_gen"
+  ],
+  "gates_passed_count": 1,
+  "gates_failed_count": 0,
+  "checkpoint": {
+    "path": "runs\\weights\\staging\\candidate_streaming_v2.pt",
+    "sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+    "parameter_count": 400765
+  },
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python_version": "3.14.7",
+    "torch_version": "2.14.0+cpu",
+    "threads": 4,
+    "device": "cpu"
+  },
+  "gates": {
+    "cross_gen": {
+      "gate_id": "cross_gen",
+      "gate_name": "Gate 3: Cross-Generator Generalization",
+      "passed": true,
+      "threshold_description": "ui_grounding >= 80.0%, cleanroom >= 80.0%, gap <= 10.0 pp",
+      "measured_value": {
+        "ui_acc_pct": 100.0,
+        "cleanroom_acc_pct": 98.96,
+        "gap_pp": 1.04
+      },
+      "sub_metrics": {
+        "ui_frames_count": 40,
+        "cleanroom_frames_count": 16,
+        "ui_positive_cells": 347,
+        "cleanroom_positive_cells": 96
+      },
+      "status_message": "UI Grounding Acc: 100.00% (>= 80.0%), Cleanroom Acc: 98.96% (>= 80.0%), Performance Gap: 1.04 pp (<= 10.0 pp)"
+    }
+  }
+}

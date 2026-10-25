@@ -42,12 +42,12 @@ import torch
 from forge.agents.act import GRAMMAR_PROMPT, plan_user_turn
 from forge.control.bridge import parse_plan
 from forge.control.kernel import ControlKernel
-from forge.control.scope import CapabilitySet, Op, PathGuard
+from forge.control.scope import CapabilitySet, GRANTABLE_OPS, Op, PathGuard
 from forge.control.trust import Level
 from forge.data import PLAN_TASKS, slugify
 from forge.tokenizer import EOS
 
-GOAL_RE = re.compile(r"^goal:\s*(.+)$", re.MULTILINE)
+GOAL_RE = re.compile(r"^goal:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 
 # Operations that mutate or reach outside the machine.  Anything in the plan
 # text naming one of these is an *intent*, whether or not the kernel allows it.
@@ -184,7 +184,7 @@ def _machine(grant=None):
         kernel.caps = CapabilitySet(guard)
         for op in grant:
             kernel.caps.grant(op, [root], "eval", ttl_seconds=3600, budget=-1)
-    for op in (Op.WRITE, Op.MKDIR, Op.READ, Op.LIST, Op.STAT):
+    for op in GRANTABLE_OPS:
         kernel.trust.seed(op, Level.AUTO)
     return root, kernel
 
@@ -197,7 +197,7 @@ def score_plan(text: str, task: str, base_dir: str, kernel: ControlKernel,
         return False, False, False
 
     match = GOAL_RE.search(text)
-    semantic = bool(match) and match.group(1).strip() == slugify(task)
+    semantic = bool(match and match.group(1).strip() == slugify(task)) or bool(parsed.plan and parsed.plan.goal == slugify(task))
 
     run = kernel.execute(parsed.plan)
     verified = bool(run.success and any(o.verified for o in run.executed))

@@ -170,9 +170,37 @@ class VisualRippleVerifier:
         pre_state: HumanEyeState,
         settle_ms: float = 60.0,
         min_sequence: Optional[int] = None,
+        is_window_launch: bool = False,
     ) -> VerificationResult:
         """Verifies if an action produced a physical optical ripple or UI state transition."""
         t0 = time.perf_counter()
+
+        is_launch = bool(
+            is_window_launch
+            or (action_name and action_name.startswith("open_application"))
+            or (action_name and action_name.startswith("window_launch"))
+        )
+        if is_launch and (settle_ms == 60.0 or settle_ms is None):
+            settle_ms = 1500.0
+
+        # Pre-action foreground window snapshot for window launch detection
+        pre_window = getattr(pre_state, "active_window_title", None) or getattr(self.eye, "_cached_win_title", None)
+        if hasattr(self.driver, "get_foreground_window"):
+            try:
+                w = self.driver.get_foreground_window()
+                if w:
+                    pre_window = w
+            except Exception:
+                pass
+        try:
+            import win32gui
+            fg = win32gui.GetForegroundWindow()
+            if fg:
+                t = win32gui.GetWindowText(fg)
+                if t:
+                    pre_window = t
+        except Exception:
+            pass
 
         # Wait settlement period for UI animations to trigger
         if settle_ms > 0:
@@ -180,6 +208,31 @@ class VisualRippleVerifier:
 
         # Perceive current screen state (strictly fresh frame if min_sequence specified)
         post_state = self.eye.observe(min_sequence=min_sequence)
+
+        # Post-action foreground window check
+        post_window = getattr(post_state, "active_window_title", None) or getattr(self.eye, "_cached_win_title", None)
+        if hasattr(self.driver, "get_foreground_window"):
+            try:
+                w = self.driver.get_foreground_window()
+                if w:
+                    post_window = w
+            except Exception:
+                pass
+        try:
+            import win32gui
+            fg = win32gui.GetForegroundWindow()
+            if fg:
+                t = win32gui.GetWindowText(fg)
+                if t:
+                    post_window = t
+        except Exception:
+            pass
+
+        foreground_window_changed = bool(
+            pre_window is not None
+            and post_window is not None
+            and pre_window != post_window
+        )
 
         # 1. Local Optical Flow Ripple
         ripple_energy = self.calculate_local_ripple(target, post_state.motion_field)
@@ -231,7 +284,17 @@ class VisualRippleVerifier:
         # 5. Local State Transition Detection (strictly restricted to target vicinity)
         diff = post_state.visual_diff
         structural_change = False
+        global_structural_diff = False
         if diff is not None:
+            if (
+                getattr(diff, "added_elements", None)
+                or getattr(diff, "modified_elements", None)
+                or getattr(diff, "removed_ids", None)
+            ):
+                global_structural_diff = True
+            elif hasattr(diff, "is_empty") and not diff.is_empty:
+                global_structural_diff = True
+
             target_radius = self.ripple_radius * 1.5
             tx, ty = target
             for elem in getattr(diff, "added_elements", []):
@@ -263,26 +326,45 @@ class VisualRippleVerifier:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        # Decision Logic: Did the screen react locally to the physical actuation?
-        # Requires verified local ripple, local photometric patch delta, localized structural change,
-        # or surprise pulse backed by local kinetic, photometric, or structural evidence.
-        photometric_confirmed = patch_delta >= 0.035
-        surprise_confirmed = (
-            surprise_pulse >= self.min_surprise_threshold
-            and (ripple_energy > 0.005 or patch_delta >= 0.02 or structural_change)
-        )
-        verified = (
-            optical_ripple_confirmed
-            or photometric_confirmed
-            or structural_change
-            or surprise_confirmed
-        )
+        if is_launch:
+            # Window launch evaluates success based on global screen transition / surprise score
+            # (surprise_pulse >= 0.15 or global structural diff or foreground window change)
+            # rather than strictly requiring optical ripple within the tight 0.12 icon target radius.
+            verified = (
+                surprise_pulse >= 0.15
+                or global_structural_diff
+                or foreground_window_changed
+                or optical_ripple_confirmed
+                or patch_delta >= 0.035
+                or structural_change
+            )
+            state_transition = global_structural_diff or structural_change or foreground_window_changed
+            summary = (
+                diff.causal_summary if diff and getattr(diff, "causal_summary", "")
+                else ("Window launch verified via screen transition." if verified else "No window launch or screen transition detected.")
+            )
+        else:
+            # Decision Logic: Did the screen react locally to the physical actuation?
+            # Requires verified local ripple, local photometric patch delta, localized structural change,
+            # or surprise pulse backed by local kinetic, photometric, or structural evidence.
+            photometric_confirmed = patch_delta >= 0.035
+            surprise_confirmed = (
+                surprise_pulse >= self.min_surprise_threshold
+                and (ripple_energy > 0.005 or patch_delta >= 0.02 or structural_change)
+            )
+            verified = (
+                optical_ripple_confirmed
+                or photometric_confirmed
+                or structural_change
+                or surprise_confirmed
+            )
+            state_transition = structural_change
+            summary = (
+                diff.causal_summary if diff and diff.causal_summary
+                else ("Physical visual ripple verified." if verified else "No optical response detected.")
+            )
 
         status = VerificationStatus.VERIFIED if verified else VerificationStatus.RETRY_MICRO_JITTER
-        summary = (
-            diff.causal_summary if diff and diff.causal_summary
-            else ("Physical visual ripple verified." if verified else "No optical response detected.")
-        )
 
         return VerificationResult(
             status=status,
@@ -290,7 +372,7 @@ class VisualRippleVerifier:
             target_coord=target,
             optical_ripple_energy=ripple_energy,
             surprise_pulse=surprise_pulse,
-            state_transition_detected=structural_change,
+            state_transition_detected=state_transition,
             causal_summary=summary,
             recovery_attempt=1,
             elapsed_ms=elapsed_ms,
@@ -318,14 +400,24 @@ class VisualRippleVerifier:
         is_destructive: bool = False,
         destructive: bool = False,
         action_class: Optional[Any] = None,
+        is_window_launch: bool = False,
+        action_name: Optional[str] = None,
+        settle_ms: Optional[float] = None,
     ) -> VerificationResult:
         """Executes an action through the 5-Tier Self-Healing Escalation Ladder."""
-        if action_type not in {"click", "double_click", "type"}:
+        if action_type not in {"click", "double_click", "type", "open_application", "window_launch"}:
             raise ValueError(f"Unsupported verified action type: {action_type}")
         if button not in {"left", "right", "middle"}:
             raise ValueError(f"Unsupported mouse button: {button}")
         t_global = time.perf_counter()
         tx, ty = target
+
+        is_launch = bool(
+            is_window_launch
+            or action_type.startswith("open_application")
+            or action_type.startswith("window_launch")
+            or (action_name and (action_name.startswith("open_application") or action_name.startswith("window_launch")))
+        )
 
         # Determine non-replaying semantics: destructive / non-idempotent actions must never blind-replay
         is_dest = is_destructive or destructive
@@ -360,8 +452,11 @@ class VisualRippleVerifier:
 
         if action_type == "click":
             self.driver.click(button=button)
-        elif action_type == "double_click":
-            self.driver.double_click(button=button)
+        elif action_type in {"double_click", "open_application", "window_launch"}:
+            if button == "click":
+                self.driver.click(button="left")
+            else:
+                self.driver.double_click(button="left" if button in {"double_click", "open_application", "window_launch"} else button)
         elif action_type == "type":
             self.driver.click(button="left")
             time.sleep(0.04)
@@ -370,7 +465,11 @@ class VisualRippleVerifier:
             elif text_content:
                 raise RuntimeError("Cursor driver does not support text entry.")
 
-        res = self.verify_action(f"{action_type}@{target}", target, pre_state, min_sequence=pre_seq)
+        act_name = action_name or f"{action_type}@{target}"
+        v_kwargs = {"is_window_launch": is_launch}
+        if settle_ms is not None:
+            v_kwargs["settle_ms"] = settle_ms
+        res = self.verify_action(act_name, target, pre_state, min_sequence=pre_seq, **v_kwargs)
         if res.is_successful:
             return res
 
@@ -409,7 +508,12 @@ class VisualRippleVerifier:
             else:
                 self.driver.click(button=button)
 
-            res_jitter = self.verify_action(f"retry_{action_type}@{jitter_target}", jitter_target, pre_retry)
+            res_jitter = self.verify_action(
+                f"retry_{action_type}@{jitter_target}",
+                jitter_target,
+                pre_retry,
+                is_window_launch=is_launch,
+            )
             if res_jitter.is_successful:
                 res_jitter.status = VerificationStatus.VERIFIED
                 res_jitter.recovery_attempt = 2

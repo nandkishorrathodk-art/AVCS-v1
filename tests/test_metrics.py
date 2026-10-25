@@ -404,3 +404,41 @@ def test_every_op_is_either_mutating_or_observing():
 
     assert set(Op) == MUTATING_OPS | OBSERVING_OPS
     assert not (MUTATING_OPS & OBSERVING_OPS)
+
+def test_score_plan_accepts_capitalized_goal():
+    base, kernel = _machine()
+    text = (f"Goal: {SLUG}\nmkdir docs\n"
+            f"write docs/{SLUG}.md <<<\n- a\n>>>")
+    parsed, semantic, verified = score_plan(text, TASK, base, kernel)
+    assert parsed and semantic and verified, "Capitalized 'Goal:' should be recognized as semantic"
+
+
+def test_machine_seeds_all_grantable_ops_to_auto():
+    from forge.control.scope import GRANTABLE_OPS
+    from forge.control.trust import Level
+    _, kernel = _machine()
+    for op in GRANTABLE_OPS:
+        rec = kernel.trust.record_for(op)
+        assert rec.level is Level.AUTO, f"{op} not seeded to AUTO"
+
+
+def test_local_backend_token_slicing_prompt_echo():
+    from forge.agents.backends import LocalBackend
+
+    tok = BPETokenizer.train(_corpus(), vocab_size=512)
+
+    class EchoModel:
+        def generate(self, ids, max_new_tokens=40, temperature=0.6, top_k=40, eos_id=None):
+            gen = tok.encode(f"goal: {SLUG}\nmkdir docs", add_bos=False)
+            return torch.cat([ids, torch.tensor([gen])], dim=1)
+
+    backend = LocalBackend(EchoModel(), tok)
+    reply = backend.complete(system="System Prompt", user="User Request")
+    assert reply == f"goal: {SLUG}\nmkdir docs"
+    assert "System Prompt" not in reply
+    assert "User Request" not in reply
+
+    reply_gen = backend.generate(system="System Prompt", user="User Request")
+    assert reply_gen == f"goal: {SLUG}\nmkdir docs"
+    assert "System Prompt" not in reply_gen
+    assert "User Request" not in reply_gen

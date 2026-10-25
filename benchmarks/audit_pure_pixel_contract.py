@@ -24,6 +24,7 @@ PROHIBITED_MODULES: Set[str] = {
     "uiautomation",
     "pywinauto",
     "comtypes",
+    "win32com",
     "selenium",
     "playwright",
     "bs4",

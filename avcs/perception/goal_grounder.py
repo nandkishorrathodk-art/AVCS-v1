@@ -237,6 +237,7 @@ class GoalConditionedGrounder(nn.Module):
             )
         image, transform = letterbox_rgb(frame_rgb, self.input_size)
         device = next(self.parameters()).device
+        query = query.strip().lower()
         logits, presence_logits = self.forward_with_presence(
             image.unsqueeze(0).to(device), encode_queries([query]).to(device)
         )
@@ -251,10 +252,16 @@ class GoalConditionedGrounder(nn.Module):
         row, column = divmod(flat_index, heat_w)
         canvas_point = ((column + 0.5) / heat_w, (row + 0.5) / heat_h)
         point = transform.canvas_to_original(canvas_point)
-        if not target_present or not (0.0 <= point[0] < 1.0 and 0.0 <= point[1] < 1.0):
+        px = max(0.0, min(0.999, float(point[0])))
+        py = max(0.0, min(0.999, float(point[1])))
+        in_viewport = (
+            transform.left_norm <= canvas_point[0] <= transform.left_norm + transform.width_norm
+            and transform.top_norm <= canvas_point[1] <= transform.top_norm + transform.height_norm
+        )
+        if not target_present or not in_viewport:
             point_result = None
         else:
-            point_result = point
+            point_result = (px, py)
         return GroundingPrediction(
             candidate_point_norm=point_result,
             peak_probability=float(logits.sigmoid().flatten()[flat_index]),
@@ -272,7 +279,7 @@ class GoalConditionedGrounder(nn.Module):
         device = next(self.parameters()).device
         img = image_tensor.to(device)
 
-        clean_q = query.strip() if isinstance(query, str) else ""
+        clean_q = query.strip().lower() if isinstance(query, str) else ""
         if not clean_q or not any(c.isalnum() for c in clean_q) or len(clean_q.encode("utf-8")) > MAX_QUERY_BYTES:
             return {
                 "point": (0.5, 0.5),

@@ -23,6 +23,8 @@ WEIGHTS_FILENAME = "avcs_cortex_weights.pt"
 HUMAN_EYE_WEIGHTS_FILENAME = "human_eye_weights.pt"
 GOAL_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_best.pt"
 COMBINED_GROUNDER_WEIGHTS_FILENAME = "goal_grounder_combined_best.pt"
+AVCS_V2_WEIGHTS_FILENAME = "avcs_v2_weights.pt"
+OBJECTNESS_WEIGHTS_FILENAME = "avcs_v2_weights.pt"
 
 
 def get_default_cache_dir() -> Path:
@@ -100,6 +102,63 @@ def get_grounding_weights_path(custom_path: Optional[str] = None) -> Optional[st
     return path
 
 
+def get_objectness_weights_path(custom_path: Optional[str] = None) -> Optional[str]:
+    """Finds the path to pre-trained UIObjectnessModel weights (avcs_v2_weights.pt).
+
+    Search priority:
+    1. Explicit custom_path argument
+    2. AVCS_V2_WEIGHTS_PATH or AVCS_OBJECTNESS_WEIGHTS_PATH environment variable
+    3. Local workspace runs directory: `runs/weights/avcs_v2_weights.pt`
+    4. Bundled package directory (if installed)
+    5. User cache directory: `~/.cache/avcs/weights/avcs_v2_weights.pt`
+    """
+    if custom_path and os.path.isfile(custom_path):
+        return custom_path
+
+    env_path = os.environ.get("AVCS_V2_WEIGHTS_PATH") or os.environ.get("AVCS_OBJECTNESS_WEIGHTS_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    return get_weights_path(filename=AVCS_V2_WEIGHTS_FILENAME)
+
+
+def load_objectness_weights(
+    model: Any,
+    path: Optional[str] = None,
+    device: str = "cpu",
+    strict: bool = True,
+) -> bool:
+    """Loads pre-trained avcs_v2_weights.pt cleanly into UIObjectnessModel on CPU/device.
+
+    Returns True if weights were loaded successfully, False otherwise.
+    """
+    resolved_path = get_objectness_weights_path(custom_path=path)
+    if not resolved_path or not os.path.isfile(resolved_path):
+        return False
+
+    try:
+        try:
+            state = torch.load(resolved_path, map_location=device, weights_only=False)
+        except TypeError:
+            state = torch.load(resolved_path, map_location=device)
+
+        if not isinstance(state, dict):
+            return False
+
+        target_module = model.objectness_model if hasattr(model, "objectness_model") else model
+        state_dict = state.get("model_state_dict", state)
+        if not isinstance(state_dict, dict):
+            return False
+
+        loaded = _load_complete_state_dict(target_module, state_dict, strict=strict)
+        setattr(model, "weights_loaded", loaded)
+        setattr(target_module, "weights_loaded", loaded)
+        return loaded
+    except Exception as exc:
+        print(f"[AVCS] Warning: Failed to load objectness weights from {resolved_path}: {exc}")
+        return False
+
+
 def download_weights(
     dest_path: Optional[str] = None,
     url: str = DEFAULT_WEIGHTS_URL,
@@ -131,7 +190,10 @@ def _is_human_eye_model(cortex: Any) -> bool:
         "FovealAcuityEngine",
         "GoalConditionedGrounder",
         "RealTimeCrossModalGrounder",
+        "UIObjectnessModel",
     ):
+        return True
+    if hasattr(cortex, "objectness_model") and cortex.objectness_model is not None:
         return True
     if hasattr(cortex, "backbone") and cortex.backbone.__class__.__name__ == "RealTimeCorticalBackbone":
         return True
@@ -319,6 +381,14 @@ def load_avcs_weights(
                         cortex.weights_loaded = loaded
                     return loaded
 
+            elif target_cls == "UIObjectnessModel":
+                obj_dict = state.get("model_state_dict", state)
+                if isinstance(obj_dict, dict):
+                    loaded = _load_complete_state_dict(target_module, obj_dict, strict=strict)
+                    if hasattr(cortex, "weights_loaded"):
+                        cortex.weights_loaded = loaded
+                    return loaded
+
             optional_missing_prefixes = (
                 ("grounder.",) if target_cls == "HumanEye" and not strict else ()
             )
@@ -414,6 +484,10 @@ def load_avcs_weights(
                     cortex.fovea_engine.weights_loaded = _load_complete_state_dict(
                         fov_head, fov_dict, strict
                     )
+
+            # If cortex is HumanEye, also ensure objectness_model is populated
+            if hasattr(cortex, "objectness_model") and cortex.objectness_model is not None:
+                load_objectness_weights(cortex.objectness_model, device=device, strict=False)
 
             return loaded
         except Exception as exc:

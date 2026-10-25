@@ -495,3 +495,38 @@ def test_trust_demotes_after_a_real_verification_failure(sandbox):
 
     assert k.trust.record_for(Op.WRITE).level is Level.DRY_RUN, \
         "a failed verification must demote the class immediately"
+
+def test_simulate_tracks_created_file_for_subsequent_read_and_append(kernel, sandbox):
+    kernel.trust.grant_level(Op.READ, Level.AUTO)
+    kernel.trust.grant_level(Op.STAT, Level.AUTO)
+    target = os.path.join(sandbox, "new_file.txt")
+    plan = kernel.plan("write then read and append and stat", [
+        Step(Op.WRITE, target, content="hello\n", expect_absent_before=True),
+        Step(Op.APPEND, target, content="world\n"),
+        Step(Op.READ, target),
+        Step(Op.STAT, target),
+    ])
+    sim = kernel.simulate(plan)
+    assert sim.ok, f"Plan should simulate successfully: {sim.problems}"
+
+
+def test_simulate_stat_on_nonexistent_file_fails(kernel, sandbox):
+    kernel.trust.grant_level(Op.STAT, Level.AUTO)
+    target = os.path.join(sandbox, "nonexistent.txt")
+    plan = kernel.plan("stat nonexistent", [
+        Step(Op.STAT, target),
+    ])
+    sim = kernel.simulate(plan)
+    assert not sim.ok
+    assert any("target does not exist" in p for p in sim.problems)
+
+
+def test_simulate_rejects_second_write_to_same_file(kernel, sandbox):
+    target = os.path.join(sandbox, "duplicate.txt")
+    plan = kernel.plan("write twice", [
+        Step(Op.WRITE, target, content="first", expect_absent_before=True),
+        Step(Op.WRITE, target, content="second", expect_absent_before=True),
+    ])
+    sim = kernel.simulate(plan)
+    assert not sim.ok
+    assert any("already exists" in p for p in sim.problems)

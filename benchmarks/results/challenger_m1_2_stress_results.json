@@ -1,0 +1,345 @@
+{
+  "verdict": "APPROVE",
+  "gates": {
+    "cpu_latency_batch1_p50_ms_1thread": 0.4907,
+    "cpu_latency_batch1_p50_ms_4thread": 0.736,
+    "cpu_latency_batch1_passed": true,
+    "memory_soak_net_growth_mb": 0.2890625,
+    "memory_soak_passed": true,
+    "casting_stability_passed": true
+  },
+  "latency_1thread": {
+    "num_threads": 1,
+    "num_iterations": 500,
+    "warmup_iterations": 50,
+    "resolution": "128x128",
+    "batch_benchmarks": {
+      "1": {
+        "batch_size": 1,
+        "min_ms": 0.3147,
+        "p50_ms": 0.4907,
+        "p95_ms": 0.86875,
+        "p99_ms": 1.6531689999999994,
+        "mean_ms": 0.5475242,
+        "max_ms": 2.2892,
+        "std_ms": 0.24785479635133148,
+        "fps": 1812.974954113604,
+        "total_time_s": 0.2757898
+      },
+      "2": {
+        "batch_size": 2,
+        "min_ms": 0.6647,
+        "p50_ms": 1.0524,
+        "p95_ms": 1.5824049999999996,
+        "p99_ms": 2.1191429999999998,
+        "mean_ms": 1.0865854,
+        "max_ms": 3.6982,
+        "std_ms": 0.336666296155169,
+        "fps": 1833.597035146938,
+        "total_time_s": 0.5453761
+      },
+      "4": {
+        "batch_size": 4,
+        "min_ms": 1.3093,
+        "p50_ms": 2.2195,
+        "p95_ms": 3.3502649999999985,
+        "p99_ms": 4.252420999999999,
+        "mean_ms": 2.3559144,
+        "max_ms": 8.4321,
+        "std_ms": 0.6720065902003045,
+        "fps": 1691.8766151605848,
+        "total_time_s": 1.1821193
+      },
+      "8": {
+        "batch_size": 8,
+        "min_ms": 2.8298,
+        "p50_ms": 5.1699,
+        "p95_ms": 6.58742,
+        "p99_ms": 7.358847,
+        "mean_ms": 5.1010534000000005,
+        "max_ms": 7.8398,
+        "std_ms": 0.9828018302630699,
+        "fps": 1564.9389818553934,
+        "total_time_s": 2.5560102
+      },
+      "16": {
+        "batch_size": 16,
+        "min_ms": 5.8468,
+        "p50_ms": 9.946950000000001,
+        "p95_ms": 12.699069999999999,
+        "p99_ms": 13.48347,
+        "mean_ms": 9.8724038,
+        "max_ms": 16.0873,
+        "std_ms": 1.7204578201762344,
+        "fps": 1618.8389140949976,
+        "total_time_s": 4.9418135
+      }
+    }
+  },
+  "latency_4threads": {
+    "num_threads": 4,
+    "num_iterations": 500,
+    "warmup_iterations": 50,
+    "resolution": "128x128",
+    "batch_benchmarks": {
+      "1": {
+        "batch_size": 1,
+        "min_ms": 0.3688,
+        "p50_ms": 0.736,
+        "p95_ms": 2.083269999999994,
+        "p99_ms": 7.343161999999993,
+        "mean_ms": 1.018677,
+        "max_ms": 17.3264,
+        "std_ms": 1.2412432206344572,
+        "fps": 976.9250307731385,
+        "total_time_s": 0.51181
+      },
+      "2": {
+        "batch_size": 2,
+        "min_ms": 0.7748,
+        "p50_ms": 1.451,
+        "p95_ms": 7.513699999999997,
+        "p99_ms": 13.739901999999994,
+        "mean_ms": 2.2384694,
+        "max_ms": 22.5455,
+        "std_ms": 2.5821950025208475,
+        "fps": 890.7713857507755,
+        "total_time_s": 1.1226225
+      },
+      "4": {
+        "batch_size": 4,
+        "min_ms": 1.0339,
+        "p50_ms": 1.767,
+        "p95_ms": 2.8107099999999994,
+        "p99_ms": 3.7134539999999987,
+        "mean_ms": 1.8951491999999999,
+        "max_ms": 7.0835,
+        "std_ms": 0.5879652602487327,
+        "fps": 2101.967273210343,
+        "total_time_s": 0.9514896
+      },
+      "8": {
+        "batch_size": 8,
+        "min_ms": 1.8218,
+        "p50_ms": 2.8853,
+        "p95_ms": 4.278659999999995,
+        "p99_ms": 6.057178,
+        "mean_ms": 3.0634556,
+        "max_ms": 8.8495,
+        "std_ms": 0.7775382418560775,
+        "fps": 2603.3536271256953,
+        "total_time_s": 1.5364797
+      },
+      "16": {
+        "batch_size": 16,
+        "min_ms": 2.8869,
+        "p50_ms": 5.03745,
+        "p95_ms": 8.826639999999996,
+        "p99_ms": 13.988087999999994,
+        "mean_ms": 5.713209,
+        "max_ms": 110.0296,
+        "std_ms": 5.1168679646224025,
+        "fps": 2795.1220926799597,
+        "total_time_s": 2.862129
+      }
+    }
+  },
+  "memory_soak": {
+    "num_frames": 1000,
+    "initial_rss_mb": 226.765625,
+    "final_rss_mb": 227.0546875,
+    "net_growth_mb": 0.2890625,
+    "initial_committed_mb": 499.96484375,
+    "final_committed_mb": 499.96484375,
+    "tracemalloc_peak_kb": 17.203125,
+    "leak_detected": false,
+    "history": [
+      {
+        "frame": 1,
+        "rss_mb": 226.9921875,
+        "delta_rss_mb": 0.2265625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 9.0390625,
+        "tracemalloc_peak_kb": 11.203125
+      },
+      {
+        "frame": 100,
+        "rss_mb": 226.9921875,
+        "delta_rss_mb": 0.2265625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 9.60546875,
+        "tracemalloc_peak_kb": 12.10546875
+      },
+      {
+        "frame": 200,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 10.125,
+        "tracemalloc_peak_kb": 12.640625
+      },
+      {
+        "frame": 300,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 10.67578125,
+        "tracemalloc_peak_kb": 13.16015625
+      },
+      {
+        "frame": 400,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 11.2265625,
+        "tracemalloc_peak_kb": 13.7109375
+      },
+      {
+        "frame": 500,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 11.90234375,
+        "tracemalloc_peak_kb": 14.38671875
+      },
+      {
+        "frame": 600,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 12.453125,
+        "tracemalloc_peak_kb": 14.9375
+      },
+      {
+        "frame": 700,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 13.00390625,
+        "tracemalloc_peak_kb": 15.48828125
+      },
+      {
+        "frame": 800,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 13.5546875,
+        "tracemalloc_peak_kb": 16.0390625
+      },
+      {
+        "frame": 900,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 14.16796875,
+        "tracemalloc_peak_kb": 16.65234375
+      },
+      {
+        "frame": 1000,
+        "rss_mb": 227.05078125,
+        "delta_rss_mb": 0.28515625,
+        "committed_mb": 499.96484375,
+        "tracemalloc_current_kb": 14.71875,
+        "tracemalloc_peak_kb": 17.203125
+      }
+    ]
+  },
+  "stability_tests": {
+    "float32_cpu": {
+      "passed": true,
+      "dtype": "torch.float32",
+      "shape": [
+        2,
+        4,
+        128,
+        128
+      ]
+    },
+    "float64_cpu": {
+      "passed": true,
+      "dtype": "torch.float64",
+      "shape": [
+        2,
+        4,
+        128,
+        128
+      ]
+    },
+    "unbatched_3d": {
+      "passed": true,
+      "shape": [
+        4,
+        128,
+        128
+      ]
+    },
+    "non_contiguous_input": {
+      "passed": true,
+      "input_contiguous_before": false,
+      "output_shape": [
+        2,
+        4,
+        128,
+        128
+      ]
+    },
+    "autograd_backward": {
+      "passed": true,
+      "grad_shape": [
+        2,
+        3,
+        128,
+        128
+      ],
+      "grad_finite": true
+    },
+    "spatial_shapes": {
+      "passed": true,
+      "details": {
+        "(1, 3, 3, 3)": {
+          "passed": true,
+          "out_shape": [
+            1,
+            4,
+            3,
+            3
+          ]
+        },
+        "(1, 3, 16, 64)": {
+          "passed": true,
+          "out_shape": [
+            1,
+            4,
+            16,
+            64
+          ]
+        },
+        "(1, 3, 64, 16)": {
+          "passed": true,
+          "out_shape": [
+            1,
+            4,
+            64,
+            16
+          ]
+        },
+        "(1, 3, 256, 256)": {
+          "passed": true,
+          "out_shape": [
+            1,
+            4,
+            256,
+            256
+          ]
+        }
+      }
+    },
+    "fail_closed_validation": {
+      "passed": true
+    },
+    "manual_dtype_transfer": {
+      "passed": true
+    },
+    "overall_stability_passed": true
+  }
+}

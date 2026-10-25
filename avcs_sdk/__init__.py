@@ -11,6 +11,14 @@ from .models import (
     BoundingBox, NormalizedPoint, Observation, RiskLevel, Target,
     TargetProvenance, VerificationEvidence,
 )
+from .eye_stream import EyeStream, EyeObservation
+from .fovea_reader import FoveaReader, FovealElement
+from .narrator import LiveNarrator, LiveCommentary
+from .hand_motor import HandMotor, RippleResult
+from .llm_bridge import LLMBridge, LLMCommand
+from .run_live_agent import run_agent, run_monitor
+
+__version__ = "0.2.0"
 
 __all__ = [
     "AVCSBackend", "AVCSClient", "AVCSException", "BackendActionError",
@@ -19,4 +27,8 @@ __all__ = [
     "ActionClass", "ActionKind", "ActionRequest", "ActionResult", "ActionStatus",
     "BoundingBox", "NormalizedPoint", "Observation", "RiskLevel", "Target",
     "TargetProvenance", "VerificationEvidence", "RepositoryAVCSBackend",
+    "EyeStream", "EyeObservation", "FoveaReader", "FovealElement",
+    "LiveNarrator", "LiveCommentary", "HandMotor", "RippleResult",
+    "LLMBridge", "LLMCommand", "run_agent", "run_monitor",
+    "__version__",
 ]

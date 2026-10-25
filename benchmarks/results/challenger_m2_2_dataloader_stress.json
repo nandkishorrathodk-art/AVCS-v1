@@ -1,0 +1,134 @@
+{
+  "verdict": "APPROVE",
+  "reasons": [],
+  "batch_stress": {
+    "num_batches": 100,
+    "total_samples": 1600,
+    "batch_size": 16,
+    "ui_draws": 799,
+    "cleanroom_draws": 801,
+    "negative_draws": 276,
+    "ui_prop": 0.499375,
+    "cr_prop": 0.500625,
+    "neg_prop": 0.1725,
+    "ui_ci": [
+      0.4749063736375075,
+      0.5238466203018388
+    ],
+    "cr_ci": [
+      0.4761533796981612,
+      0.5250936263624926
+    ],
+    "neg_ci": [
+      0.15477743488376947,
+      0.19179138933368262
+    ],
+    "balance_ok": true,
+    "latency_ms": {
+      "p50": 18.738599959760904,
+      "p90": 24.632120004389435,
+      "p95": 26.407885007211004,
+      "p99": 32.64601900533376,
+      "mean": 20.15054399613291,
+      "min": 8.858699991833419,
+      "max": 166.2484000553377
+    },
+    "throughput_samples_per_sec": 698.8889718274695,
+    "throughput_batches_per_sec": 43.680560739216844,
+    "drift_ratio": 1.6648797254390313,
+    "total_objects": 10112,
+    "class_distribution": {
+      "0": 5421,
+      "1": 1384,
+      "2": 1078,
+      "3": 252,
+      "4": 1977
+    }
+  },
+  "negative_injection": {
+    "seeds": [
+      {
+        "seed": 42,
+        "neg_count": 174,
+        "total_samples": 1000,
+        "rate": 0.174,
+        "ci": [
+          0.15176239290860977,
+          0.1987326435181142
+        ],
+        "in_range": true,
+        "violations_count": 0,
+        "violations": []
+      },
+      {
+        "seed": 100,
+        "neg_count": 187,
+        "total_samples": 1000,
+        "rate": 0.187,
+        "ci": [
+          0.16404785922610934,
+          0.21234768188298456
+        ],
+        "in_range": true,
+        "violations_count": 0,
+        "violations": []
+      },
+      {
+        "seed": 2026,
+        "neg_count": 164,
+        "total_samples": 1000,
+        "rate": 0.164,
+        "ci": [
+          0.1423442291345228,
+          0.1882273421519167
+        ],
+        "in_range": true,
+        "violations_count": 0,
+        "violations": []
+      }
+    ],
+    "aggregate_rate": 0.175,
+    "aggregate_ci": [
+      0.16182129524201602,
+      0.18900995305395882
+    ],
+    "aggregate_in_range": true,
+    "total_evaluated": 3000
+  },
+  "temporal_sequences": {
+    "num_sequences": 500,
+    "elapsed_s": 1.9798277000081725,
+    "seq_per_sec": 252.5472292351178,
+    "nan_count": 0,
+    "inf_count": 0,
+    "shape_errors": 0,
+    "mode_violations": 0,
+    "batch_errors": 0,
+    "passed": true
+  },
+  "action_pairs": {
+    "num_pairs": 500,
+    "elapsed_s": 0.559054399956949,
+    "pairs_per_sec": 894.3673460731252,
+    "nan_count": 0,
+    "inf_count": 0,
+    "shape_errors": 0,
+    "semantic_violations": 0,
+    "batch_errors": 0,
+    "passed": true
+  },
+  "edge_cases": {
+    "batch_size_1": "PASS",
+    "batch_size_32": "PASS",
+    "batch_size_64": "PASS",
+    "hard_negative_1.0": "PASS",
+    "hard_negative_0.0": "PASS",
+    "temporal_T_2_valid": "PASS",
+    "temporal_T_1_error": "PASS (raised ValueError as expected)",
+    "temporal_invalid_mode": "PASS (raised ValueError as expected)",
+    "memory_preload_mb": 42.68359375,
+    "memory_iteration_soak_mb_delta": -0.6796875,
+    "memory_total_mb_delta": 42.00390625,
+    "memory_leak_check": "PASS"
+  }
+}

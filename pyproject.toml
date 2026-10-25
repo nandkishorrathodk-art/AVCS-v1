@@ -43,6 +43,8 @@ dependencies = [
     "numpy>=1.22.0",
     "Pillow>=9.0.0",
     "cryptography>=44.0.0",
+    "psutil>=5.9.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
@@ -87,7 +89,7 @@ avcs-benchmark-grounder = "benchmarks.run_ui_grounding_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["adapters*", "avcs*", "avcs_m7_validation*", "avcs_pilot*", "avcs_sdk*", "forge*", "benchmarks*"]
+include = ["avcs*", "avcs_sdk*"]
 
 [tool.setuptools.package-data]
 avcs = ["py.typed"]

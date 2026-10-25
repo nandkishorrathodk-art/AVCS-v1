@@ -1,0 +1,18 @@
+{
+  "package_name": "avcs_streaming_cortex_v2_package",
+  "version": "2.0.0",
+  "release_file": "avcs_streaming_cortex_v2_package.zip",
+  "size_kb": 1480.3994140625,
+  "sha256": "57d9d53512c66774a0ab1707aa23c227ca1d8a6b2a787b89f8a60ca7d1d03255",
+  "contents": [
+    "weights/avcs_v2_weights.pt",
+    "weights/avcs_v2_weights.json",
+    "docs/AVCS_V2_MODEL_CARD.md",
+    "benchmarks/streaming_v2_acceptance_report.json",
+    "streaming_v2/heads.py",
+    "streaming_v2/integration.py",
+    "streaming_v2/model.py",
+    "streaming_v2/preprocessor.py",
+    "streaming_v2/__init__.py"
+  ]
+}
