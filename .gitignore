@@ -16,6 +16,7 @@ runs/weights/*
 *.pt
 !runs/weights/candidates/*.pt
 !runs/weights/candidates/*.json
+!avc/weights/*.pt
 *.pth
 *.safetensors
 *.onnx
@@ -28,4 +29,4 @@ m7-results/
 m8-live-results/
 .agents/
 .gravitas/
-scratch/
+scratch/
