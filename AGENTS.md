@@ -193,6 +193,24 @@ fixing the echo problem (see below).
   asserts `set(Op) == MUTATING_OPS | OBSERVING_OPS` so a new op cannot be
   added in one place and forgotten in another.
 
+- **`FastAffordanceHead.find_hotspots` fired on the zero-padded border ring.**
+  The 3x3 conv stack pads the image edge, which drives the outermost feature
+  cells to a spurious high activation on bright frames. A *uniform white* frame
+  (no interactive element at all) peaked at 0.83 in cell (0,0) and emitted a
+  hotspot, so `HumanEye.observe` reported a clickable affordance on a blank
+  screen. Measured on the ui_grounding negative split (30 blank/wallpaper
+  frames, 256x256, a different generator than human_eye trained on): **53.3%
+  false-positive rate**, of which 7/16 were border-ring artifacts at
+  (0.031, 0.031) and 9/16 genuine interior overconfidence on dark textures. In
+  distribution (`data/manifest.json` `test_negative`, 128x128) the rate is 0%.
+  Both `find_hotspots` paths now clear the 1-cell border ring before peak
+  selection; positives lose 0.4% of detections. The remaining interior FPs are a
+  corpus problem (the negatives are out-of-distribution), not a head bug.
+  `tests/test_challenger_d1_verification.py` previously *pinned the artifact as
+  expected* — it asserted "1 corner FP on saturated white 224" and "1
+  win32_fast_capture FP" (that frame's hotspot was at column 15, the border
+  ring). Both assertions now require 0.
+
 ## Fully-learned cortex (`forge/vision/cortex/`)
 
 `core/learned.py` holds the heads that replaced hand-written inference rules:

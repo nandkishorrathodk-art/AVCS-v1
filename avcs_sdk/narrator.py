@@ -28,8 +28,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from avcs.eye_stream import EyeFrame
-from avcs.fovea_reader import FovealElement
+from .eye_stream import EyeFrame
+from .fovea_reader import FovealElement
 
 
 @dataclass(frozen=True)

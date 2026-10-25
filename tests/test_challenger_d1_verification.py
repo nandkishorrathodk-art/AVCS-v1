@@ -299,14 +299,18 @@ class TestR1NegativeScreensZeroFalsePositives:
         # 29/30 procedural frames must have 0 FP
         assert fp_by_source.get("procedural", 0) == 0
         assert fp_by_source.get("procedural_negative", 0) == 0
-        # frame_0041 (win32_fast_capture) empirically produces 1 typeable hotspot at (0.969, 0.344)
-        assert fp_by_source.get("win32_fast_capture", 0) == 1
+        # frame_0041 (win32_fast_capture) previously produced 1 typeable hotspot
+        # at (0.969, 0.344) -- feature-map column 15, i.e. the zero-padded border
+        # ring. That was a padding artifact, not a detection; the border ring is
+        # now excluded from peak selection, so the frame correctly yields 0 FP.
+        assert fp_by_source.get("win32_fast_capture", 0) == 0
 
     def test_uniform_blank_screens_luminance_boundary(self) -> None:
         """Adversarially probes blank screens across the full 0..255 luminance range.
 
-        Verifies that luminance levels 0..192 strictly yield 0 FP, while discovering
-        a high-luminance corner artifact on saturated white screens (levels >= 224).
+        Verifies that every luminance level yields 0 FP. (Levels >= 224 previously
+        produced a spurious top-left corner hotspot from zero-padding at the
+        feature-map border; that artifact is now excluded from peak selection.)
         """
         eye = HumanEye(source="synthetic", load_weights=True)
         eye.eval()
@@ -321,12 +325,13 @@ class TestR1NegativeScreensZeroFalsePositives:
             fp_by_level[lvl] = len(hotspots)
 
         print(f"\n[D1 Luminance Boundary Analysis] FP by Luminance: {fp_by_level}")
-        # Levels 0 to 192 must be 0 FP
-        for lvl in [0, 15, 32, 64, 96, 128, 160, 192]:
+        # Blank frames must produce 0 FP at every luminance, including saturated
+        # white. A uniform frame contains no interactive element, so any hotspot
+        # is a false positive. (Levels >= 224 used to emit a single top-left
+        # corner hotspot; that was a zero-padding artifact on the feature-map
+        # border ring, now excluded from peak selection.)
+        for lvl in test_levels:
             assert fp_by_level[lvl] == 0, f"Expected 0 FP for level {lvl}, got {fp_by_level[lvl]}"
-        # Levels >= 224 exhibit boundary artifact at top-left corner
-        for lvl in [224, 240, 255]:
-            assert fp_by_level[lvl] == 1, f"Expected 1 corner FP on saturated white {lvl}, got {fp_by_level[lvl]}"
 
     def test_adversarial_smooth_gradients_rejection(self) -> None:
         """Adversarial test: Smooth gradients across all directions must produce 0 false positives."""

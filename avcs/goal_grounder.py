@@ -509,8 +509,14 @@ class GoalConditionedGrounder(nn.Module):
         probs = torch.sigmoid(hm_logits)
         peak_prob = float(peak_conf[0].item())
 
-        is_legacy = self._checkpoint_metadata.get("legacy_schema_version") == 1
-        action_authorized = bool(target_present and (point_result is not None) and not is_legacy)
+        # Fail-closed invariant: `action_authorized` must be False on every call
+        # (docs/REALITY_AUDIT.md section 5, SYSTEM1_DEVELOPER_GUIDE.md section 5).
+        # It was previously computed as `target_present and point_result is not None`,
+        # but the calibrated presence head saturates near 1.0 on out-of-distribution
+        # frames, so the threshold never rejects and the gate failed *open* —
+        # authorizing motor actions on blank, noisy and wallpaper frames. Keep the
+        # computed presence evidence below for reporting; do not let it authorize.
+        action_authorized = False
 
         return GroundingPrediction(
             candidate_point_norm=point_result,
