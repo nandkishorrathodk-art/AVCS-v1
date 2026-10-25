@@ -112,7 +112,7 @@ class LLMBridge:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash",
+        model_name: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 30.0,
         vision_enabled: bool = True,
@@ -124,8 +124,17 @@ class LLMBridge:
             or os.environ.get("OPENAI_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")
         )
-        self.model_name = model_name
-        self.base_url = (base_url or os.environ.get("AVCS_LLM_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        self.model_name = (
+            model_name
+            or os.environ.get("AVCS_LLM_MODEL")
+            or "gemini-2.5-flash"
+        )
+        self.base_url = (
+            base_url
+            or os.environ.get("AVCS_LLM_BASE_URL")
+            or os.environ.get("AVCS_LLM_ENDPOINT")
+            or DEFAULT_BASE_URL
+        ).rstrip("/")
         self.timeout = timeout
         self.vision_enabled = vision_enabled
         self.conversation_history: List[Dict[str, Any]] = []
