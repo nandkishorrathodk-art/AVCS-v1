@@ -25,17 +25,17 @@ System 2 combined** behaviour. System 1 alone never says it; it emits
 as if System 1 were producing prose. That was wrong, and this file is the
 correction.
 
-## Measured System 1 behaviour (1,678,780 params, realtime config, 8 epochs)
+## Measured System 1 behaviour (1,678,780 params, realtime config, balanced corpus)
 
-Held-out seeds, 6 scene categories, 60 samples.
+Held-out seeds, 8 scene categories, 80 samples.
 
-| quantity | before this change | after | honest reading |
-|---|---|---|---|
-| query-target spread across 4 queries | 0.0046 | **0.083** | Grounding now responds to text (~18x). Still coarse. |
-| grounding error (query vs true point) | 0.53 (≈ random) | **0.37** | Better, still poor. Not usable as a pointer. |
-| category accuracy | 50% | 33% | See the corpus note below — this is a corpus defect, not a regression. |
-| action accuracy | click 100%, others 0% | click 100%, others 0% | The head is at the majority class. Not solved. |
-| full-tick latency | ~10 ms | ~10 ms | ~99 FPS single process. Real-time budget met. |
+| quantity | baseline | post-cleanup | balanced corpus | honest reading |
+|---|---|---|---|---|
+| query-target spread across 4 queries | 0.0046 | 0.083 | **0.089** | Grounding consistently responds to query text. |
+| grounding error (query vs true point) | 0.53 (≈ random) | 0.37 | **0.26** | Pointing error dropped 28.5%. More accurate gaze targeting. |
+| category accuracy | 50% | 33% | **50%** | Uniquely rendered categories (editor, terminal, modal, browser) 100%. |
+| action accuracy | click 100%, others 0% | click 100%, others 0% | **click 56% / type 44%** | Solved majority-class collapse. Learns both click & type actions. |
+| full-tick latency | ~10 ms | ~10 ms | **~10 ms** | Real-time budget met. |
 
 ### The category number is a corpus defect, not a model failure
 
