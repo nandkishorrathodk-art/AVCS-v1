@@ -182,6 +182,16 @@ class EyeStream(StreamingVisualCortexV2):
         self.load_state_dict(own)
         self.weights_loaded = True
         self.weights_status = f"loaded {len(matched)}/{len(own)} tensors from {os.path.basename(weights_path)}"
+        if is_vault:
+            try:
+                from avcs.vault import apply_anti_dump_guard
+                apply_anti_dump_guard(self)
+            except Exception:
+                try:
+                    from .vault import apply_anti_dump_guard
+                    apply_anti_dump_guard(self)
+                except Exception:
+                    pass
         return True
 
     def _query_geometry(self) -> DisplayGeometry:

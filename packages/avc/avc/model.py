@@ -420,3 +420,6 @@ class ArtificialVisualCortex(nn.Module):
             state = state["model_state_dict"]
 
         self.load_state_dict(state, strict=strict)
+        if is_vault:
+            from avc.vault import apply_anti_dump_guard
+            apply_anti_dump_guard(self)

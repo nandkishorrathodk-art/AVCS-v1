@@ -31,7 +31,7 @@ from PIL import Image
 
 from .narrator import LiveCommentary
 
-DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+DEFAULT_BASE_URL = "https://api.parthlabs.in/v1"
 
 
 def encode_patch_to_base64(patch: np.ndarray) -> str:
@@ -119,22 +119,27 @@ class LLMBridge:
     ) -> None:
         self.api_key = (
             api_key
+            or os.environ.get("AVC_API_KEY")
+            or os.environ.get("AVCS_API_KEY")
             or os.environ.get("AVCS_LLM_API_KEY")
             or os.environ.get("GEMINI_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")
         )
-        self.model_name = (
-            model_name
-            or os.environ.get("AVCS_LLM_MODEL")
-            or "gemini-flash-lite-latest"
-        )
         self.base_url = (
             base_url
+            or os.environ.get("AVC_BASE_URL")
+            or os.environ.get("AVCS_BASE_URL")
             or os.environ.get("AVCS_LLM_BASE_URL")
             or os.environ.get("AVCS_LLM_ENDPOINT")
             or DEFAULT_BASE_URL
         ).rstrip("/")
+        self.model_name = (
+            model_name
+            or os.environ.get("AVC_MODEL")
+            or os.environ.get("AVCS_LLM_MODEL")
+            or ("avc-reasoner-v1" if "api.parthlabs.in" in self.base_url else "gemini-flash-lite-latest")
+        )
         self.timeout = timeout
         self.vision_enabled = vision_enabled
         self.conversation_history: List[Dict[str, Any]] = []

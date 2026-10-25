@@ -1,15 +1,19 @@
-"""[Vault] AES-256 Authenticated In-Memory Model Decryption Engine for AVC.
+"""[Vault] AES-256 Authenticated In-Memory Model Decryption Engine.
 
 Guarantees 100% intellectual property protection:
 1. Model weights are stored in an encrypted binary vault (.avcs).
-2. The vault is decrypted directly into RAM via AES-256-GCM using the API key.
-3. Plaintext model weights are NEVER written to persistent disk storage.
+2. The vault is decrypted directly into RAM via AES-256-GCM using the user's API key.
+3. Plaintext model weights are NEVER written to the consumer's hard disk.
 4. Tampering or invalid keys immediately trigger an authentication rejection.
+5. Anti-dump runtime guard blocks extraction attempts via model.state_dict().
 """
 from __future__ import annotations
 
 import io
+import json
 import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -31,6 +35,19 @@ class InvalidKeyError(VaultSecurityError):
     """Raised when an invalid or unauthorized API key is provided."""
 
 
+def apply_anti_dump_guard(model: torch.nn.Module) -> None:
+    """Installs runtime defense preventing unauthorized weight dumps from RAM.
+
+    Blocks torch.save(model.state_dict()) while leaving forward() 100% operational.
+    """
+    def _locked_state_dict(*args, **kwargs):
+        raise PermissionError(
+            "Access Denied: Direct model state_dict export is locked by "
+            "Parth Labs Intellectual Property Security Policy."
+        )
+    object.__setattr__(model, "state_dict", _locked_state_dict)
+
+
 def _derive_aes_key(api_key: str, salt: bytes) -> bytes:
     """Derive 256-bit symmetric encryption key from API key using HKDF-SHA256."""
     hkdf = HKDF(
@@ -43,7 +60,7 @@ def _derive_aes_key(api_key: str, salt: bytes) -> bytes:
 
 
 class ModelVault:
-    """AES-256-GCM Cryptographic Model Vault for AVC weights."""
+    """AES-256-GCM Cryptographic Model Vault for AVCS weights."""
 
     @staticmethod
     def encrypt_checkpoint(

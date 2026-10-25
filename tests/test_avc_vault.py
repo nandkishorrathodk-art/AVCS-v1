@@ -50,7 +50,7 @@ def test_avc_vault_encrypt_and_decrypt(tmp_path: Path):
 
 
 def test_avc_load_cortex_from_vault(tmp_path: Path):
-    """Test load_cortex instantiating directly from encrypted .avcs vault."""
+    """Test load_cortex instantiating directly from encrypted .avcs vault and activating anti-dump."""
     pt_path = get_pt_checkpoint()
     if not pt_path.exists():
         pytest.skip("avcs_cortex_weights.pt not found")
@@ -75,6 +75,11 @@ def test_avc_load_cortex_from_vault(tmp_path: Path):
     state = cortex.perceive(synth_frame)
     assert state.primary_category in avc.UI_CATEGORIES
     assert state.inference_ms > 0.0
+
+    # 4. Anti-dump runtime guard blocks extraction
+    with pytest.raises(PermissionError) as exc_info:
+        cortex.state_dict()
+    assert "Direct model state_dict export is locked" in str(exc_info.value)
 
 
 def test_screen_eye_with_vault(tmp_path: Path):
