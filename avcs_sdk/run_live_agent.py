@@ -28,8 +28,12 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from avcs import EyeStream, FovealElement, FoveaReader, HandMotor, LLMBridge, LiveNarrator
-from avcs.cognitive import (
+from .eye_stream import EyeStream
+from .fovea_reader import FovealElement, FoveaReader
+from .hand_motor import HandMotor
+from .llm_bridge import LLMBridge
+from .narrator import LiveNarrator
+from .cognitive import (
     ApplicationRole,
     CognitivePlanner,
     ObstacleRecoveryManager,

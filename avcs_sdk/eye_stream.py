@@ -80,6 +80,10 @@ class EyeFrame:
     latency_ms: float                # Forward pass duration
 
 
+# Backwards-compatible alias: the observation dataclass is named EyeFrame.
+EyeObservation = EyeFrame
+
+
 class EyeStream(StreamingVisualCortexV2):
     """100 FPS Live Eye Stream with integrated StreamingVisualCortexV2 (400,765 parameters)."""
 
@@ -88,13 +92,21 @@ class EyeStream(StreamingVisualCortexV2):
         hidden_dim: Optional[int] = None,
         weights_path: Optional[str] = DEFAULT_WEIGHTS,
         device: str = "cpu",
+        source: str = "screen",
+        load_weights: bool = True,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
         self.to(self.device)
         self.geometry = self._query_geometry()
         self._sct = None
-        self._init_capture()
+        self._source = source
+        # `source="synthetic"` forces the deterministic 128-gray fallback buffer
+        # instead of a real screen capture, so tests and headless runs never
+        # depend on a display server.
+        self._use_synthetic = str(source).lower() in ("synthetic", "virtual", "test")
+        if not self._use_synthetic:
+            self._init_capture()
 
         self.preprocessor = EdgeLuminancePreprocessor().to(self.device)
         self.temporal_state: Optional[CortexTemporalState] = None
@@ -102,7 +114,7 @@ class EyeStream(StreamingVisualCortexV2):
         # Honest weight provenance: a checkpoint is only "loaded" if keys match.
         self.weights_loaded: bool = False
         self.weights_status: str = "random_initialised"
-        if weights_path:
+        if load_weights and weights_path:
             self.load_weights(weights_path)
 
         self.eval()
@@ -203,7 +215,7 @@ class EyeStream(StreamingVisualCortexV2):
 
     def grab_screen(self) -> np.ndarray:
         """Captures a native RGB screenshot in <3-6ms."""
-        if self._sct is not None:
+        if self._sct is not None and not getattr(self, "_use_synthetic", False):
             try:
                 mon = self._sct.monitors[1] if len(self._sct.monitors) > 1 else self._sct.monitors[0]
                 shot = self._sct.grab(mon)

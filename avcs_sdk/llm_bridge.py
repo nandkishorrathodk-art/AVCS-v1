@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from avcs.narrator import LiveCommentary
+from .narrator import LiveCommentary
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 

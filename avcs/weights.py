@@ -389,8 +389,13 @@ def load_avcs_weights(
                         cortex.weights_loaded = loaded
                     return loaded
 
+            # HumanEye carries a grounder and an objectness head that are loaded
+            # separately below; their absence from the cortical checkpoint must
+            # not fail the completeness check for the backbone/affordance/fovea.
             optional_missing_prefixes = (
-                ("grounder.",) if target_cls == "HumanEye" and not strict else ()
+                ("grounder.", "objectness_model.")
+                if target_cls == "HumanEye" and not strict
+                else ()
             )
             # Legacy checkpoints predate the fully-learned heads in core/learned.py,
             # so their keys are absent. Treat them as optional: the backbone and
