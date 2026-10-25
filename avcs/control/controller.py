@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import sys
 import threading
 import time
 from collections import deque
@@ -532,6 +533,7 @@ class AVCSController:
         double_click: bool = False,
         verify_action: bool = True,
         enable_micro_tremor: Optional[bool] = None,
+        is_window_launch: bool = False,
     ) -> ActionResult:
         """Locates target, moves naturally (5th-order minimum-jerk), clicks, and verifies postcondition.
         
@@ -580,22 +582,32 @@ class AVCSController:
         # 3. Smooth Biological Motor Movement
         if enable_micro_tremor is not None:
             try:
-                self.servoing.servo_to((tx, ty), realtime=False, enable_micro_tremor=enable_micro_tremor)
+                self.servoing.servo_to((tx, ty), realtime=True, enable_micro_tremor=enable_micro_tremor)
             except TypeError:
-                self.servoing.servo_to((tx, ty), realtime=False)
+                self.servoing.servo_to((tx, ty), realtime=True)
         else:
-            self.servoing.servo_to((tx, ty), realtime=False)
+            self.servoing.servo_to((tx, ty), realtime=True)
 
         # 4. Dispatch once through the verifier, which owns the action lifecycle.
         verification_dict = None
         verified = False
         if verify_action:
-            v_res = self.verifier.execute_and_verify(
-                action_type="double_click" if double_click else "click",
-                target=(tx, ty),
-                # Clicks can submit or toggle state, so never replay them automatically.
-                max_recovery_tier=1,
-            )
+            v_action_name = "open_application" if is_window_launch else ("double_click" if double_click else "click")
+            try:
+                v_res = self.verifier.execute_and_verify(
+                    action_type="double_click" if double_click else "click",
+                    target=(tx, ty),
+                    # Clicks can submit or toggle state, so never replay them automatically.
+                    max_recovery_tier=1,
+                    is_window_launch=is_window_launch,
+                    action_name=v_action_name,
+                )
+            except TypeError:
+                v_res = self.verifier.execute_and_verify(
+                    action_type="double_click" if double_click else "click",
+                    target=(tx, ty),
+                    max_recovery_tier=1,
+                )
             verified = v_res.status == VerificationStatus.VERIFIED
             verification_dict = {
                 "status": v_res.status.value,
@@ -637,7 +649,41 @@ class AVCSController:
 
     def open_application(self, app_name: str) -> ActionResult:
         """High-level intent to open an application by icon or menu, and verify window launch."""
-        res = self.click_target(f"{app_name} icon", double_click=True, verify_action=True)
+        clean_name = app_name.strip()
+        query = f"{clean_name} icon"
+        double_click = True
+
+        # Inspect target coordinate or app query. If target is on the Windows 11 taskbar
+        # (e.g. y > 0.92 or grounded candidate y > 0.92), execute a single click
+        # (double_click=False) instead of double_click=True to prevent the second click
+        # from minimizing the newly opened window.
+        is_taskbar = "taskbar" in clean_name.lower() or "taskbar" in app_name.lower()
+        if not is_taskbar:
+            try:
+                grounding = self.locate(query)
+                if grounding is not None and getattr(grounding, "target_coord", None) is not None:
+                    if grounding.target_coord[1] > 0.92:
+                        is_taskbar = True
+            except Exception:
+                pass
+
+        if is_taskbar:
+            double_click = False
+
+        try:
+            res = self.click_target(
+                query,
+                double_click=double_click,
+                verify_action=True,
+                is_window_launch=True,
+            )
+        except TypeError:
+            res = self.click_target(
+                query,
+                double_click=double_click,
+                verify_action=True,
+            )
+
         return ActionResult(
             action="open_application",
             target_query=app_name,

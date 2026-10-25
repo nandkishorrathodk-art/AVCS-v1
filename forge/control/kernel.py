@@ -145,6 +145,7 @@ class ControlKernel:
     # -- simulate --------------------------------------------------------
     def simulate(self, plan: Plan) -> Simulation:
         sim = Simulation(ok=True)
+        simulated_created: set[str] = set()
         for step in plan.steps:
             label = step.describe()
 
@@ -173,16 +174,19 @@ class ControlKernel:
                     sim.ok = False
                     sim.problems.append(f"{label}: {exc.reason}")
                     continue
-                exists = os.path.exists(real)
+                exists = os.path.exists(real) or (real in simulated_created)
                 if step.expect_absent_before and exists:
                     sim.ok = False
                     sim.problems.append(
                         f"{label}: expected {os.path.basename(real)} to be absent, "
                         "but it already exists"
                     )
-                if step.op in (Op.READ, Op.APPEND) and not exists:
+                if step.op in (Op.READ, Op.APPEND, Op.STAT) and not exists:
                     sim.ok = False
                     sim.problems.append(f"{label}: target does not exist")
+
+                if step.op in (Op.WRITE, Op.MKDIR):
+                    simulated_created.add(real)
 
                 # 4. Risk surface: name-suggests-secrets paths need approval.
                 base = os.path.basename(real).lower()

@@ -1,0 +1,91 @@
+{
+  "checkpoint_path": "runs\\weights\\candidates\\candidate_m3_objectness_v2.pt",
+  "saved_at": "2026-10-24T05:35:48.293041+00:00",
+  "architecture": "UIObjectnessModel",
+  "is_release": false,
+  "epoch": 15,
+  "backbone_parameters": 9937,
+  "total_parameters": 18551,
+  "config": {
+    "version": "v2.0.0",
+    "model": {
+      "architecture": "UIObjectnessModel",
+      "in_channels": 4,
+      "feature_dim": 128,
+      "presence_threshold": 0.35,
+      "heatmap_threshold": 0.35,
+      "top_k": 20,
+      "backbone_params": 9937,
+      "total_params": 18419
+    },
+    "preprocessor": {
+      "type": "EdgeLuminancePreprocessor",
+      "channels": [
+        "luminance",
+        "sobel_x",
+        "sobel_y",
+        "gradient_magnitude"
+      ],
+      "input_size": [
+        128,
+        128
+      ],
+      "eps": 1e-06
+    },
+    "dataset": {
+      "generators": [
+        "ui_grounding",
+        "cleanroom_system1_v1"
+      ],
+      "sampling_policy": "balanced",
+      "train_split": "train",
+      "val_split": "val",
+      "target_image_size": [
+        128,
+        128
+      ]
+    },
+    "augmentation": {
+      "p_invert": 0.5,
+      "p_jitter": 0.5,
+      "brightness_range": [
+        -0.2,
+        0.2
+      ],
+      "contrast_range": [
+        0.8,
+        1.2
+      ],
+      "gamma_range": [
+        0.8,
+        1.2
+      ]
+    },
+    "loss": {
+      "presence_weight": 1.0,
+      "heatmap_weight": 2.0,
+      "box_weight": 1.0,
+      "presence_focal_gamma": 2.0,
+      "sigma": 1.0
+    },
+    "training": {
+      "optimizer": "AdamW",
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "scheduler": "CosineAnnealingLR",
+      "batch_size": 16,
+      "epochs": 15,
+      "seed": 7,
+      "max_grad_norm": 1.0
+    }
+  },
+  "metrics": {
+    "final_train_loss": 0.8602204407964434,
+    "final_val_loss": 0.968647763133049,
+    "best_val_loss": 0.9674060791730881,
+    "val_presence_acc": 0.9861111111111112,
+    "val_blank_rejection_rate": 0.9375,
+    "training_time_seconds": 116.82,
+    "epochs_trained": 15
+  }
+}

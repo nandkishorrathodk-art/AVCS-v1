@@ -1,0 +1,90 @@
+{
+  "schema_version": "2.0.0",
+  "model_name": "StreamingVisualCortexV2",
+  "checkpoint_file": "candidate_streaming_v2.pt",
+  "sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+  "parameter_count": 400765,
+  "parameter_breakdown": {
+    "spatial_stem": 51296,
+    "conv_gru": 221376,
+    "latent_projection": 6432,
+    "future_predictor": 18624,
+    "head1_change_spinner": 56242,
+    "head2_ui_detector": 28234,
+    "head3_post_action": 18561,
+    "total": 400765
+  },
+  "total_steps": 500,
+  "device": "cpu",
+  "hyperparameters": {
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 16,
+    "lr_scheduler": "cosine",
+    "loss_weights": {
+      "h1": 1.0,
+      "h2": 1.0,
+      "h3": 1.0,
+      "latent": 0.5
+    },
+    "seed": 42
+  },
+  "initial_loss": 15.136902809143066,
+  "final_loss": 0.13882318139076233,
+  "min_loss": 0.11081626266241074,
+  "loss_history_sampled": [
+    15.1369,
+    2.5904,
+    1.9199,
+    1.4401,
+    0.9468,
+    0.7521,
+    0.7992,
+    0.6356,
+    0.4038,
+    0.3127,
+    0.2633,
+    0.2618,
+    0.2602,
+    0.174,
+    0.1771,
+    0.181,
+    0.2099,
+    0.2391,
+    0.1693,
+    0.1621
+  ],
+  "final_metrics": {
+    "total_loss": 0.13882318139076233,
+    "loss_head1": 0.021280476823449135,
+    "loss_head2": 0.11353309452533722,
+    "loss_head3": 0.0007442020578309894,
+    "loss_latent": 0.00653077894821763,
+    "loss_change": 0.013793366961181164,
+    "loss_spinner": 0.007487109396606684,
+    "loss_obj": 0.06222761049866676,
+    "loss_cls": 0.013980377465486526,
+    "loss_box": 0.03732510656118393
+  },
+  "initial_metrics": {
+    "total_loss": 15.136902809143066,
+    "loss_head1": 1.884352445602417,
+    "loss_head2": 12.033417701721191,
+    "loss_head3": 0.6255506277084351,
+    "loss_latent": 1.1871637105941772,
+    "loss_change": 1.1351428031921387,
+    "loss_spinner": 0.7492095828056335,
+    "loss_obj": 6.449489593505859,
+    "loss_cls": 2.727660894393921,
+    "loss_box": 2.856266736984253
+  },
+  "parameter_divergence_l2": 12.635942,
+  "cpu_throughput": {
+    "total_elapsed_seconds": 616.61,
+    "steps_per_second": 0.81,
+    "frames_per_second": 12.97,
+    "p50_ms_per_step": 957.91,
+    "p95_ms_per_step": 2380.56
+  },
+  "completed_at": "2026-10-24T15:24:02.275969+00:00"
+}

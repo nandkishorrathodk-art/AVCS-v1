@@ -176,8 +176,13 @@ class LocalBackend:
             # and then repeated the system prompt.
             eos_id=EOS,
         )
-        text = self.tokenizer.decode(out[0].tolist())
-        return text[len(prompt):] if len(text) > len(prompt) else text
+        new_ids = out[0].tolist()[ids.shape[1]:]
+        return self.tokenizer.decode(new_ids, skip_specials=True).strip()
+
+    def generate(self, system: str = "", user: str = "", max_tokens: int = 400) -> str:
+        if system and not user:
+            return self.complete("", system, max_tokens)
+        return self.complete(system, user, max_tokens)
 
 
 class ScriptedBackend:

@@ -1,0 +1,122 @@
+{
+  "cortex_model": {
+    "component": "StreamingVisualCortexV2 (avcs/cortex/model.py)",
+    "warmup_rss_mb": 225.73,
+    "peak_rss_mb": 226.26,
+    "end_rss_mb": 226.26,
+    "delta_rss_mb": 0.53,
+    "warmup_vms_mb": 535.5,
+    "peak_vms_mb": 535.62,
+    "end_vms_mb": 535.62,
+    "delta_vms_mb": 0.12,
+    "ticks": 200,
+    "samples": [
+      {
+        "tick": 1,
+        "rss_mb": 225.73,
+        "vms_mb": 535.5
+      },
+      {
+        "tick": 50,
+        "rss_mb": 225.45,
+        "vms_mb": 535.12
+      },
+      {
+        "tick": 100,
+        "rss_mb": 225.6,
+        "vms_mb": 535.38
+      },
+      {
+        "tick": 150,
+        "rss_mb": 226.26,
+        "vms_mb": 535.62
+      },
+      {
+        "tick": 200,
+        "rss_mb": 226.26,
+        "vms_mb": 535.62
+      }
+    ],
+    "o1_constant_scaling": true
+  },
+  "eye_stream": {
+    "component": "EyeStream (avcs/eye_stream.py)",
+    "warmup_rss_mb": 232.8,
+    "peak_rss_mb": 232.8,
+    "end_rss_mb": 232.8,
+    "delta_rss_mb": -0.0,
+    "warmup_vms_mb": 546.5,
+    "peak_vms_mb": 546.5,
+    "end_vms_mb": 546.5,
+    "delta_vms_mb": 0.0,
+    "ticks": 200,
+    "samples": [
+      {
+        "tick": 1,
+        "rss_mb": 232.8,
+        "vms_mb": 546.5
+      },
+      {
+        "tick": 50,
+        "rss_mb": 232.8,
+        "vms_mb": 546.5
+      },
+      {
+        "tick": 100,
+        "rss_mb": 232.8,
+        "vms_mb": 546.5
+      },
+      {
+        "tick": 150,
+        "rss_mb": 232.8,
+        "vms_mb": 546.5
+      },
+      {
+        "tick": 200,
+        "rss_mb": 232.8,
+        "vms_mb": 546.5
+      }
+    ],
+    "o1_constant_scaling": true
+  },
+  "integrated": {
+    "component": "Integrated Pipeline (EyeStream + StreamingVisualCortexV2)",
+    "warmup_rss_mb": 238.57,
+    "peak_rss_mb": 239.2,
+    "end_rss_mb": 239.2,
+    "delta_rss_mb": 0.63,
+    "warmup_vms_mb": 556.92,
+    "peak_vms_mb": 557.64,
+    "end_vms_mb": 557.64,
+    "delta_vms_mb": 0.72,
+    "ticks": 200,
+    "samples": [
+      {
+        "tick": 1,
+        "rss_mb": 238.57,
+        "vms_mb": 556.92
+      },
+      {
+        "tick": 50,
+        "rss_mb": 238.61,
+        "vms_mb": 556.92
+      },
+      {
+        "tick": 100,
+        "rss_mb": 238.27,
+        "vms_mb": 556.61
+      },
+      {
+        "tick": 150,
+        "rss_mb": 238.53,
+        "vms_mb": 556.98
+      },
+      {
+        "tick": 200,
+        "rss_mb": 239.2,
+        "vms_mb": 557.64
+      }
+    ],
+    "o1_constant_scaling": true
+  }
+}

@@ -27,8 +27,8 @@ class EditorState:
 f1 = np.full((128, 128, 3), 120, dtype=np.uint8)
 f1[10:30, 10:30] = 255
 obs1 = engine.generate(EditorState(), frame=f1)
-print("=== SCENARIO 1 (Code Editor Khula Hai) ===")
-print("Model ki boli:")
+print("=== SCENARIO 1 (Code Editor Open) ===")
+print("Model speech:")
 print(f"  \"{obs1.scene_description}\"")
 print()
 
@@ -49,8 +49,8 @@ class ModalState:
 f2 = np.full((128, 128, 3), 180, dtype=np.uint8)
 f2[40:80, 40:80] = 20
 obs2 = engine.generate(ModalState(), frame=f2)
-print("=== SCENARIO 2 (Save Pop-up Aane Par) ===")
-print("Model ki boli:")
+print("=== SCENARIO 2 (Save Pop-up Appearance) ===")
+print("Model speech:")
 print(f"  \"{obs2.scene_description}\"")
 print()
 
@@ -66,6 +66,6 @@ class BlankState:
 
 f3 = np.full((128, 128, 3), 40, dtype=np.uint8)
 obs3 = engine.generate(BlankState(), frame=f3)
-print("=== SCENARIO 3 (Jab Screen Blank / Target Missing Ho) ===")
-print("Model ki boli:")
+print("=== SCENARIO 3 (When Screen Blank / Target Missing) ===")
+print("Model speech:")
 print(f"  \"{obs3.scene_description}\"")

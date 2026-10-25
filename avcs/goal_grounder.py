@@ -265,12 +265,11 @@ class GoalConditionedGrounder(nn.Module):
                 self._query_cache[clean_q] = emb.cpu()
             return emb
 
-    def _forward_modulated(
+    def _forward_impl(
         self,
         image_or_feat: torch.Tensor,
         query: Union[torch.Tensor, str, Sequence[str]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Modulates visual features by query embedding and executes prediction heads."""
         device = image_or_feat.device
 
         # If input is image tensor [B, 3, H, W], pass through visual backbone
@@ -293,6 +292,8 @@ class GoalConditionedGrounder(nn.Module):
         # Encode query
         if isinstance(query, str):
             query_emb = self.get_query_embedding(query, device=device)
+            if torch.is_grad_enabled() and query_emb.is_inference():
+                query_emb = query_emb.clone()
         elif isinstance(query, (list, tuple)):
             tokens = encode_queries(query).to(device)
             query_emb = self.query_encoder(tokens)
@@ -326,13 +327,22 @@ class GoalConditionedGrounder(nn.Module):
 
         return heatmap_logits, existence_logits
 
+    @torch.inference_mode()
+    def _forward_modulated(
+        self,
+        image_or_feat: torch.Tensor,
+        query: Union[torch.Tensor, str, Sequence[str]],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Modulates visual features by query embedding and executes prediction heads."""
+        return self._forward_impl(image_or_feat, query)
+
     def forward(
         self,
         image: torch.Tensor,
         query: Union[torch.Tensor, str, Sequence[str]],
     ) -> torch.Tensor:
         """Returns spatial click heatmap logits [B, 1, H // 2, W // 2]."""
-        heatmap_logits, _ = self._forward_modulated(image, query)
+        heatmap_logits, _ = self._forward_impl(image, query)
         target_h = max(16, image.shape[-2] // 2)
         target_w = max(16, image.shape[-1] // 2)
         if heatmap_logits.shape[-2:] != (target_h, target_w):
@@ -351,7 +361,7 @@ class GoalConditionedGrounder(nn.Module):
         query: Union[torch.Tensor, str, Sequence[str]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns click heatmap logits [B, 1, 16, 16] and existence logits [B, 1]."""
-        return self._forward_modulated(image, query)
+        return self._forward_impl(image, query)
 
     @torch.inference_mode()
     def ground(
@@ -364,7 +374,7 @@ class GoalConditionedGrounder(nn.Module):
         """Grounds a text query onto visual features in <3ms on CPU with sub-pixel precision."""
         t0 = time.perf_counter()
         device = visual_features.device
-        clean_q = query.strip() if isinstance(query, str) else ""
+        clean_q = query.strip().lower() if isinstance(query, str) else ""
         if not clean_q or len(clean_q.encode("utf-8")) > MAX_QUERY_BYTES:
             dt_ms = (time.perf_counter() - t0) * 1000.0
             return GroundingResult(
@@ -423,7 +433,7 @@ class GoalConditionedGrounder(nn.Module):
         device = next(self.parameters()).device
         img = image_tensor.to(device)
 
-        clean_q = query.strip() if isinstance(query, str) else ""
+        clean_q = query.strip().lower() if isinstance(query, str) else ""
         if not clean_q or not any(c.isalnum() for c in clean_q):
             return {
                 "point": (0.5, 0.5),
@@ -471,7 +481,7 @@ class GoalConditionedGrounder(nn.Module):
         device = next(self.parameters()).device
         img = tensor.unsqueeze(0).to(device)
 
-        clean_q = query.strip() if isinstance(query, str) else ""
+        clean_q = query.strip().lower() if isinstance(query, str) else ""
         if not clean_q:
             raise ValueError("Grounding queries must not be empty")
 
@@ -486,9 +496,12 @@ class GoalConditionedGrounder(nn.Module):
 
         orig_x = max(0.0, min(0.999, float(orig_point[0])))
         orig_y = max(0.0, min(0.999, float(orig_point[1])))
-        in_bounds = (-0.08 <= orig_point[0] <= 1.08) and (-0.08 <= orig_point[1] <= 1.08)
+        in_viewport = (
+            transform.left_norm <= canvas_point[0] <= transform.left_norm + transform.width_norm
+            and transform.top_norm <= canvas_point[1] <= transform.top_norm + transform.height_norm
+        )
 
-        if not target_present or not in_bounds:
+        if not target_present or not in_viewport:
             point_result = None
         else:
             point_result = (orig_x, orig_y)
@@ -522,7 +535,7 @@ class GoalConditionedGrounder(nn.Module):
         device = next(self.parameters()).device
         img = tensor.unsqueeze(0).to(device)
 
-        clean_q = query.strip() if isinstance(query, str) else ""
+        clean_q = query.strip().lower() if isinstance(query, str) else ""
         if not clean_q:
             return GroundedTarget(
                 target_name="",

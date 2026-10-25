@@ -1,0 +1,1734 @@
+{
+  "timestamp_utc": "2026-10-24T15:37:04.859802+00:00",
+  "benchmark_agent": "challenger_m4_2",
+  "milestone": "M4",
+  "verdict": "APPROVE",
+  "gates": {
+    "gate_checkpoint_integrity": {
+      "name": "Checkpoint & Baseline Integrity",
+      "passed": true,
+      "evidence": "SHA256 match = True, Baselines untouched = True"
+    },
+    "gate_loss_reduction": {
+      "name": "Multi-Task Loss Reduction Over Random Init",
+      "passed": true,
+      "evidence": "Loss 0.2540 vs 40.8726 (99.4% reduction)"
+    },
+    "gate_head1_temporal": {
+      "name": "Head 1 Temporal Change & Spinner Learning",
+      "passed": true,
+      "evidence": "Change IoU = 0.4606, Spinner Acc = 100.0%"
+    },
+    "gate_head2_classification": {
+      "name": "Head 2 5-Class Morphology Classification",
+      "passed": true,
+      "evidence": "5-Class Acc = 99.77% (UI=100.0%, CR=98.96%)"
+    },
+    "gate_head3_action_response": {
+      "name": "Head 3 Post-Action Visual Response Discrimination",
+      "passed": true,
+      "evidence": "Acc = 100.0%, Margin = 0.9988"
+    },
+    "gate_negative_screen_safety": {
+      "name": "Gate 4: Blank-Screen Safety (Exactly 0 FP across 66 Negative Screens)",
+      "passed": true,
+      "evidence": "Observed 0/66 false positives at 0.35 (0/66 at 0.50). Solid/gradient/cleanroom = 0 FP, Wallpaper/noise = 0 FP."
+    }
+  },
+  "synthesis": {
+    "candidate_total_multi_task_loss": 0.254,
+    "random_init_total_multi_task_loss": 40.8726,
+    "relative_loss_reduction_pct": 99.38,
+    "loss_reduction_factor": 160.88
+  },
+  "checkpoint_integrity": {
+    "checkpoint_path": "runs\\weights\\staging\\candidate_streaming_v2.pt",
+    "file_size_bytes": 1623341,
+    "computed_sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+    "expected_sha256": "fb1a6f4dbbf36287c287fffed7e6ddf32897779492ff722f0449d3f8ce6a43b4",
+    "sha256_match": true,
+    "parameter_count": 400765,
+    "expected_param_count": 400765,
+    "l2_parameter_divergence": 12.6359,
+    "baseline_weights_verified": [
+      "runs/weights/goal_grounder_best.pt",
+      "runs/weights/candidates/candidate_m3_word_recognizer_v1.pt",
+      "runs/weights/candidates/avcs_streaming_cortex_v1.pt"
+    ],
+    "baseline_weights_untouched": true
+  },
+  "held_out_evaluation": {
+    "candidate": {
+      "total_frames": 56,
+      "total_positive_cells": 443,
+      "total_background_cells": 13893,
+      "loss_head2": 0.2253,
+      "loss_obj": 0.0998,
+      "loss_cls": 0.0319,
+      "loss_box": 0.0936,
+      "positive_cells_mean_prob": 0.1859,
+      "positive_cells_median_prob": 0.135,
+      "background_cells_mean_prob": 0.0148,
+      "background_cells_median_prob": 0.003,
+      "objectness_roc_auc": 0.9145,
+      "classification_accuracy_pct": 99.77,
+      "ui_grounding": {
+        "count": 40,
+        "cls_acc": 100.0,
+        "mean_pos_prob": 0.1775,
+        "loss_h2": 0.2273
+      },
+      "cleanroom": {
+        "count": 16,
+        "cls_acc": 98.96,
+        "mean_pos_prob": 0.2162,
+        "loss_h2": 0.2281
+      }
+    },
+    "random": {
+      "total_frames": 56,
+      "total_positive_cells": 443,
+      "total_background_cells": 13893,
+      "loss_head2": 38.3715,
+      "loss_obj": 33.4996,
+      "loss_cls": 2.8202,
+      "loss_box": 2.0518,
+      "positive_cells_mean_prob": 0.6488,
+      "positive_cells_median_prob": 0.8907,
+      "background_cells_mean_prob": 0.6629,
+      "background_cells_median_prob": 0.8883,
+      "objectness_roc_auc": 0.5056,
+      "classification_accuracy_pct": 30.93,
+      "ui_grounding": {
+        "count": 40,
+        "cls_acc": 34.58,
+        "mean_pos_prob": 0.6829,
+        "loss_h2": 38.2363
+      },
+      "cleanroom": {
+        "count": 16,
+        "cls_acc": 17.71,
+        "mean_pos_prob": 0.5255,
+        "loss_h2": 38.738
+      }
+    }
+  },
+  "negative_screens_evaluation": {
+    "candidate": {
+      "total_negative_screens": 66,
+      "false_positives_at_0_35": 0,
+      "false_positives_at_0_50": 0,
+      "fp_rate_at_0_35_pct": 0.0,
+      "fp_rate_at_0_50_pct": 0.0,
+      "overall_max_prob": 0.3232,
+      "overall_mean_prob": 0.0064,
+      "breakdown_by_subcategory": {
+        "cleanroom_empty": {
+          "count": 16,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.312,
+          "mean_p": 0.0128
+        },
+        "desktop_wallpaper": {
+          "count": 10,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.3232,
+          "mean_p": 0.0079
+        },
+        "solid_gradient": {
+          "count": 20,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.1395,
+          "mean_p": 0.0042
+        },
+        "synthetic_gradient": {
+          "count": 6,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.0518,
+          "mean_p": 0.0028
+        },
+        "synthetic_noise": {
+          "count": 8,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.0389,
+          "mean_p": 0.0027
+        },
+        "synthetic_solid": {
+          "count": 6,
+          "false_positives_at_0_35": 0,
+          "false_positives_at_0_50": 0,
+          "max_p": 0.0899,
+          "mean_p": 0.0035
+        }
+      },
+      "records": [
+        {
+          "frame_id": "screen_test_neg_0001",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0493,
+          "p_mean": 0.0034,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0002",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0768,
+          "p_mean": 0.0035,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0003",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0603,
+          "p_mean": 0.0035,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0004",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0569,
+          "p_mean": 0.0034,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0005",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.077,
+          "p_mean": 0.0035,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0006",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0643,
+          "p_mean": 0.0037,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0007",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0655,
+          "p_mean": 0.0038,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0008",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.076,
+          "p_mean": 0.0035,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0009",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0532,
+          "p_mean": 0.0033,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0010",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0456,
+          "p_mean": 0.0034,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0011",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0504,
+          "p_mean": 0.0056,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0012",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0902,
+          "p_mean": 0.0037,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0013",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.124,
+          "p_mean": 0.0051,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0014",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.1338,
+          "p_mean": 0.0056,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0015",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0667,
+          "p_mean": 0.0043,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0016",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.1022,
+          "p_mean": 0.0039,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0017",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.1395,
+          "p_mean": 0.0055,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0018",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.0908,
+          "p_mean": 0.0034,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0019",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.1012,
+          "p_mean": 0.0054,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0020",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.1297,
+          "p_mean": 0.0055,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0021",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.1395,
+          "p_mean": 0.0053,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0022",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.2062,
+          "p_mean": 0.0082,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0023",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.1175,
+          "p_mean": 0.006,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0024",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.1085,
+          "p_mean": 0.0065,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0025",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.182,
+          "p_mean": 0.0081,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0026",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.1801,
+          "p_mean": 0.0075,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0027",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.2126,
+          "p_mean": 0.0106,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0028",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.2739,
+          "p_mean": 0.0076,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0029",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.3232,
+          "p_mean": 0.0115,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "screen_test_neg_0030",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 0.1834,
+          "p_mean": 0.0074,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00000",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2627,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00001",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00002",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2549,
+          "p_mean": 0.0122,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00003",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00004",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00005",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2511,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00006",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00007",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2657,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00008",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2627,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00009",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2511,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00010",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2821,
+          "p_mean": 0.0123,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00011",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2602,
+          "p_mean": 0.0125,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00012",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00013",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.2856,
+          "p_mean": 0.0125,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00014",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.3119,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "test_negative_00015",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 0.312,
+          "p_mean": 0.0133,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "pure_black",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0155,
+          "p_mean": 0.0016,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "pure_white",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0822,
+          "p_mean": 0.0036,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "uniform_gray_0.2",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0899,
+          "p_mean": 0.0042,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "uniform_gray_0.3",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0861,
+          "p_mean": 0.004,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "uniform_gray_0.4",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0845,
+          "p_mean": 0.0038,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "uniform_gray_0.5",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.0837,
+          "p_mean": 0.0038,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_horiz_6",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0518,
+          "p_mean": 0.0043,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_vert_7",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0089,
+          "p_mean": 0.0012,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_horiz_8",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0518,
+          "p_mean": 0.0043,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_vert_9",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0089,
+          "p_mean": 0.0012,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_horiz_10",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0518,
+          "p_mean": 0.0043,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gradient_vert_11",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 0.0089,
+          "p_mean": 0.0012,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_12",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.024,
+          "p_mean": 0.0027,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_13",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.025,
+          "p_mean": 0.0026,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_14",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0231,
+          "p_mean": 0.0026,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_15",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0333,
+          "p_mean": 0.0026,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_16",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0324,
+          "p_mean": 0.0028,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_17",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0171,
+          "p_mean": 0.0026,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_18",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0316,
+          "p_mean": 0.0027,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        },
+        {
+          "frame_id": "gaussian_noise_19",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 0.0389,
+          "p_mean": 0.0028,
+          "fp_cells_at_0_35": 0,
+          "fp_cells_at_0_50": 0,
+          "is_false_positive_0_35": false,
+          "is_false_positive_0_50": false
+        }
+      ]
+    },
+    "random": {
+      "total_negative_screens": 66,
+      "false_positives_at_0_35": 66,
+      "false_positives_at_0_50": 66,
+      "fp_rate_at_0_35_pct": 100.0,
+      "fp_rate_at_0_50_pct": 100.0,
+      "overall_max_prob": 1.0,
+      "overall_mean_prob": 0.6889,
+      "breakdown_by_subcategory": {
+        "cleanroom_empty": {
+          "count": 16,
+          "false_positives_at_0_35": 16,
+          "false_positives_at_0_50": 16,
+          "max_p": 1.0,
+          "mean_p": 0.626
+        },
+        "desktop_wallpaper": {
+          "count": 10,
+          "false_positives_at_0_35": 10,
+          "false_positives_at_0_50": 10,
+          "max_p": 1.0,
+          "mean_p": 0.6526
+        },
+        "solid_gradient": {
+          "count": 20,
+          "false_positives_at_0_35": 20,
+          "false_positives_at_0_50": 20,
+          "max_p": 1.0,
+          "mean_p": 0.7506
+        },
+        "synthetic_gradient": {
+          "count": 6,
+          "false_positives_at_0_35": 6,
+          "false_positives_at_0_50": 6,
+          "max_p": 1.0,
+          "mean_p": 0.604
+        },
+        "synthetic_noise": {
+          "count": 8,
+          "false_positives_at_0_35": 8,
+          "false_positives_at_0_50": 8,
+          "max_p": 1.0,
+          "mean_p": 0.716
+        },
+        "synthetic_solid": {
+          "count": 6,
+          "false_positives_at_0_35": 6,
+          "false_positives_at_0_50": 6,
+          "max_p": 1.0,
+          "mean_p": 0.7602
+        }
+      },
+      "records": [
+        {
+          "frame_id": "screen_test_neg_0001",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8156,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0002",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.82,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0003",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8168,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0004",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8166,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0005",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.82,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0006",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8168,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0007",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8165,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0008",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.8199,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0009",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8162,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0010",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8152,
+          "fp_cells_at_0_35": 223,
+          "fp_cells_at_0_50": 204,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0011",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.5454,
+          "fp_cells_at_0_35": 171,
+          "fp_cells_at_0_50": 147,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0012",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.7226,
+          "fp_cells_at_0_35": 198,
+          "fp_cells_at_0_50": 192,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0013",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.8091,
+          "fp_cells_at_0_35": 228,
+          "fp_cells_at_0_50": 216,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0014",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.6986,
+          "fp_cells_at_0_35": 187,
+          "fp_cells_at_0_50": 184,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0015",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.5808,
+          "fp_cells_at_0_35": 158,
+          "fp_cells_at_0_50": 154,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0016",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.7386,
+          "fp_cells_at_0_35": 204,
+          "fp_cells_at_0_50": 192,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0017",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.7183,
+          "fp_cells_at_0_35": 187,
+          "fp_cells_at_0_50": 185,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0018",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.6921,
+          "fp_cells_at_0_35": 188,
+          "fp_cells_at_0_50": 183,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0019",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.6146,
+          "fp_cells_at_0_35": 170,
+          "fp_cells_at_0_50": 155,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0020",
+          "source": "ui_grounding",
+          "subcategory": "solid_gradient",
+          "p_max": 0.9999,
+          "p_mean": 0.7185,
+          "fp_cells_at_0_35": 188,
+          "fp_cells_at_0_50": 185,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0021",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6323,
+          "fp_cells_at_0_35": 177,
+          "fp_cells_at_0_50": 161,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0022",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6329,
+          "fp_cells_at_0_35": 178,
+          "fp_cells_at_0_50": 166,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0023",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6516,
+          "fp_cells_at_0_35": 184,
+          "fp_cells_at_0_50": 171,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0024",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6326,
+          "fp_cells_at_0_35": 178,
+          "fp_cells_at_0_50": 159,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0025",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6577,
+          "fp_cells_at_0_35": 176,
+          "fp_cells_at_0_50": 168,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0026",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6661,
+          "fp_cells_at_0_35": 188,
+          "fp_cells_at_0_50": 176,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0027",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6532,
+          "fp_cells_at_0_35": 183,
+          "fp_cells_at_0_50": 174,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0028",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6309,
+          "fp_cells_at_0_35": 174,
+          "fp_cells_at_0_50": 163,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0029",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6703,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 176,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "screen_test_neg_0030",
+          "source": "ui_grounding",
+          "subcategory": "desktop_wallpaper",
+          "p_max": 1.0,
+          "p_mean": 0.6982,
+          "fp_cells_at_0_35": 188,
+          "fp_cells_at_0_50": 184,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00000",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6186,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00001",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6379,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00002",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6105,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 146,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00003",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6379,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00004",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.638,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00005",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6187,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00006",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6379,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00007",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6106,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 146,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00008",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6186,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00009",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6187,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00010",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6104,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 145,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00011",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6218,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00012",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6379,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00013",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6219,
+          "fp_cells_at_0_35": 186,
+          "fp_cells_at_0_50": 153,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00014",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.6379,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "test_negative_00015",
+          "source": "cleanroom_system1_v1",
+          "subcategory": "cleanroom_empty",
+          "p_max": 1.0,
+          "p_mean": 0.638,
+          "fp_cells_at_0_35": 189,
+          "fp_cells_at_0_50": 182,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "pure_black",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 1.0,
+          "p_mean": 0.4588,
+          "fp_cells_at_0_35": 112,
+          "fp_cells_at_0_50": 102,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "pure_white",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.9999,
+          "p_mean": 0.8206,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "uniform_gray_0.2",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.9999,
+          "p_mean": 0.8205,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "uniform_gray_0.3",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.9999,
+          "p_mean": 0.8205,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "uniform_gray_0.4",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.9999,
+          "p_mean": 0.8205,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "uniform_gray_0.5",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_solid",
+          "p_max": 0.9999,
+          "p_mean": 0.8205,
+          "fp_cells_at_0_35": 224,
+          "fp_cells_at_0_50": 213,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_horiz_6",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.5436,
+          "fp_cells_at_0_35": 147,
+          "fp_cells_at_0_50": 143,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_vert_7",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.6645,
+          "fp_cells_at_0_35": 177,
+          "fp_cells_at_0_50": 163,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_horiz_8",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.5436,
+          "fp_cells_at_0_35": 147,
+          "fp_cells_at_0_50": 143,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_vert_9",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.6645,
+          "fp_cells_at_0_35": 177,
+          "fp_cells_at_0_50": 163,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_horiz_10",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.5436,
+          "fp_cells_at_0_35": 147,
+          "fp_cells_at_0_50": 143,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gradient_vert_11",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_gradient",
+          "p_max": 1.0,
+          "p_mean": 0.6645,
+          "fp_cells_at_0_35": 177,
+          "fp_cells_at_0_50": 163,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_12",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7176,
+          "fp_cells_at_0_35": 194,
+          "fp_cells_at_0_50": 185,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_13",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7099,
+          "fp_cells_at_0_35": 195,
+          "fp_cells_at_0_50": 187,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_14",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7278,
+          "fp_cells_at_0_35": 198,
+          "fp_cells_at_0_50": 189,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_15",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7157,
+          "fp_cells_at_0_35": 198,
+          "fp_cells_at_0_50": 190,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_16",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7268,
+          "fp_cells_at_0_35": 201,
+          "fp_cells_at_0_50": 190,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_17",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.719,
+          "fp_cells_at_0_35": 200,
+          "fp_cells_at_0_50": 191,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_18",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.6982,
+          "fp_cells_at_0_35": 196,
+          "fp_cells_at_0_50": 181,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        },
+        {
+          "frame_id": "gaussian_noise_19",
+          "source": "synthetic_adversarial",
+          "subcategory": "synthetic_noise",
+          "p_max": 1.0,
+          "p_mean": 0.7129,
+          "fp_cells_at_0_35": 196,
+          "fp_cells_at_0_50": 184,
+          "is_false_positive_0_35": true,
+          "is_false_positive_0_50": true
+        }
+      ]
+    }
+  },
+  "temporal_sequences_evaluation": {
+    "candidate": {
+      "num_sequences": 100,
+      "loss_head1": 0.0251,
+      "loss_change": 0.016,
+      "loss_spinner": 0.0091,
+      "loss_future_latent": 0.0061,
+      "change_heatmap_mean_iou": 0.4606,
+      "change_pixel_precision": 0.3494,
+      "change_pixel_recall": 0.8612,
+      "change_pixel_f1": 0.4972,
+      "spinner_accuracy_pct": 100.0,
+      "spinner_roc_auc": 1.0,
+      "spinner_precision": 1.0,
+      "spinner_recall": 1.0,
+      "spinner_f1": 1.0
+    },
+    "random": {
+      "num_sequences": 100,
+      "loss_head1": 1.0634,
+      "loss_change": 0.377,
+      "loss_spinner": 0.6864,
+      "loss_future_latent": 1.3988,
+      "change_heatmap_mean_iou": 0.0042,
+      "change_pixel_precision": 0.0044,
+      "change_pixel_recall": 0.2056,
+      "change_pixel_f1": 0.0086,
+      "spinner_accuracy_pct": 56.0,
+      "spinner_roc_auc": 0.5085,
+      "spinner_precision": 0.0,
+      "spinner_recall": 0.0,
+      "spinner_f1": 0.0
+    }
+  },
+  "action_pairs_evaluation": {
+    "candidate": {
+      "num_pairs": 100,
+      "loss_head3": 0.0006,
+      "accuracy_pct": 100.0,
+      "roc_auc": 1.0,
+      "mean_positive_response_prob": 0.9996,
+      "mean_negative_response_prob": 0.0008,
+      "discrimination_margin": 0.9988
+    },
+    "random": {
+      "num_pairs": 100,
+      "loss_head3": 0.7383,
+      "accuracy_pct": 45.0,
+      "roc_auc": 0.4384,
+      "mean_positive_response_prob": 0.4008,
+      "mean_negative_response_prob": 0.4058,
+      "discrimination_margin": -0.005
+    }
+  }
+}

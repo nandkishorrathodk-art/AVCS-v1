@@ -25,6 +25,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+cv2 = None
+
 from forge.vision.capture import ScreenCapture, SyntheticScreen, open_capture
 from forge.vision.cortex.core.backbone import ConvBNAct, InvertedResidual
 from forge.vision.cortex.core.ventral import UI_CATEGORIES, VentralSemanticStream
@@ -40,6 +42,7 @@ from avcs.memory import (
     VisualMemoryManager,
 )
 from avcs.perception.focus import VisualFocusDetector, VisualFocusState
+from avcs.models.objectness_model import UIObjectnessModel, UIObjectnessPrediction
 
 
 @dataclasses.dataclass(frozen=True)
@@ -172,11 +175,12 @@ class MagnocellularMotionEngine:
             gray = frame[::stride_y, ::stride_x].astype(np.float32) / 255.0
 
         gh, gw = gray.shape
-        th = max(1, gh // self.rows)
-        tw = max(1, gw // self.cols)
-        grid = gray[:th * self.rows, :tw * self.cols].reshape(
-            self.rows, th, self.cols, tw
-        ).mean(axis=(1, 3))
+        if cv2 is not None:
+            grid = cv2.resize(gray, (self.cols, self.rows), interpolation=cv2.INTER_AREA)
+        else:
+            arr = np.ascontiguousarray(gray)
+            t_gray = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
+            grid = F.adaptive_avg_pool2d(t_gray, (self.rows, self.cols)).squeeze(0).squeeze(0).numpy()
 
         if self._prev_luminance is None:
             self._prev_luminance = grid
@@ -693,8 +697,15 @@ class HumanEye(nn.Module):
         # 8. Visual Typing-Focus Detector
         self.focus_detector = VisualFocusDetector()
 
+        # 9. Class-Agnostic UI Objectness Perception Model (Pillar C Safe)
+        self.objectness_model = UIObjectnessModel(
+            presence_threshold=0.70,
+            top_k=self.affordance_top_k,
+        ).to(self.device)
+
         # Telemetry & Callbacks
         self.frame_count: int = 0
+        self._last_perceived_seq: Optional[int] = None
         self._latencies: collections.deque[float] = collections.deque(maxlen=100)
         self._surprise_callbacks: List[Tuple[float, Callable[[HumanEyeState], None]]] = []
         self._last_state: Optional[HumanEyeState] = None
@@ -705,10 +716,15 @@ class HumanEye(nn.Module):
         # Pre-Trained Weights Discovery & Auto-Loading
         self.weights_loaded: bool = False
         if load_weights:
-            from avcs.weights import load_avcs_weights
+            from avcs.weights import load_avcs_weights, load_objectness_weights
             self.weights_loaded = load_avcs_weights(
                 self,
                 path=weights_path,
+                device=str(self.device),
+                strict=False,
+            )
+            load_objectness_weights(
+                self.objectness_model,
                 device=str(self.device),
                 strict=False,
             )
@@ -856,6 +872,92 @@ class HumanEye(nn.Module):
                 return None
             return inspection
 
+    def detect_objectness(
+        self,
+        frame: Optional[np.ndarray] = None,
+        as_prediction: bool = False,
+    ) -> Union[List[Tuple[float, float, str, float]], UIObjectnessPrediction]:
+        """Detects class-agnostic UI interactive hotspots using UIObjectnessModel.
+
+        Args:
+            frame: Optional RGB numpy array [H, W, 3]. If None, uses latest raw frame or grabs.
+            as_prediction: If True, returns full UIObjectnessPrediction dataclass.
+
+        Returns:
+            If as_prediction=False (default): List of (cx, cy, "interactive", conf) hotspots
+            for internal motor control.
+            If as_prediction=True: UIObjectnessPrediction dataclass.
+        """
+        with self._lock:
+            f = frame if frame is not None else self._latest_raw_frame
+            if f is None and hasattr(self, "source") and hasattr(self.source, "grab"):
+                f = self.source.grab()
+                self._latest_raw_frame = f
+            if f is None:
+                return [] if not as_prediction else UIObjectnessPrediction(
+                    global_presence_prob=0.0,
+                    candidate_boxes=[],
+                    candidate_centroids=[],
+                    objectness_confidences=[],
+                    is_blank_rejected=True,
+                    heatmap=torch.zeros((16, 16)),
+                )
+
+            # Preprocess to [1, 3, 128, 128] float in [0, 1]
+            H, W = f.shape[:2]
+            if H != 128 or W != 128:
+                if cv2 is not None:
+                    f_res = cv2.resize(f, (128, 128), interpolation=cv2.INTER_AREA)
+                else:
+                    sy = max(1.0, float(H) / 128.0)
+                    sx = max(1.0, float(W) / 128.0)
+                    y_idx = np.minimum((np.arange(128) * sy).astype(int), H - 1)
+                    x_idx = np.minimum((np.arange(128) * sx).astype(int), W - 1)
+                    f_res = f[y_idx[:, None], x_idx]
+            else:
+                f_res = f
+
+            if f_res.ndim == 2:
+                f_rgb = np.stack([f_res] * 3, axis=-1)
+            else:
+                f_rgb = f_res[..., :3] if f_res.shape[-1] > 3 else f_res
+
+            arr = np.ascontiguousarray(f_rgb)
+            if not arr.flags.writeable:
+                arr = arr.copy()
+            t_in = torch.from_numpy(arr).float() / 255.0
+            t_in = t_in.permute(2, 0, 1).unsqueeze(0).to(self.device)
+
+            pred: UIObjectnessPrediction = self.objectness_model.predict(t_in)
+            if as_prediction:
+                return pred
+
+            if pred.is_blank_rejected or not pred.candidate_centroids:
+                return []
+
+            hotspots: List[Tuple[float, float, str, float]] = []
+            for (cx, cy), conf in zip(pred.candidate_centroids, pred.objectness_confidences):
+                hotspots.append((float(cx), float(cy), "interactive", round(float(conf), 3)))
+            return hotspots
+
+    def perceive(
+        self,
+        frame: Optional[np.ndarray] = None,
+        lock_target: Optional[Tuple[float, float]] = None,
+        current_cursor: Optional[Tuple[float, float]] = None,
+        *,
+        frame_sequence: Optional[int] = None,
+        min_sequence: Optional[int] = None,
+    ) -> HumanEyeState:
+        """Executes a single end-to-end real-time visual perception tick (alias for observe)."""
+        return self.observe(
+            frame=frame,
+            lock_target=lock_target,
+            current_cursor=current_cursor,
+            frame_sequence=frame_sequence,
+            min_sequence=min_sequence,
+        )
+
     def verify_focus(
         self,
         target_point: Optional[Tuple[float, float]] = None,
@@ -956,6 +1058,12 @@ class HumanEye(nn.Module):
             else:
                 frame = self.source.grab()
 
+            if hasattr(self.source, "sequence_number") and self.source.sequence_number == getattr(self, "_last_perceived_seq", None):
+                if self._last_state is not None:
+                    return self._last_state
+
+            self._last_perceived_seq = getattr(self.source, "sequence_number", None)
+
         self.frame_count += 1
 
         # 2. Magnocellular Motion Flow (<1.0ms)
@@ -991,10 +1099,9 @@ class HumanEye(nn.Module):
             # Fast downsample to input_size (preserving entire aspect ratio and screen boundaries)
             H, W = frame.shape[:2]
             if H != self.input_size[0] or W != self.input_size[1]:
-                try:
-                    import cv2
+                if cv2 is not None:
                     frame_sub = cv2.resize(frame, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA)
-                except Exception:
+                else:
                     sy = max(1.0, float(H) / float(self.input_size[0]))
                     sx = max(1.0, float(W) / float(self.input_size[1]))
                     y_idx = np.minimum((np.arange(self.input_size[0]) * sy).astype(int), H - 1)
@@ -1140,7 +1247,7 @@ class HumanEye(nn.Module):
                 source_seq = (
                     frame_sequence
                     if frame_sequence is not None
-                    else getattr(self.source, "frame_sequence", None)
+                    else getattr(self.source, "sequence_number", None)
                 )
                 pkt = NeuroPacket(
                     timestamp=state.timestamp,
@@ -1178,6 +1285,8 @@ class HumanEye(nn.Module):
         self.pursuit = SmoothPursuitTracker()
         self.motion_engine = MagnocellularMotionEngine(grid_rows=16, grid_cols=24)
         self.frame_count = 0
+        self._last_perceived_seq = None
+        self._last_state = None
         self._latencies.clear()
 
     @property

@@ -207,6 +207,15 @@ class Win32CursorDriver:
         self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
         self.user32.SendInput.restype = wintypes.UINT
 
+        self.user32.GetForegroundWindow.argtypes = []
+        self.user32.GetForegroundWindow.restype = wintypes.HWND
+
+        self.user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        self.user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+        self.user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        self.user32.GetWindowTextW.restype = ctypes.c_int
+
     def _init_high_res_timer(self) -> None:
         """Requests 1ms OS scheduling resolution via winmm.dll."""
         try:
@@ -256,11 +265,26 @@ class Win32CursorDriver:
         ny = max(0.0, min(1.0, py / max(1, h - 1)))
         return (nx, ny)
 
+    def get_foreground_window(self) -> Optional[str]:
+        """Returns the title of the active foreground window, or None."""
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return None
+        buff = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+        return buff.value
+
     def check_hardware_failsafe(self) -> None:
         """Queries physical mouse position and verifies safety fail-safe."""
         hw_x, hw_y = self.get_position_pixels()
         w, h = self.screen_size
-        self.failsafe.check(hw_x, hw_y, w, h)
+        if hasattr(self.failsafe, "check_hardware_failsafe"):
+            self.failsafe.check_hardware_failsafe(hw_x, hw_y, w, h)
+        else:
+            self.failsafe.check(hw_x, hw_y, w, h)
 
     def move_to_pixels(self, x: int, y: int) -> None:
         """Moves cursor to absolute pixel coordinates with fail-safe guard."""
@@ -272,7 +296,10 @@ class Win32CursorDriver:
         clamped_y = max(0, min(h - 1, y))
 
         # 2. Guard against commanding into breakout corner
-        self.failsafe.check(clamped_x, clamped_y, w, h)
+        if hasattr(self.failsafe, "check_coordinates"):
+            self.failsafe.check_coordinates(clamped_x, clamped_y, w, h)
+        else:
+            self.failsafe.check(clamped_x, clamped_y, w, h)
         ret = bool(self.user32.SetCursorPos(clamped_x, clamped_y))
         if not ret:
             import threading
@@ -343,7 +370,7 @@ class Win32CursorDriver:
             time.sleep(hold_duration)
         self.mouse_up(button=button)
 
-    def double_click(self, button: str = "left", interval: float = 0.08) -> None:
+    def double_click(self, button: str = "left", interval: float = 0.15) -> None:
         self.click(button=button)
         time.sleep(interval)
         self.click(button=button)

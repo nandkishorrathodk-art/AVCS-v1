@@ -1,0 +1,125 @@
+{
+  "Short (dist=50px)": {
+    "HandMotor (avcs_sdk)": {
+      "steps": 16,
+      "stats": {
+        "min_us": 19.1,
+        "p50_us": 20.8,
+        "mean_us": 40.57378,
+        "p95_us": 26.305000000000017,
+        "p99_us": 87.80200000000004,
+        "max_us": 9954.7
+      },
+      "throughput_trajectories_per_sec": 24646,
+      "throughput_waypoints_per_sec": 394343
+    },
+    "Neuromuscular (avcs.control, tremor=True)": {
+      "steps": 25,
+      "stats": {
+        "min_us": 16.5,
+        "p50_us": 19.6,
+        "mean_us": 36.16574,
+        "p95_us": 27.4,
+        "p99_us": 63.70400000000009,
+        "max_us": 12174.0
+      },
+      "throughput_trajectories_per_sec": 27650,
+      "throughput_waypoints_per_sec": 691261
+    },
+    "Neuromuscular (avcs.control, tremor=False)": {
+      "steps": 25,
+      "stats": {
+        "min_us": 6.0,
+        "p50_us": 6.4,
+        "mean_us": 9.8402,
+        "p95_us": 7.2,
+        "p99_us": 11.003000000000066,
+        "max_us": 8267.2
+      },
+      "throughput_trajectories_per_sec": 101623,
+      "throughput_waypoints_per_sec": 2540598
+    }
+  },
+  "Medium (dist=300px)": {
+    "HandMotor (avcs_sdk)": {
+      "steps": 21,
+      "stats": {
+        "min_us": 25.5,
+        "p50_us": 28.3,
+        "mean_us": 48.35381999999999,
+        "p95_us": 35.2,
+        "p99_us": 111.11600000000034,
+        "max_us": 9457.6
+      },
+      "throughput_trajectories_per_sec": 20680,
+      "throughput_waypoints_per_sec": 434298
+    },
+    "Neuromuscular (avcs.control, tremor=True)": {
+      "steps": 43,
+      "stats": {
+        "min_us": 26.8,
+        "p50_us": 33.7,
+        "mean_us": 65.65126000000001,
+        "p95_us": 58.020000000000074,
+        "p99_us": 215.02600000000496,
+        "max_us": 16204.2
+      },
+      "throughput_trajectories_per_sec": 15232,
+      "throughput_waypoints_per_sec": 654976
+    },
+    "Neuromuscular (avcs.control, tremor=False)": {
+      "steps": 43,
+      "stats": {
+        "min_us": 9.7,
+        "p50_us": 10.4,
+        "mean_us": 25.25992,
+        "p95_us": 13.7,
+        "p99_us": 50.30700000000015,
+        "max_us": 13434.5
+      },
+      "throughput_trajectories_per_sec": 39588,
+      "throughput_waypoints_per_sec": 1702301
+    }
+  },
+  "Long (dist=1000px)": {
+    "HandMotor (avcs_sdk)": {
+      "steps": 55,
+      "stats": {
+        "min_us": 60.3,
+        "p50_us": 72.95,
+        "mean_us": 129.47172,
+        "p95_us": 129.91000000000005,
+        "p99_us": 578.9690000000015,
+        "max_us": 33512.8
+      },
+      "throughput_trajectories_per_sec": 7723,
+      "throughput_waypoints_per_sec": 424803
+    },
+    "Neuromuscular (avcs.control, tremor=True)": {
+      "steps": 67,
+      "stats": {
+        "min_us": 35.9,
+        "p50_us": 44.5,
+        "mean_us": 47.09082,
+        "p95_us": 54.8,
+        "p99_us": 68.20200000000004,
+        "max_us": 3922.9
+      },
+      "throughput_trajectories_per_sec": 21235,
+      "throughput_waypoints_per_sec": 1422782
+    },
+    "Neuromuscular (avcs.control, tremor=False)": {
+      "steps": 67,
+      "stats": {
+        "min_us": 13.7,
+        "p50_us": 17.4,
+        "mean_us": 17.8994,
+        "p95_us": 20.3,
+        "p99_us": 24.801000000000023,
+        "max_us": 105.5
+      },
+      "throughput_trajectories_per_sec": 55867,
+      "throughput_waypoints_per_sec": 3743142
+    }
+  }
+}
