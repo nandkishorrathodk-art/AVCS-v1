@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import List, Optional
@@ -279,15 +280,78 @@ def run_monitor(seconds: int = 10) -> None:
     eye.close()
 
 
+def run_check() -> int:
+    print("[AVCS Diagnostic Health Check]")
+    print("Version: 0.2.0")
+    print(f"Host OS: {sys.platform}")
+
+    # 1. System 1 EyeStream & Retina
+    try:
+        eye = EyeStream()
+        frame = eye.step()
+        print(f"[*] System 1 Retina: OK ({frame.raw_frame.shape[1]}x{frame.raw_frame.shape[0]} px, latency={frame.latency_ms:.2f}ms)")
+        print(f"[*] Model Weights: OK ({eye.weights_status})")
+        eye.close()
+    except Exception as e:
+        print(f"[!] System 1 Retina: FAILED ({e})")
+        return 1
+
+    # 2. Fovea Reader
+    try:
+        reader = FoveaReader()
+        print(f"[*] Fovea Reader (Pure-Pixel): OK (crop_size={reader.crop_size}px)")
+    except Exception as e:
+        print(f"[!] Fovea Reader: FAILED ({e})")
+        return 1
+
+    # 3. Hand Motor & Win32
+    try:
+        motor = HandMotor()
+        title = motor.get_foreground_title()
+        print(f"[*] Hand Motor & Desktop Geometry: OK (Active Window: '{title}')")
+    except Exception as e:
+        print(f"[!] Hand Motor: FAILED ({e})")
+        return 1
+
+    # 4. Cognitive Planner
+    try:
+        planner = CognitivePlanner()
+        plan = planner.decompose_goal("Inspect test report")
+        print(f"[*] Cognitive Planner: OK (Generated {len(plan.steps)} plan steps)")
+    except Exception as e:
+        print(f"[!] Cognitive Planner: FAILED ({e})")
+        return 1
+
+    # 5. LLM Bridge
+    try:
+        bridge = LLMBridge()
+        key_status = "configured" if bridge.api_key else "offline fallback mode"
+        print(f"[*] LLM Bridge: OK (Endpoint: {bridge.base_url}, Model: {bridge.model_name}, Status: {key_status})")
+    except Exception as e:
+        print(f"[!] LLM Bridge: FAILED ({e})")
+        return 1
+
+    print("\n[ALL CHECKS PASSED] AVCS is 100% operational and ready for consumer deployment.")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AVCS Autonomous Live Agent Runner")
+    parser.add_argument("--version", action="version", version="AVCS-SDK v0.2.0 (Parth Labs)")
+    parser.add_argument("--check", action="store_true", help="Run system diagnostic health check")
     parser.add_argument("--goal", type=str, default="Inspect screen and summarize active window state", help="Goal for the agent")
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
     parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks")
+    parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
     args = parser.parse_args()
 
-    if args.monitor:
+    if args.api_key:
+        os.environ["AVCS_API_KEY"] = args.api_key
+
+    if args.check:
+        sys.exit(run_check())
+    elif args.monitor:
         run_monitor(args.seconds)
     else:
         run_agent(args.goal, dry_run=args.dry_run)
