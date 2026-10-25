@@ -242,6 +242,8 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
                 if not dry_run:
                     motor.type_text(directive.text)
                     last_action = f"typed '{directive.text}'"
+                else:
+                    print("[DRY RUN] Physical keyboard typing bypassed (remove --dry-run to actuate real keyboard).")
                 if current_step:
                     planner.mark_step_complete(current_step.id, f"typed '{directive.text}'")
 
