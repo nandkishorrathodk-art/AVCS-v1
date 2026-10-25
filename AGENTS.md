@@ -290,6 +290,49 @@ oversight. Traps, both learned the hard way:
 - Throughput must be quoted with its resolution. The 95.4 FPS headline is a
   64x64 soak number. Raw forward: 564 FPS @64x64, 106 @256x256, 2.2 @1920x1200.
   Production letterboxes to 128x128 first (~223 FPS end-to-end).
+
+### Frame-rate ceiling: the screen is the bottleneck, not the model
+
+Measured on this box (4 CPU cores, 1 torch thread, changing frames so the
+static-screen cache cannot hit), `HumanEye.observe` end-to-end:
+
+| frame | stock eager | fused ONNX accelerator |
+|---|---|---|
+| 128x128 synthetic | 2.44 ms (409 FPS) | 1.33 ms (753 FPS) |
+| 1920x1200 real desktop | 2.96 ms (338 FPS) | 1.04 ms (965 FPS) |
+
+**Do not chase a 2000 FPS target on perception.** A desktop screen delivers
+60-144 frames per second, i.e. one frame every 6.9-16.7 ms. At 338-965 FPS the
+model finishes each frame 3-16x faster than the screen can supply the next one,
+so it is already waiting on capture. Higher per-frame throughput buys nothing
+for screen perception; the useful currency is *headroom* (spend the saved
+milliseconds on 256x256 instead of 128x128) or *batched* work (many screens,
+or a closed-loop motor tick), not the FPS number itself.
+
+Also: measure with *changing* frames. `observe()` has a static-screen early
+exit, so a repeated-frame benchmark reports a cache hit (0.17-0.42 ms) and not
+real perception. Every number above alternates two different frames.
+
+### Opt-in ONNX accelerator
+
+`HumanEye(onnx_accelerator=True)` (or `enable_onnx_accelerator()`) exports the
+cortical forward pass -- backbone + ventral stream + affordance head -- into one
+fused ONNX graph and runs that instead of three `nn.Module` calls per frame. The
+win is removed Python/torch dispatch overhead, not a changed computation:
+
+- **Off by default.** The eager path is untouched unless asked for.
+- **Parity-gated.** Export runs both paths on a probe input and raises
+  `RuntimeError` if they disagree beyond `atol` (default 1e-4), so a broken
+  graph can never be silently used. `tests/test_onnx_accelerator.py` asserts
+  `observe()` returns identical categories, confidences and hotspot lists with
+  the accelerator on.
+- Requires the optional `onnx` + `onnxruntime` packages (`pip install
+  'avcs-sdk[onnx]'`); enabling it without them raises a clear ImportError.
+- Measured 1.84x on 128x128 and 2.8x on 1920x1200 frames. Quantization
+  (dynamic int8) and `torch.compile` were both tried and are *not* worth it
+  here: int8 was no faster than eager (0.663 vs 0.674 ms) and compile gave only
+  ~18% on the backbone alone.
+
 - `runs/weights/human_eye_weights.pt` is produced by the real trainer
   (`avcs/training/train_affordance.py`); when present `HumanEye` loads it
   (`weights_loaded=True`). It is gitignored, so a fresh checkout lacks it and

@@ -404,8 +404,33 @@ class FastAffordanceHead(nn.Module):
         margin: float = 0.05,
     ) -> List[Tuple[float, float, str, float]]:
         """Extracts top interactive hotspots in <0.5ms using 2D spatial NMS and margin gating."""
-        logits = self.forward(feat)[0]  # (num_classes, H, W)
-        probs = torch.softmax(logits, dim=0)
+        return self.find_hotspots_from_logits(
+            self.forward(feat),
+            action_type=action_type,
+            top_k=top_k,
+            threshold=threshold,
+            margin=margin,
+            feat=feat,
+        )
+
+    @torch.no_grad()
+    def find_hotspots_from_logits(
+        self,
+        logits: torch.Tensor,
+        action_type: str = "clickable",
+        top_k: int = 3,
+        threshold: float = 0.35,
+        margin: float = 0.05,
+        feat: Optional[torch.Tensor] = None,
+    ) -> List[Tuple[float, float, str, float]]:
+        """Peak selection over precomputed affordance logits (B, num_classes, H, W).
+
+        Split out from :meth:`find_hotspots` so an accelerated forward pass can
+        supply the logits without recomputing the head; the peak logic below is
+        identical for both paths. ``feat`` is the cortical feature map the
+        adaptive fallback gates on; when omitted the logits are used instead.
+        """
+        probs = torch.softmax(logits[0], dim=0)
 
         H, W = probs.shape[1], probs.shape[2]
         static_heat = probs[0]  # (H, W) - class 0 is non-interactive static background
@@ -466,7 +491,11 @@ class FastAffordanceHead(nn.Module):
                     best_at_cell[(py, px)] = item
 
         candidate_peaks = list(best_at_cell.values())
-        if not candidate_peaks and feat.abs().max() > 1e-4:
+        # The fallback below gates on the cortical feature map (the learned head
+        # is silent but the cortex still carries signal). Callers that only hold
+        # logits fall back to gating on the logits themselves.
+        _gate_tensor = feat if feat is not None else logits
+        if not candidate_peaks and _gate_tensor.abs().max() > 1e-4:
             # 1. Adaptive Fallback: Lower threshold for compressed video or low-contrast desktop UI
             # Must possess real spatial variation (not flat unactivated background)
             for cls_idx, act_name in targets:
@@ -626,6 +655,7 @@ class HumanEye(nn.Module):
         affordance_action_type: str = "all",
         affordance_top_k: int = 5,
         bus: Optional[Any] = None,
+        onnx_accelerator: bool = False,
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
@@ -633,6 +663,8 @@ class HumanEye(nn.Module):
         self.affordance_action_type = affordance_action_type
         self.affordance_top_k = affordance_top_k
         self.stream_bus = bus
+        self._onnx_accel: Optional[Any] = None
+        self._use_onnx = False
 
         # Optimize CPU threads for real-time biological visual cortex throughput
         # Empirical measurement: 1 thread avoids OpenMP barrier synchronization thrashing
@@ -728,6 +760,28 @@ class HumanEye(nn.Module):
                 device=str(self.device),
                 strict=False,
             )
+
+        if onnx_accelerator:
+            self.enable_onnx_accelerator()
+
+    def enable_onnx_accelerator(self, atol: float = 1e-4) -> None:
+        """Builds the fused ONNX graph for this eye's cortical forward pass.
+
+        Called after weights are loaded so the exported graph holds the trained
+        parameters. The export is parity-checked against the eager modules and
+        raises if it disagrees, so a broken graph is never silently used.
+        """
+        from avcs.perception.onnx_accelerator import OnnxCortexAccelerator
+
+        self._onnx_accel = OnnxCortexAccelerator.from_eye(
+            self, input_size=self.input_size, atol=atol
+        )
+        self._use_onnx = True
+
+    def disable_onnx_accelerator(self) -> None:
+        """Reverts to the eager torch forward pass."""
+        self._use_onnx = False
+        self._onnx_accel = None
 
     def on_surprise(self, threshold: float = 0.85) -> Callable:
         """Decorator to bind an instantaneous zero-latency reflex callback."""
@@ -1125,27 +1179,48 @@ class HumanEye(nn.Module):
             else:
                 t_resized = t_in
 
-            feat = self.backbone(t_resized)
-            self._last_feat = feat
+            if self._use_onnx and self._onnx_accel is not None:
+                # Fused graph: backbone + category + affordance logits in one
+                # runtime call, removing three rounds of per-frame dispatch.
+                cat_logits, aff_logits, feat = self._onnx_accel.run_torch(t_resized)
+                self._last_feat = feat
+                cat_probs = torch.softmax(cat_logits, dim=-1)[0]
+                cat_idx = int(torch.argmax(cat_probs).item())
+                cat_name = UI_CATEGORIES[cat_idx] if cat_idx < len(UI_CATEGORIES) else "screen"
+                cat_conf = float(cat_probs[cat_idx].item())
+                self._last_category_name = cat_name
+                self._last_category_conf = cat_conf
+                affordances = self.affordance_head.find_hotspots_from_logits(
+                    aff_logits,
+                    action_type=self.affordance_action_type,
+                    top_k=self.affordance_top_k,
+                    threshold=0.35,
+                    margin=0.05,
+                    feat=feat,
+                )
+                self._last_affordances = affordances
+            else:
+                feat = self.backbone(t_resized)
+                self._last_feat = feat
 
-            # Ventral scene semantics
-            ventral_out = self.ventral(feat)
-            cat_probs = torch.softmax(ventral_out["category_logits"], dim=-1)[0]
-            cat_idx = int(torch.argmax(cat_probs).item())
-            cat_name = UI_CATEGORIES[cat_idx] if cat_idx < len(UI_CATEGORIES) else "screen"
-            cat_conf = float(cat_probs[cat_idx].item())
-            self._last_category_name = cat_name
-            self._last_category_conf = cat_conf
+                # Ventral scene semantics
+                ventral_out = self.ventral(feat)
+                cat_probs = torch.softmax(ventral_out["category_logits"], dim=-1)[0]
+                cat_idx = int(torch.argmax(cat_probs).item())
+                cat_name = UI_CATEGORIES[cat_idx] if cat_idx < len(UI_CATEGORIES) else "screen"
+                cat_conf = float(cat_probs[cat_idx].item())
+                self._last_category_name = cat_name
+                self._last_category_conf = cat_conf
 
-            # Fast Dorsal interactive affordances (<0.5ms) with 2D spatial NMS and margin gating
-            affordances = self.affordance_head.find_hotspots(
-                feat,
-                action_type=self.affordance_action_type,
-                top_k=self.affordance_top_k,
-                threshold=0.35,
-                margin=0.05,
-            )
-            self._last_affordances = affordances
+                # Fast Dorsal interactive affordances (<0.5ms) with 2D spatial NMS and margin gating
+                affordances = self.affordance_head.find_hotspots(
+                    feat,
+                    action_type=self.affordance_action_type,
+                    top_k=self.affordance_top_k,
+                    threshold=0.35,
+                    margin=0.05,
+                )
+                self._last_affordances = affordances
 
         # 5. Closed-Loop Hand-Eye Motor Flow
         motor_flow = (0.0, 0.0)
