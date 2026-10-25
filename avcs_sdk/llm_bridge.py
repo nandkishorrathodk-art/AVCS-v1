@@ -115,8 +115,14 @@ class LLMBridge:
         model_name: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 30.0,
-        vision_enabled: bool = True,
+        vision_enabled: bool = False,
     ) -> None:
+        """``vision_enabled`` defaults to False to honor the System 1/System 2
+        boundary in ``docs/AVCS_ENGINEERING_RULES.md``: screen images, crops and
+        their encodings must not be sent to System 2. Enabling it is an explicit
+        opt-in that a caller (and a product/privacy decision) must make, not a
+        default a caller inherits silently.
+        """
         self.api_key = (
             api_key
             or os.environ.get("AVC_API_KEY")

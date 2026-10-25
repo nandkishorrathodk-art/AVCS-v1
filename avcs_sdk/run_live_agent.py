@@ -29,7 +29,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from .eye_stream import EyeStream
+from .eye_stream import EyeStream, UI_CATEGORIES
 from .fovea_reader import FovealElement, FoveaReader
 from .hand_motor import HandMotor
 from .llm_bridge import LLMBridge
@@ -41,6 +41,12 @@ from .cognitive import (
     ObstacleType,
     WorkflowCoordinator,
 )
+
+# Category tokens the eye stream actually emits. The scoring below used to test
+# for "text_like"/"graphic", which no producer emits, so those branches were
+# dead. Derive from the single vocabulary source so the two cannot drift.
+TEXT_CATEGORIES = frozenset({"text_input"})
+INTERACTIVE_CATEGORIES = UI_CATEGORIES - TEXT_CATEGORIES - {"content_region"}
 
 
 def resolve_semantic_target(
@@ -65,18 +71,20 @@ def resolve_semantic_target(
         if elem.category.lower() in q_lower:
             score += 3.0
 
-        # 2. Text / code / syntax matching
+        # 2. Text / code / syntax matching. Dense, high-contrast detail is the
+        # pixel evidence for glyph-like content; both metrics come from the
+        # foveal crop, not from a phantom attribute.
         if any(w in q_lower for w in ("code", "syntax", "text", "line", "type", "script")):
-            if elem.category == "text_like":
+            if elem.category in TEXT_CATEGORIES:
                 score += 3.0
-            score += elem.glyph_likeness * 2.0
-            score += elem.edge_density * 1.5
+            score += elem.edge_density * 0.15
+            score += elem.contrast * 0.05
 
         # 3. Interactive controls / buttons / dialogs
         if any(w in q_lower for w in ("button", "dismiss", "ok", "cancel", "close", "dialog", "click", "control")):
-            if elem.category in ("graphic", "interactive_control"):
+            if elem.category in INTERACTIVE_CATEGORIES:
                 score += 3.0
-            score += elem.contrast * 1.5
+            score += elem.contrast * 0.05
 
         # 4. Spatial quadrant matching
         cx, cy = elem.center_norm
@@ -150,7 +158,7 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
 
         # 2. Foveal Inspection of Interactive Elements
         elements = fovea.inspect(eye_frame.raw_frame, eye_frame.hotspots, max_inspect=5)
-        fovea_patches = [e.patch for e in elements] if elements else None
+        fovea_patches = [e.patch for e in elements if e.patch is not None]
 
         # 3. Dynamic Obstacle Detection
         obstacle = recovery_mgr.detect_obstacle(
@@ -286,11 +294,16 @@ def run_check() -> int:
     print(f"Host OS: {sys.platform}")
 
     # 1. System 1 EyeStream & Retina
+    weights_loaded = False
     try:
         eye = EyeStream()
         frame = eye.step()
         print(f"[*] System 1 Retina: OK ({frame.raw_frame.shape[1]}x{frame.raw_frame.shape[0]} px, latency={frame.latency_ms:.2f}ms)")
-        print(f"[*] Model Weights: OK ({eye.weights_status})")
+        weights_loaded = bool(eye.weights_loaded)
+        if weights_loaded:
+            print(f"[*] Model Weights: OK ({eye.weights_status})")
+        else:
+            print(f"[!] Model Weights: NOT LOADED ({eye.weights_status})")
         eye.close()
     except Exception as e:
         print(f"[!] System 1 Retina: FAILED ({e})")
@@ -331,7 +344,15 @@ def run_check() -> int:
         print(f"[!] LLM Bridge: FAILED ({e})")
         return 1
 
-    print("\n[ALL CHECKS PASSED] AVCS is 100% operational and ready for consumer deployment.")
+    if not weights_loaded:
+        print(
+            "\n[CHECKS INCOMPLETE] Plumbing is wired, but no trained checkpoint was "
+            "loaded, so perception is untrained. This is not a passing perception "
+            "check. See 'Model Weights' above."
+        )
+        return 2
+
+    print("\n[ALL CHECKS PASSED] AVCS is operational with a loaded checkpoint.")
     return 0
 
 

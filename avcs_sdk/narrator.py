@@ -120,15 +120,21 @@ class LiveNarrator:
         clean = re.sub(r"\s*\[[-\+0-9.,\s]+\]", "", clean)
         clean = clean.strip().strip("'\"")
 
-        # Map internal class names to universal generic UI terms
+        # Map internal class names to universal generic UI terms. Keys must
+        # cover every token the eye stream emits (UI_CLASS_MAP) plus the legacy
+        # aliases, or a real category renders as a raw snake_case identifier.
         name_map = {
             "ui_box": "interactive control",
             "Interactive_Control": "interactive control",
             "interactive_control": "interactive control",
             "graphic": "action widget",
             "text_like": "input field",
+            "text_input": "input field",
             "input_field": "input field",
             "button": "button",
+            "toggle_icon": "toggle control",
+            "modal_dialog": "dialog control",
+            "content_region": "content area",
             "dialog": "dialog control",
         }
         return name_map.get(clean, clean or "interactive control")
@@ -235,13 +241,13 @@ class LiveNarrator:
         self.last_narrative = human_speech or "Screen active."
         element_descriptions = []
         for e in (foveal_elements or []):
-            if hasattr(e, "describe"):
-                desc = e.describe()
-                if hasattr(e, "center_norm"):
-                    reg = self._get_spatial_region(e.center_norm[0], e.center_norm[1])
-                    desc = re.sub(r"\s*at\s*\([-\+0-9.,\s]+\)", f" in {reg}", desc, flags=re.IGNORECASE)
-                    desc = re.sub(r"\s*at\s*\[[-\+0-9.,\s]+\]", f" in {reg}", desc, flags=re.IGNORECASE)
-                element_descriptions.append(desc)
+            if hasattr(e, "center_norm") and hasattr(e, "category"):
+                # Category is the morphology class the model actually predicts;
+                # read_text is a coarse texture bucket, so prefer the class token
+                # and route it through the same vocabulary map used for speech.
+                label = self._clean_target_name(e.category)
+                reg = self._get_spatial_region(e.center_norm[0], e.center_norm[1])
+                element_descriptions.append(f"{label} in {reg}")
             elif isinstance(e, str):
                 cleaned_str = re.sub(r"\s*at\s*\([-\+0-9.,\s]+\)", "", e, flags=re.IGNORECASE)
                 cleaned_str = re.sub(r"\s*at\s*\[[-\+0-9.,\s]+\]", "", cleaned_str, flags=re.IGNORECASE)

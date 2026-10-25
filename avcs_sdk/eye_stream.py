@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -82,6 +82,19 @@ class EyeFrame:
 
 # Backwards-compatible alias: the observation dataclass is named EyeFrame.
 EyeObservation = EyeFrame
+
+# The 5-class UI morphology vocabulary emitted in EyeFrame.hotspots. Consumers
+# must branch on these exact tokens; testing for a token no producer emits
+# silently disables the branch.
+UI_CLASS_MAP: Dict[int, str] = {
+    0: "interactive_control",
+    1: "text_input",
+    2: "toggle_icon",
+    3: "modal_dialog",
+    4: "content_region",
+}
+UI_CATEGORIES = frozenset(UI_CLASS_MAP.values())
+
 
 
 class EyeStream(StreamingVisualCortexV2):
@@ -290,14 +303,6 @@ class EyeStream(StreamingVisualCortexV2):
         obj_probs = torch.sigmoid(out.ui_objectness_logits[0, 0])  # (16, 16)
         cls_probs = torch.softmax(out.ui_class_logits[0], dim=0)   # (5, 16, 16)
 
-        CLASS_MAP = {
-            0: "interactive_control",
-            1: "text_input",
-            2: "toggle_icon",
-            3: "modal_dialog",
-            4: "content_region",
-        }
-
         grid_H, grid_W = obj_probs.shape
         obj_4d = obj_probs.unsqueeze(0).unsqueeze(0)
         max_pool = F.max_pool2d(obj_4d, kernel_size=3, stride=1, padding=1).squeeze(0).squeeze(0)
@@ -309,7 +314,7 @@ class EyeStream(StreamingVisualCortexV2):
             py, px = int(peak_idx[i, 0].item()), int(peak_idx[i, 1].item())
             val = float(obj_probs[py, px].item())
             best_cls = int(torch.argmax(cls_probs[:, py, px]).item())
-            cls_name = CLASS_MAP.get(best_cls, "interactive_control")
+            cls_name = UI_CLASS_MAP.get(best_cls, "interactive_control")
             norm_x = (px + 0.5) / float(grid_W)
             norm_y = (py + 0.5) / float(grid_H)
             hotspots.append((round(norm_x, 3), round(norm_y, 3), cls_name, round(val, 3)))
