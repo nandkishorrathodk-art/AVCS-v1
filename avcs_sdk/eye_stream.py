@@ -294,10 +294,15 @@ class EyeStream(StreamingVisualCortexV2):
         )
         self.temporal_state = out.temporal_state
 
-        # Head 1: Surprise score & Temporal Change
-        surprise = float(np.clip(out.feature_uncertainty[0].item(), 0.0, 1.0))
-        mean_change = float(out.change_heatmap[0, 0].mean().item())
-        is_stable = (surprise < 0.08) and (mean_change < 0.05)
+        # Head 1: Surprise score & Temporal Change calibrated to inter-frame optical change
+        if hasattr(self, "_prev_features") and self._prev_features is not None:
+            spatial_delta = float(torch.abs(out.temporal_state.previous_features - self._prev_features).mean().item())
+        else:
+            spatial_delta = 0.0
+        self._prev_features = out.temporal_state.previous_features.clone()
+
+        surprise = float(np.clip(spatial_delta * 10.0, 0.0, 1.0))
+        is_stable = spatial_delta < 0.015
 
         # Head 2: 5-Class UI Objectness & Hotspots
         obj_probs = torch.sigmoid(out.ui_objectness_logits[0, 0])  # (16, 16)
@@ -319,9 +324,9 @@ class EyeStream(StreamingVisualCortexV2):
             norm_y = (py + 0.5) / float(grid_H)
             hotspots.append((round(norm_x, 3), round(norm_y, 3), cls_name, round(val, 3)))
 
-        # Popup detection: high surprise or modal dialog class detected
-        has_popup = (surprise >= 0.25 and len(hotspots) > 0) or any(
-            h[2] == "modal_dialog" and h[3] >= 0.40 for h in hotspots
+        # Popup detection: sudden optical surprise combined with modal dialog class
+        has_popup = (spatial_delta >= 0.04) and any(
+            h[2] == "modal_dialog" and h[3] >= 0.50 for h in hotspots
         )
 
         dt_ms = (time.perf_counter() - t0) * 1000.0
