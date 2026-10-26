@@ -108,10 +108,13 @@ def resolve_semantic_target(
     return scored[0][1]
 
 
-def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
+def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True) -> None:
     print("\n[AVCS Agent] Initializing Autonomous Live Agent...")
     print(f"[Objective]: {goal}")
-    print("[Safety Mode]: Corner breakout active (Move cursor to top-left corner to abort)\n")
+    if dry_run:
+        print("[Safety Mode]: DRY-RUN active (Physical actuation bypassed). Corner breakout active.\n")
+    else:
+        print("[Safety Mode]: LIVE ACTUATION active! Move cursor to any screen corner to abort.\n")
 
     eye = EyeStream()
     fovea = FoveaReader()
@@ -231,7 +234,11 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
 
                 if not dry_run:
                     pre_frame = eye_frame.raw_frame
-                    success = motor.click(screen_x, screen_y)
+                    try:
+                        success = motor.click(screen_x, screen_y)
+                    except RuntimeError as exc:
+                        print(f"[SAFETY] Motor movement halted by fail-safe: {exc}")
+                        break
                     if success:
                         last_ripple = motor.verify_ripple(eye.grab_screen, target_elem.center_norm, pre_frame)
                         last_action = f"click on {target_elem.category} at ({target_elem.center_norm[0]:.2f},{target_elem.center_norm[1]:.2f})"
@@ -246,17 +253,21 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
                         print("[WARNING] Motor movement halted by corner breakout failsafe.")
                         break
                 else:
-                    print("[DRY RUN] Physical click bypassed.")
+                    print("[DRY RUN] Physical click bypassed (pass --live to authorize physical mouse clicks).")
                     if current_step:
                         planner.mark_step_complete(current_step.id, "dry run click")
 
             elif directive.action == "type" and directive.text:
                 print(f"[Hand Motor] Typing text: '{directive.text}'")
                 if not dry_run:
-                    motor.type_text(directive.text)
-                    last_action = f"typed '{directive.text}'"
+                    try:
+                        motor.type_text(directive.text)
+                        last_action = f"typed '{directive.text}'"
+                    except RuntimeError as exc:
+                        print(f"[SAFETY] Keyboard typing halted by fail-safe: {exc}")
+                        break
                 else:
-                    print("[DRY RUN] Physical keyboard typing bypassed (remove --dry-run to actuate real keyboard).")
+                    print("[DRY RUN] Physical keyboard typing bypassed (pass --live to authorize real keystrokes).")
                 if current_step:
                     planner.mark_step_complete(current_step.id, f"typed '{directive.text}'")
 
@@ -363,7 +374,8 @@ def main() -> None:
     parser.add_argument("--goal", type=str, default="Inspect screen and summarize active window state", help="Goal for the agent")
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
-    parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Bypass physical mouse clicks (default: True)")
+    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing")
     parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
     args = parser.parse_args()
 
@@ -375,7 +387,8 @@ def main() -> None:
     elif args.monitor:
         run_monitor(args.seconds)
     else:
-        run_agent(args.goal, dry_run=args.dry_run)
+        is_dry_run = not args.live
+        run_agent(args.goal, dry_run=is_dry_run)
 
 
 if __name__ == "__main__":

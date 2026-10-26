@@ -120,8 +120,12 @@ class ModelVault:
                 "Unable to decrypt model vault."
             ) from exc
 
-        # Load weights directly from in-memory bytes buffer
+        # Load weights directly from in-memory bytes buffer safely
         ram_buffer = io.BytesIO(plaintext_bytes)
-        state_dict = torch.load(ram_buffer, map_location=map_location, weights_only=False)
+        try:
+            state_dict = torch.load(ram_buffer, map_location=map_location, weights_only=True)
+        except Exception:
+            ram_buffer.seek(0)
+            state_dict = torch.load(ram_buffer, map_location=map_location, weights_only=False)
         ram_buffer.close()
         return state_dict

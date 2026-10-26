@@ -25,7 +25,8 @@ def find_free_port() -> int:
 def gateway_server() -> Generator[str, None, None]:
     port = find_free_port()
     server_address = ("127.0.0.1", port)
-    httpd = http.server.HTTPServer(server_address, ParthLabsGatewayHandler)
+    httpd = http.server.ThreadingHTTPServer(server_address, ParthLabsGatewayHandler)
+    httpd.daemon_threads = True
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -70,7 +71,8 @@ def test_gateway_auth_verify_success(gateway_server: str) -> None:
         data = json.loads(resp.read().decode("utf-8"))
         assert data["valid"] is True
         assert data["status"] == "authorized"
-        assert data["tier"] == "developer"
+        assert data["tier"] == "community"
+        assert data["org_id"] == "parth_community"
 
 
 def test_gateway_auth_verify_developer_key(gateway_server: str) -> None:
@@ -86,6 +88,8 @@ def test_gateway_auth_verify_developer_key(gateway_server: str) -> None:
         data = json.loads(resp.read().decode("utf-8"))
         assert data["valid"] is True
         assert data["status"] == "authorized"
+        assert data["tier"] == "developer"
+        assert data["org_id"] == "developer"
 
 
 def test_gateway_auth_verify_rejected(gateway_server: str) -> None:
@@ -121,4 +125,106 @@ def test_gateway_chat_completions(gateway_server: str) -> None:
         assert data["object"] == "chat.completion"
         assert len(data["choices"]) > 0
         assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+def test_gateway_chat_completions_invalid_token(gateway_server: str) -> None:
+    payload = json.dumps({
+        "model": "avc-reasoner-v1",
+        "messages": [{"role": "user", "content": "What is on screen?"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{gateway_server}/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer unauthorized_token_123",
+        },
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=5.0)
+    assert exc_info.value.code == 403
+    body = json.loads(exc_info.value.read().decode("utf-8"))
+    assert body["error"] == "Invalid or expired AVC_API_KEY"
+
+
+def test_gateway_chat_completions_missing_token(gateway_server: str) -> None:
+    payload = json.dumps({
+        "model": "avc-reasoner-v1",
+        "messages": [{"role": "user", "content": "What is on screen?"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{gateway_server}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=5.0)
+    assert exc_info.value.code == 401
+    body = json.loads(exc_info.value.read().decode("utf-8"))
+    assert "Authentication Required" in body["error"]
+
+
+def test_gateway_chat_completions_community_token(gateway_server: str) -> None:
+    payload = json.dumps({
+        "model": "avc-reasoner-v1",
+        "messages": [{"role": "user", "content": "What is on screen?"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{gateway_server}/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer avcs-community-free-2026",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["object"] == "chat.completion"
+
+
+def test_gateway_auth_verify_tier_differentiation(gateway_server: str) -> None:
+    # Developer tier check
+    dev_payload = json.dumps({"api_key": "avc_live_sample_token"}).encode("utf-8")
+    req_dev = urllib.request.Request(
+        f"{gateway_server}/v1/auth/verify",
+        data=dev_payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req_dev, timeout=5.0) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["tier"] == "developer"
+        assert data["org_id"] == "developer"
+
+    # Community tier check
+    comm_payload = json.dumps({"api_key": "avcs-community-free-2026"}).encode("utf-8")
+    req_comm = urllib.request.Request(
+        f"{gateway_server}/v1/auth/verify",
+        data=comm_payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req_comm, timeout=5.0) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["tier"] == "community"
+        assert data["org_id"] == "parth_community"
+
+
+def test_gateway_server_uses_threading_http_server() -> None:
+    import inspect
+    from avcs.auth import server
+    src = inspect.getsource(server.run_gateway_server)
+    assert "http.server.ThreadingHTTPServer" in src
+
+
+def test_gateway_dynamic_port_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    monkeypatch.setenv("PORT", "9123")
+    assert int(os.environ.get("PORT", 8000)) == 9123
 

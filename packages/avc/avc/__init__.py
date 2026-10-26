@@ -24,6 +24,14 @@ from avc.core.predictive import STABILITY_STATES
 from avc.core.ventral import UI_CATEGORIES
 from avc.eye import ScreenEye, default_weights_path
 from avc.model import ArtificialVisualCortex, CortexState
+from avc.telemetry import (
+    AffordanceKind,
+    RecommendedAction,
+    SceneCategory,
+    SensoryTelemetry,
+    StabilityState,
+    TelemetryHotspot,
+)
 from avc.vault import InvalidKeyError, ModelVault, VaultSecurityError
 
 __version__ = "1.0.0"
@@ -61,6 +69,12 @@ __all__ = [
     "ArtificialVisualCortex",
     "CortexState",
     "ScreenEye",
+    "SceneCategory",
+    "StabilityState",
+    "RecommendedAction",
+    "AffordanceKind",
+    "TelemetryHotspot",
+    "SensoryTelemetry",
     "CortexConfig",
     "ModelConfig",
     "RetinaConfig",

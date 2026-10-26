@@ -151,11 +151,18 @@ class ParthLabsGatewayHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Invalid or expired AVC_API_KEY"})
                 return
 
+            if api_key.startswith("avc_live_") or api_key.startswith("avc_test_"):
+                tier = "developer"
+                org_id = "developer"
+            else:
+                tier = "community"
+                org_id = "parth_community"
+
             self._send_json(200, {
                 "valid": True,
                 "status": "authorized",
-                "org_id": "parth_community",
-                "tier": "developer",
+                "org_id": org_id,
+                "tier": tier,
                 "quota_remaining": 10000,
                 "server_time": time.time(),
             })
@@ -166,6 +173,16 @@ class ParthLabsGatewayHandler(http.server.BaseHTTPRequestHandler):
             token = auth_header.replace("Bearer ", "").strip()
             if not token:
                 self._send_json(401, {"error": "Authentication Required: Missing Bearer AVC_API_KEY"})
+                return
+
+            is_valid = (
+                token.startswith("avc_live_")
+                or token.startswith("avc_test_")
+                or token == "avcs-community-free-2026"
+                or token == "avc-community-free-2026"
+            )
+            if not is_valid:
+                self._send_json(403, {"error": "Invalid or expired AVC_API_KEY"})
                 return
 
             # Check if backend LLM credentials are set on the gateway host
@@ -233,10 +250,13 @@ class ParthLabsGatewayHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
 
-def run_gateway_server(port: int = 8000, host: str = "0.0.0.0") -> None:
+def run_gateway_server(port: Optional[int] = None, host: str = "0.0.0.0") -> None:
     """Launch the live HTTP API Gateway server."""
+    if port is None:
+        port = int(os.environ.get("PORT", 8000))
     server_address = (host, port)
-    httpd = http.server.HTTPServer(server_address, ParthLabsGatewayHandler)
+    httpd = http.server.ThreadingHTTPServer(server_address, ParthLabsGatewayHandler)
+    httpd.daemon_threads = True
     print("=" * 65)
     print(f" {GATEWAY_NAME} v{SERVER_VERSION}")
     print(f" Server active at http://{host}:{port}/v1")
@@ -252,7 +272,7 @@ def run_gateway_server(port: int = 8000, host: str = "0.0.0.0") -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parth Labs AVC Platform Gateway")
     parser.add_argument("--serve", action="store_true", help="Launch the HTTP API Gateway server")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind server (default: 8000)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)), help="Port to bind server (default: 8000)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
     parser.add_argument("--issue", action="store_true", help="Issue an enterprise license key")
     parser.add_argument("--verify", type=str, help="Verify a license token")
