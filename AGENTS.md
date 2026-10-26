@@ -184,6 +184,64 @@ fixing the echo problem (see below).
 - **Scale up.** 2.7M at ~20k params/context-token cannot hold a conditional
   instruction; every result above is at or below the noise floor of that limit.
 
+## The click step: capability kernel (`avcs/control/capability.py`)
+
+The System 2 -> System 1 boundary had two contradictory gates, and the reasoning
+loop's central step ("brain says click, hand clicks") was impossible:
+
+- `GoalConditionedGrounder.predict` returns `action_authorized=False` on **every**
+  call (hardcoded). `AVCSController.locate` raised on it, so `click_target`
+  always failed. The loop could never authorize a click
+  (`report.action_authorized_count == 0`).
+- `AVCSSystem1V1.observe_frame` authorizes on `presence_confidence >= threshold`,
+  but that signal **saturates at 1.0 for wrong queries too** — measured, 40
+  correct and 120 wrong queries all returned `target_present_probability = 1.0`.
+  So that gate cannot reject anything; it would fail *open* if used.
+
+`CapabilityKernel` replaces both. It decides on the grounder's **`peak_probability`**,
+which does discriminate. Measured on `datasets/ui_grounding` (40 frames, correct
+query vs 3 deliberately wrong queries each):
+
+| signal | CORRECT | WRONG |
+|---|---|---|
+| `peak_probability` | median 0.873, min 0.755 | median 0.496, p90 0.729, max 0.863 |
+| `target_present_probability` | 1.0000 (all) | 1.0000 (all) — saturated, unusable |
+
+At the default `min_peak_probability = 0.75`: correct queries pass 100% (40/40),
+wrong queries pass 6.7% (8/120). Fail-closed layers, in order: no grant ->
+refused; query outside allow-list -> refused; degenerate frame (uniform or no
+spatial structure) -> refused; no candidate point -> refused; peak below floor ->
+refused.
+
+**Defaults are fail-closed.** `AVCSController()` with no capability arguments
+grants nothing and behaves exactly as before. To enable the click step a caller
+must opt in explicitly:
+
+```python
+AVCSController(granted_ops=["click"], allowed_queries=["Launch button"])
+```
+
+Verified end-to-end with the virtual motor on `datasets/ui_grounding` frame
+`train_0001` (target `Launch button` at 0.092, 0.949): without a grant the click
+is refused in 7.6 ms; with a grant the motor executes a 106-point minimum-jerk
+trajectory and records `click_history = [(0.093, 0.999, 'left')]` — a 0.050
+normalized error. The bridge reports `authorized_actions=1` for the click turn.
+`tests/test_capability_kernel.py` (14 tests) pins every layer.
+
+### `foveal_snap` corrupts executed clicks (was on by default)
+
+`click_target` unconditionally replaced the grounded point with
+`HumanEye.inspect_fovea(...).refined_centroid` whenever the refinement head's own
+confidence was `>= 0.5`. That head is miscalibrated off its training
+distribution and moves the point *away* from the target: frame `train_0001` raw
+error 0.050 -> refined error 0.256, at the head's reported confidence 0.706. The
+repo's own `benchmarks/test_foveal_refinement.py` independently agrees — coarse
+median 1.89 px vs refined 3.90 px on 316 held-out samples, only 22.5% improved.
+
+The snap is now `foveal_snap=False` by default (was effectively always-on), with
+`foveal_snap_min_confidence` configurable. Do not re-enable it without a
+refinement head re-validated on the target distribution.
+
 ## Fixed bugs worth knowing about
 
 - **`CapabilitySet.check` rejected `list`/`stat`/`scan` as "unknown
@@ -605,3 +663,99 @@ failure set is unchanged: 13–14 pre-existing failures, **zero new**.
   pretraining. Held-out macro-F1 is ~0.5: tone and coarse structure are
   reliable, directional and motion words are not. Reading text or naming objects
   needs the optional VLM backend.
+
+## System 1 one model (`avcs/system1/`)
+
+The rest of the repo is a bag of narrow networks wired by hand: ~30+ separate
+`nn.Module` classes, 7 networks on the shipped path, and 77 hand-written
+`if/elif` branches (37 in reasoning, 40 in observation). `avcs/system1/` is the
+counter-proposal -- **one** deep-learning model, one trunk, **one latent**, every
+task read out of that same latent in a single forward pass:
+
+```
+pixels -> shared trunk -> ONE latent z
+                              |
+     +--------------+---------+---------+-------------+
+   category      elements            grounding      action
+  "kaun sa app" "kya kya hai"       "X kahan hai"   "kya karna hai"
+```
+
+Facts to keep straight:
+
+- Two configs are measured. Local CPU: `width=64, latent=128`, **1,459,113
+  params**. GPU run: `width=128, latent=256`, **5,002,985 params**. There are
+  **no `if/elif` decision points** in `forward`. `CATEGORY_NAMES` /
+  `ELEMENT_KINDS` / `WORD_NAMES` / `ACTION_NAMES` are output-distribution
+  columns, i.e. the labels the model predicts, not logic. Change behaviour by
+  changing data and retraining, not by editing a rule.
+- Everything is a function of the single `z_map` from `self.latent`. A test
+  (`test_one_latent_feeds_every_head`) zeroes that conv and asserts every
+  frame-conditioned head's output becomes input-independent; if a head ever
+  grows a private front-end that test fails.
+- Grounding is query-conditioned: `point_logits` and `presence_logits` come from
+  `z_map * q`. `category`/`kind`/`word` must **not** depend on the query, and a
+  test pins both halves of that.
+
+### Measured result (genuine GPU training, reproduced locally)
+
+Kaggle GPU run: 12,000-frame corpus, 8,000 steps, batch 64, lr 3e-3, 930 s wall.
+Checkpoint `runs/weights/system1_one_model.pt` (20 MB, gitignored) loads with
+**0 missing / 0 unexpected**. Kaggle's reported held-out numbers and an
+independent local re-eval agree:
+
+| metric | Kaggle held-out (401 pts) | local re-eval (16 frames) |
+|---|---|---|
+| kind_acc | 0.922 | 0.921 |
+| presence_acc | 0.983 | 1.000 |
+| point_median_err | 0.299 | 0.329 |
+| point_within_0.1 | 0.072 | 0.000 |
+| category_acc | 0.515 | 0.438 |
+
+What actually works: **element kind (~92%) and query presence (~98%)**, and they
+transfer off the training frames. What does not: **grounding is weak** -- median
+error is ~30% of the image and only ~0-7% of targets land within 10% of the
+frame, so the point head is not yet a usable pointer. Do not quote a grounding
+number without `point_median_err` *and* `point_within_0.1`; a low median alone
+looks better than the system is.
+
+**Read held-out, not validation.** Validation `category_acc` is 1.00 while
+held-out is ~0.5. That gap is the corpus being ambiguous, not the model being
+great: several `UI_CATEGORIES` are rendered by identical code paths (see the
+cortex section), so a model that keys on the generator's layout scores perfectly
+in-distribution and ~chance on a differently-seeded held-out draw.
+
+
+### Traps fixed here (each would have silently broken a checkpoint)
+
+- **`hash()` is salted per process.** The query encoder first used Python's
+  built-in `hash()` to map a word to an embedding id, so the same word got a
+  different id in every new process -- training and inference would disagree and
+  the grounding head would read the wrong embedding. Replaced with a fixed
+  FNV-1a (`_QueryEncoder.word_id`); `test_query_token_ids_are_stable_across_processes`
+  runs two fresh interpreters and asserts the ids match. This is the same class
+  of bug as "the tokenizer must travel with the weights".
+- **The action label was the last region's kind**, so it was effectively
+  arbitrary and task-blind. It now comes from the query verb
+  (`_action_from_query`). This corpus only issues `click` queries, so the head
+  has one class to learn *here*; that is a property of the data, not the model,
+  and the head is wired to condition on the query for a corpus with more verbs.
+- A `numpy`/`torch` wipe during a session is recoverable: reinstall
+  `numpy==1.26.4`, `pillow`, and the CPU `torch` wheel. The cleanroom generator
+  is pure-Python + PIL + numpy, ~120 frames/s, so the corpus is regenerable
+  rather than a fixture to check in.
+
+### Corpus and the honest caveat
+
+`python3 -m avcs.system1.make_corpus --out DIR --train 12000` regenerates the
+clean-room corpus at scale (~120 frames/s; 13,800 frames in ~2 min). The GPU
+run trains on 12,000 frames for 8,000 steps, then reports `validation` and
+`test_heldout` separately. **Read the held-out number, not the validation
+number**: the corpus renders several `UI_CATEGORIES` through identical code
+paths (see the cortex section above), so a high validation accuracy can be the
+generator being ambiguous, not the model being right.
+
+Training runs on a Kaggle GPU via `avcs/system1/train.py` (`--device cuda`,
+AMP, `OneCycleLR`). The corpus is written to `/kaggle/temp`, **not**
+`/kaggle/working`, so it does not become part of the kernel output; otherwise a
+13k-frame corpus makes the result slow to fetch.
+

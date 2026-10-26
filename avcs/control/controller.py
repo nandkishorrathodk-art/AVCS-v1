@@ -18,7 +18,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -35,6 +35,7 @@ from avcs.goal_grounder import (
 )
 from avcs.perception.grounding import FovealInspection, GroundingResult
 from avcs.perception.human_eye import HumanEye, HumanEyeState
+from avcs.control.capability import CapabilityKernel
 from avcs.control.servoing import (
     NeuromuscularServoingController,
     NeuromuscularServoingResult,
@@ -124,6 +125,11 @@ class AVCSController:
         enable_streaming: bool = True,
         require_real_capture: bool = False,
         motor_driver: Optional[Any] = None,
+        capability_kernel: Optional[CapabilityKernel] = None,
+        granted_ops: Optional[Iterable[str]] = None,
+        allowed_queries: Optional[Sequence[str]] = None,
+        foveal_snap: bool = False,
+        foveal_snap_min_confidence: float = 0.5,
     ) -> None:
         if isinstance(target_fps, bool) or not isinstance(target_fps, int) or target_fps <= 0:
             raise ValueError("target_fps must be a positive integer")
@@ -132,7 +138,20 @@ class AVCSController:
         self.device = torch.device(device)
         self.target_fps = target_fps
         self.force_virtual_motor = force_virtual_motor
+        self.foveal_snap = bool(foveal_snap)
+        self.foveal_snap_min_confidence = float(foveal_snap_min_confidence)
         self.weights_path = Path(weights_path) if weights_path else None
+
+        # 0. Capability kernel: decides whether a grounded target may reach the
+        # motor layer. Defaults to granting nothing, so an unconfigured
+        # controller stays fail-closed exactly as before.
+        if capability_kernel is not None:
+            self.capability = capability_kernel
+        else:
+            self.capability = CapabilityKernel(
+                granted_ops=granted_ops or (),
+                allowed_queries=allowed_queries,
+            )
 
         # 1. Screen Capture
         if source is None or source == "desktop":
@@ -506,11 +525,18 @@ class AVCSController:
 
         if self.grounder is not None:
             prediction = self.grounder.predict(frame, clean_q)
-            if not prediction.action_authorized or prediction.candidate_point_norm is None:
+            # The grounder's own `action_authorized` is hardcoded False, so the
+            # decision belongs to the capability kernel. It checks the grant,
+            # the query allow-list, frame degeneracy and the grounding peak.
+            decision = self.capability.authorize_prediction(
+                op="click",
+                query=clean_q,
+                prediction=prediction,
+                frame=frame,
+            )
+            if not decision.allowed:
                 raise UnvalidatedGroundingError(
-                    f"Cannot locate '{clean_q}' for motor action: the grounder returned "
-                    "an unauthorized candidate. Calibrated target-absence and "
-                    "abstention evidence is required before actions are enabled."
+                    f"Cannot locate '{clean_q}' for motor action: {decision.reason}."
                 )
             dt_ms = (time.perf_counter() - t0) * 1000.0
             return GroundingResult(
@@ -570,14 +596,21 @@ class AVCSController:
 
         tx, ty = grounding.target_coord
 
-        # 2. Foveal refinement for sub-pixel boundary docking
-        try:
-            foveal_res = self.eye.inspect_fovea(centroid=(tx, ty))
-            if foveal_res.confidence >= 0.5:
-                # Snap to refined foveal centroid
-                tx, ty = foveal_res.refined_centroid
-        except Exception:
-            pass
+        # 2. Foveal refinement for sub-pixel boundary docking.
+        # Off by default: measured on `datasets/ui_grounding`, the refinement head
+        # is miscalibrated off its training distribution and moves the point
+        # *away* from the true target (frame train_0001: raw error 0.050 ->
+        # refined error 0.256, at its own reported confidence 0.706). It was
+        # previously applied unconditionally whenever confidence >= 0.5, which
+        # corrupted every executed click. Enable only with a refinement head
+        # re-validated on the target distribution.
+        if self.foveal_snap:
+            try:
+                foveal_res = self.eye.inspect_fovea(centroid=(tx, ty))
+                if foveal_res.confidence >= self.foveal_snap_min_confidence:
+                    tx, ty = foveal_res.refined_centroid
+            except Exception:
+                pass
 
         # 3. Smooth Biological Motor Movement
         if enable_micro_tremor is not None:
