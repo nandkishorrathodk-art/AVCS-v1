@@ -237,7 +237,7 @@ class LiveNarrator:
         # ---------------------------------------------------------------------
         # Event 4: Sudden Surprise / Modal Alert / Dialog Box Pop-up
         # ---------------------------------------------------------------------
-        elif eye_frame.has_popup or (not eye_frame.is_stable and eye_frame.surprise_score > 0.85):
+        elif eye_frame.has_popup:
             event_type = "popup_alert"
             needs_attention = True
             popup_region = "center" if (0.25 <= norm_x <= 0.75 and 0.25 <= norm_y <= 0.75) else region
