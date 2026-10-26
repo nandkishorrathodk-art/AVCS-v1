@@ -121,3 +121,4 @@ def test_gateway_chat_completions(gateway_server: str) -> None:
         assert data["object"] == "chat.completion"
         assert len(data["choices"]) > 0
         assert data["choices"][0]["message"]["role"] == "assistant"
+
