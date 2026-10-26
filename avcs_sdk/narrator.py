@@ -97,7 +97,8 @@ class LiveCommentary:
         speech = self.human_speech or self.narrative
         lines = [f"[AVCS Live Eye]: \"{speech}\""]
         if self.active_window:
-            lines.append(f"[Active Window]: '{self.active_window}'")
+            safe_win = re.sub(r"[^\x20-\x7E]", "", self.active_window).strip()
+            lines.append(f"[Active Window]: '{safe_win}'")
         if self.last_action_feedback and self.last_action_feedback != speech:
             lines.append(f"[Action Feedback]: {self.last_action_feedback}")
         if self.visible_elements:
@@ -236,7 +237,7 @@ class LiveNarrator:
         # ---------------------------------------------------------------------
         # Event 4: Sudden Surprise / Modal Alert / Dialog Box Pop-up
         # ---------------------------------------------------------------------
-        elif eye_frame.has_popup or eye_frame.surprise_score > 0.45:
+        elif eye_frame.has_popup or (not eye_frame.is_stable and eye_frame.surprise_score > 0.85):
             event_type = "popup_alert"
             needs_attention = True
             popup_region = "center" if (0.25 <= norm_x <= 0.75 and 0.25 <= norm_y <= 0.75) else region
@@ -266,10 +267,11 @@ class LiveNarrator:
             target_name = self._clean_target_name(target_hint if target_hint is not None else primary_kind)
 
             # [DEPRECATED legacy conversational f-string]
-            window_display = f"'{active_window}'" if active_window else "Active window"
+            safe_window = re.sub(r"[^\x20-\x7E]", "", active_window).strip() if active_window else ""
+            window_display = f"'{safe_window}'" if safe_window else "Active window"
             article = "an" if target_name and target_name[0].lower() in "aeiou" else "a"
             human_speech = f"{window_display} observed. Gaze focused on {region} where {article} {target_name} is visible."
-            feedback_str = f"Foreground focus: {active_window or 'Active window'}"
+            feedback_str = f"Foreground focus: {safe_window or 'Active window'}"
 
             self.last_window_title = active_window
             self.is_first_frame = False
@@ -334,7 +336,7 @@ class LiveNarrator:
         elif eye_frame.hotspots and len(eye_frame.hotspots) > 0:
             tel_conf = float(eye_frame.hotspots[0][3])
 
-        if eye_frame.has_popup or eye_frame.surprise_score > 0.45:
+        if eye_frame.has_popup:
             tel_stability = StabilityState.SURPRISE_EVENT
         elif not eye_frame.is_stable:
             tel_stability = StabilityState.ANIMATING

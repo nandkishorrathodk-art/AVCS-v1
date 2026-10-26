@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from typing import List, Optional
@@ -108,7 +109,7 @@ def resolve_semantic_target(
     return scored[0][1]
 
 
-def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True) -> None:
+def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
     print("\n[AVCS Agent] Initializing Autonomous Live Agent...")
     print(f"[Objective]: {goal}")
     if dry_run:
@@ -116,11 +117,11 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True) -> None:
     else:
         print("[Safety Mode]: LIVE ACTUATION active! Move cursor to any screen corner to abort.\n")
 
-    eye = EyeStream()
+    eye = EyeStream(api_key=api_key)
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
-    brain = LLMBridge()
+    brain = LLMBridge(api_key=api_key, base_url=base_url)
 
     # Prefrontal Cognitive Mission Operators
     planner = CognitivePlanner()
@@ -168,6 +169,7 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True) -> None:
             surprise_score=eye_frame.surprise_score,
             has_popup=eye_frame.has_popup,
             ripple_verified=last_ripple.verified if last_ripple else None,
+            is_stable=eye_frame.is_stable,
         )
         if obstacle:
             print(f"[Obstacle Alert]: {obstacle.description} (type={obstacle.obstacle_type.value}, surprise={obstacle.surprise_magnitude:.2f})")
@@ -276,9 +278,9 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True) -> None:
     eye.close()
 
 
-def run_monitor(seconds: int = 10) -> None:
+def run_monitor(seconds: int = 10, api_key: Optional[str] = None) -> None:
     print(f"\n[AVCS Monitor] Streaming live screen commentary for {seconds} seconds...")
-    eye = EyeStream()
+    eye = EyeStream(api_key=api_key)
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
@@ -293,13 +295,14 @@ def run_monitor(seconds: int = 10) -> None:
         comm = narrator.narrate(eye_frame, active_win, elements)
 
         if comm:
-            print(f"[{time.strftime('%H:%M:%S')}] {comm.narrative} (Window: '{active_win}') | Latency: {eye_frame.latency_ms}ms")
+            safe_win = re.sub(r'[^\x20-\x7E]', '', active_win).strip() if active_win else ''
+            print(f"[{time.strftime('%H:%M:%S')}] {comm.narrative} (Window: '{safe_win}') | Latency: {eye_frame.latency_ms}ms")
         time.sleep(0.8)
 
     eye.close()
 
 
-def run_check() -> int:
+def run_check(api_key: Optional[str] = None) -> int:
     print("[AVCS Diagnostic Health Check]")
     print("Version: 0.2.0")
     print(f"Host OS: {sys.platform}")
@@ -307,7 +310,7 @@ def run_check() -> int:
     # 1. System 1 EyeStream & Retina
     weights_loaded = False
     try:
-        eye = EyeStream()
+        eye = EyeStream(api_key=api_key)
         frame = eye.step()
         print(f"[*] System 1 Retina: OK ({frame.raw_frame.shape[1]}x{frame.raw_frame.shape[0]} px, latency={frame.latency_ms:.2f}ms)")
         weights_loaded = bool(eye.weights_loaded)
@@ -377,18 +380,19 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", default=True, help="Bypass physical mouse clicks (default: True)")
     parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing")
     parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
+    parser.add_argument("--base-url", type=str, default=None, help="Custom LLM API Base URL")
     args = parser.parse_args()
 
     if args.api_key:
         os.environ["AVCS_API_KEY"] = args.api_key
 
     if args.check:
-        sys.exit(run_check())
+        sys.exit(run_check(api_key=args.api_key))
     elif args.monitor:
-        run_monitor(args.seconds)
+        run_monitor(args.seconds, api_key=args.api_key)
     else:
         is_dry_run = not args.live
-        run_agent(args.goal, dry_run=is_dry_run)
+        run_agent(args.goal, dry_run=is_dry_run, api_key=args.api_key, base_url=args.base_url)
 
 
 if __name__ == "__main__":
