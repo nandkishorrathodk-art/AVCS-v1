@@ -187,3 +187,4 @@ To have a real AI model describe the screen like a person without hardcoded if/e
 | **Zero Modal Hallucinations** | `tests/e2e/test_tier2_boundary_corner.py` | **PASS** (36/36 tests green) |
 | **Full SDK Regression Suite** | `tests/` | **PASS** (277 passed, 1 skipped) |
 | **Live Win32 Actuation Safeguards** | `avcs/hand_motor.py` | **PASS** (Corner breakout active) |
+
