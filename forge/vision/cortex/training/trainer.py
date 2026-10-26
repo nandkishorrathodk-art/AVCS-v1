@@ -55,7 +55,7 @@ class AVCSCloudTrainer:
         )
 
         self.use_amp = self.train_cfg.use_amp and self.device.type == "cuda"
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp) if hasattr(torch.amp, 'GradScaler') else torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         self.model.train()
@@ -79,7 +79,7 @@ class AVCSCloudTrainer:
 
             self.optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            with (torch.amp.autocast('cuda', enabled=self.use_amp) if hasattr(torch.amp, 'autocast') else torch.cuda.amp.autocast(enabled=self.use_amp)):
                 # 1. Extract views for frame_t
                 view_t = self.model.retina.extract_views(frame_t)
                 p_t = view_t.peripheral.to(self.device)

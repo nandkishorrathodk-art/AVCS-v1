@@ -540,6 +540,56 @@ should show a small gap, and the gated/ungated pair bounds how much of a
 cross-generator number is the model versus the confidence gate.
 
 
+## avcs_sdk live agent (`avcs_sdk/`) — audit facts
+
+`avcs_sdk/` is the packaged "eyes + hands" entrypoint
+(`python3 -m avcs_sdk.run_live_agent`). It was **not runnable** before the
+fixes below: the crash only appears when `FoveaReader.inspect` output reaches
+the agent, so importing helpers in isolation hid it.
+
+Fixed defects (all reproduced by running the real entrypoint):
+
+- `run_live_agent.py` read `e.patch`, `elem.glyph_likeness`,
+  `elem.edge_density`, `elem.contrast` and `target_elem.describe()`.
+  `FovealElement` had **none** of those fields, so `run_agent` raised
+  `AttributeError` on turn 1. `glyph_likeness` was never defined anywhere in
+  the repo or any branch.
+- `narrator.py` guarded `e.describe()` with `hasattr`, so instead of crashing
+  it **silently dropped every element** (`visible_elements == []`). A
+  `hasattr` guard on an always-missing attribute turns a crash into silent
+  data loss; prefer the attribute existing.
+- `FovealElement` now carries the real crop (`patch`, excluded from
+  equality/hash so the frozen dataclass still hashes) and the two texture
+  metrics computed once in `FoveaReader.inspect`.
+- **Category vocabulary was split.** The eye stream emits
+  `interactive_control / text_input / toggle_icon / modal_dialog /
+  content_region` (`UI_CLASS_MAP`, now the single source). The scorer tested
+  `"text_like"` and `"graphic"` — tokens **no producer emits** — so both
+  branches were dead. Derive consumer sets from `UI_CATEGORIES` or they drift
+  again.
+- `narrator._clean_target_name` did not map `text_input`/`toggle_icon`/
+  `modal_dialog`/`content_region`, so raw snake_case class tokens reached the
+  System 2 prompt. The element-label path also bypassed the map entirely.
+
+Two honesty bugs in `--check`:
+
+- It printed `Model Weights: OK` and `ALL CHECKS PASSED ... 100% operational`
+  while `avcs_sdk/weights/avcs_v2.pt` was **missing** and the cortex was
+  untrained. It now prints `NOT LOADED` and exits **2** with
+  `[CHECKS INCOMPLETE]`. Exit 0 means a checkpoint actually loaded.
+- Do not read `--check` exit 0 as a perception pass; it only means plumbing.
+
+Boundary rule (see `docs/AVCS_ENGINEERING_RULES.md`, "Do not send screen images
+to System 2"): `LLMBridge(vision_enabled=...)` defaulted to **True**, so a
+caller that passed only a goal silently shipped base64 foveal crops to the
+cloud endpoint. It now defaults to **False**; enabling image egress is an
+explicit opt-in.
+
+Verified: `python3 -m avcs_sdk.run_live_agent --goal "..." --dry-run` now
+completes turn 1 (previously `AttributeError`), and
+`tests/test_sdk_live_agent_pipeline.py` (17 tests) pins each fix. Full-suite
+failure set is unchanged: 13–14 pre-existing failures, **zero new**.
+
 ## Honest limits
 
 - 2.7M–50M params cannot follow a system prompt reliably. This is a scale

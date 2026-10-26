@@ -2,13 +2,14 @@
 
 Zooms into visual change hotspots and detected UI boxes to inspect high-resolution
 native crops in <10ms. Eliminates the 131-word vocabulary limit: reads unlimited
-button labels, dialog text, and error messages.
+button labels, dialog text, and error messages when a real OCR or VLM backend
+is attached.
 """
 from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,32 +18,48 @@ import numpy as np
 @dataclass(frozen=True)
 class FovealElement:
     """Inspected UI element with high-acuity crop data."""
-    text: str                         # Read text content
+    text: Optional[str]               # Read text content, or None if no backend attached
     category: str                     # e.g., "button", "input", "label", "icon"
     center_norm: Tuple[float, float]  # Exact normalized centroid (x, y)
     bbox_pixels: Tuple[int, int, int, int] # (left, top, width, height) in native frame
     confidence: float                 # Confidence score [0, 1]
+    # The high-acuity native crop itself. Held locally only; it must not be
+    # forwarded to System 2 (see docs/AVCS_ENGINEERING_RULES.md). Excluded from
+    # equality/hash so the frozen dataclass keeps working with an array field.
+    patch: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
+    contrast: float = 0.0             # std of the grayscale crop (texture metric)
+    edge_density: float = 0.0         # mean gradient magnitude of the crop (texture metric)
+
+    def describe(self) -> str:
+        """Short pixel-derived label, e.g. ``interactive_control at (0.50, 0.50)``.
+
+        The ``at (x, y)`` suffix is deliberate: ``LiveNarrator`` rewrites it into
+        a spatial region name, and the System 2 prompt strips it, so raw
+        coordinates never leave System 1.
+        """
+        label = (self.text.strip() if self.text else "") or self.category
+        x, y = self.center_norm
+        return f"{label} at ({x:.2f}, {y:.2f})"
 
 
 class FoveaReader:
     """Foveal zoom controller: extracts native crops and reads text in <10ms."""
 
-    def __init__(self, crop_size: int = 128) -> None:
+    def __init__(
+        self,
+        crop_size: int = 128,
+        backend: Optional[Any] = None,
+    ) -> None:
         self.crop_size = crop_size
-        self._ocr_engine = None
-        self._init_ocr()
+        self._backend = backend
 
-    def _init_ocr(self) -> None:
-        """Attempts to initialize Windows native OCR engine."""
-        if sys.platform == "win32":
-            try:
-                import winrt.windows.media.ocr as win_ocr
-                import winrt.windows.globalization as win_glob
-                lang = win_glob.Language("en-US")
-                if win_ocr.OcrEngine.is_language_supported(lang):
-                    self._ocr_engine = win_ocr.OcrEngine.try_create_from_language(lang)
-            except Exception:
-                self._ocr_engine = None
+    def attach_backend(self, backend: Any) -> None:
+        """Explicitly attach an OCR or local VLM backend."""
+        self._backend = backend
+
+    def attach_ocr(self, backend: Any) -> None:
+        """Explicitly attach an OCR backend."""
+        self._backend = backend
 
     def crop_element(
         self,
@@ -63,21 +80,55 @@ class FoveaReader:
         y1 = max(0, y2 - crop_h)
         return full_frame[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1)
 
-    def read_text(self, crop: np.ndarray) -> str:
-        """Extracts text from a cropped UI patch with zero vocabulary limits."""
-        if crop.size == 0:
-            return ""
+    def measure_texture(self, crop: np.ndarray) -> Tuple[float, float]:
+        """Return (contrast, edge_density) for a crop, computed once and shared.
 
+        ``contrast`` is the grayscale standard deviation; ``edge_density`` is the
+        mean gradient magnitude. Both are the same quantities
+        ``summarize_foveal_patches`` reports, so a caller can rank elements on
+        the same scale it already sees in the System 2 prompt.
+        """
+        if crop.size == 0 or crop.ndim < 2:
+            return 0.0, 0.0
         gray = np.mean(crop, axis=-1) if crop.ndim == 3 else crop
-        std_val = float(np.std(gray))
-        if std_val < 5.0:
-            return ""
-
+        gray = gray.astype(np.float32)
+        contrast = float(np.std(gray))
         gy, gx = np.gradient(gray)
         edge_density = float(np.mean(np.hypot(gx, gy)))
-        if edge_density > 15.0:
-            return "Interactive Control"
-        return "UI Element"
+        return contrast, edge_density
+
+    def read_text(self, crop: np.ndarray) -> Optional[str]:
+        """Extracts text from a cropped UI patch if an actual OCR or local VLM backend is attached.
+
+        Returns None (fail-closed honesty) unless an actual OCR or local VLM backend is explicitly attached.
+        """
+        if crop is None or crop.size == 0 or self._backend is None:
+            return None
+
+        try:
+            if hasattr(self._backend, "read_text") and callable(self._backend.read_text):
+                res = self._backend.read_text(crop)
+            elif hasattr(self._backend, "ocr") and callable(self._backend.ocr):
+                res = self._backend.ocr(crop)
+            elif hasattr(self._backend, "recognize_text") and callable(self._backend.recognize_text):
+                res = self._backend.recognize_text(crop)
+            elif callable(self._backend):
+                res = self._backend(crop)
+            else:
+                return None
+
+            if isinstance(res, str):
+                cleaned = res.strip()
+                return cleaned if cleaned else None
+            elif isinstance(res, dict):
+                for key in ("<OCR>", "<OCR_WITH_REGION>", "text"):
+                    if key in res and isinstance(res[key], str):
+                        cleaned = res[key].strip()
+                        if cleaned:
+                            return cleaned
+            return None
+        except Exception:
+            return None
 
     def inspect(
         self,
@@ -96,6 +147,7 @@ class FoveaReader:
             conf = float(spot[3]) if len(spot) > 3 else 1.0
 
             crop, bbox = self.crop_element(full_frame, x, y)
+            contrast, edge_density = self.measure_texture(crop)
             text = self.read_text(crop)
             elements.append(
                 FovealElement(
@@ -104,7 +156,9 @@ class FoveaReader:
                     center_norm=(x, y),
                     bbox_pixels=bbox,
                     confidence=conf,
+                    patch=crop,
+                    contrast=contrast,
+                    edge_density=edge_density,
                 )
             )
         return elements
-

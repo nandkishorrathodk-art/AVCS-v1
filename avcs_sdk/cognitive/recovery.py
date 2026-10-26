@@ -84,8 +84,8 @@ class ObstacleRecoveryManager:
 
     def __init__(
         self,
-        surprise_threshold: float = 0.35,
-        popup_surprise_threshold: float = 0.45,
+        surprise_threshold: float = 0.55,
+        popup_surprise_threshold: float = 0.65,
         max_retries: int = 3,
     ) -> None:
         self.surprise_threshold = surprise_threshold
@@ -101,6 +101,7 @@ class ObstacleRecoveryManager:
         error_message: Optional[str] = None,
         screen_state: Optional[Dict[str, Any]] = None,
         ripple_verified: Optional[bool] = None,
+        is_stable: Optional[bool] = None,
     ) -> Optional[ObstacleEvent]:
         """Detect if current sensory or state conditions indicate an execution obstacle."""
         err_lower = (error_message or "").lower()
@@ -142,7 +143,7 @@ class ObstacleRecoveryManager:
             )
 
         # 5. General visual surprise mismatch without explicit error tag
-        if surprise_score >= self.surprise_threshold:
+        if surprise_score >= self.surprise_threshold and (is_stable is not True):
             return ObstacleEvent(
                 obstacle_type=ObstacleType.VISUAL_SURPRISE,
                 surprise_magnitude=surprise_score,

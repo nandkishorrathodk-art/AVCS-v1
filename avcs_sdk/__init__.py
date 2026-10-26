@@ -14,8 +14,16 @@ from .models import (
 from .eye_stream import EyeStream, EyeObservation
 from .fovea_reader import FoveaReader, FovealElement
 from .narrator import LiveNarrator, LiveCommentary
+from .telemetry import (
+    AffordanceKind,
+    RecommendedAction,
+    SceneCategory,
+    SensoryTelemetry,
+    StabilityState,
+    TelemetryHotspot,
+)
 from .hand_motor import HandMotor, RippleResult
-from .llm_bridge import LLMBridge, LLMCommand
+from .llm_bridge import LLMBridge, LLMCommand, describe_screen
 from .run_live_agent import run_agent, run_monitor
 
 __version__ = "0.2.0"
@@ -29,6 +37,8 @@ __all__ = [
     "TargetProvenance", "VerificationEvidence", "RepositoryAVCSBackend",
     "EyeStream", "EyeObservation", "FoveaReader", "FovealElement",
     "LiveNarrator", "LiveCommentary", "HandMotor", "RippleResult",
-    "LLMBridge", "LLMCommand", "run_agent", "run_monitor",
+    "SceneCategory", "StabilityState", "RecommendedAction", "AffordanceKind",
+    "TelemetryHotspot", "SensoryTelemetry",
+    "LLMBridge", "LLMCommand", "describe_screen", "run_agent", "run_monitor",
     "__version__",
 ]

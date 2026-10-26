@@ -61,4 +61,4 @@ where = ["."]
 include = ["avc*"]
 
 [tool.setuptools.package-data]
-avc = ["py.typed", "weights/*.avcs", "weights/*.pt"]
+avc = ["py.typed", "weights/*.avcs"]

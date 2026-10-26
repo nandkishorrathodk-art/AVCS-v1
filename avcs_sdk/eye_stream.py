@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -33,21 +33,44 @@ from avcs.cortex.preprocessor import EdgeLuminancePreprocessor
 def _resolve_weights_path(filename: str) -> str:
     """Locate bundled model weights both in package distribution and local development."""
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
-    bundled_path = os.path.join(pkg_dir, "weights", filename)
-    if os.path.exists(bundled_path):
-        return bundled_path
     repo_root = os.path.dirname(pkg_dir)
-    dev_path = os.path.join(repo_root, "weights", filename)
-    if os.path.exists(dev_path):
-        return dev_path
-    return bundled_path
+
+    search_dirs = [
+        os.path.join(pkg_dir, "weights"),
+        os.path.join(repo_root, "weights"),
+        os.path.join(repo_root, "runs", "weights"),
+        os.path.join(repo_root, "..", "splendid-babbage", "runs", "weights"),
+        os.path.join(repo_root, "..", "avcs-sdk", "avcs", "weights"),
+    ]
+
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+
+    # Check known v2 weights filenames in search directories (including runs/weights/)
+    v2_candidates = ["avcs_v2_weights.pt", "avcs_v2.pt", "avcs_v2.avcs"]
+    if filename in v2_candidates or "avcs_v2" in filename:
+        for candidate_name in v2_candidates:
+            for d in search_dirs:
+                candidate = os.path.join(d, candidate_name)
+                if os.path.exists(candidate):
+                    return os.path.abspath(candidate)
+
+    return os.path.join(pkg_dir, "weights", filename)
 
 
-DEFAULT_WEIGHTS_V2 = _resolve_weights_path("avcs_v2.pt")
+DEFAULT_VAULT_V2 = _resolve_weights_path("avcs_v2.avcs")
+DEFAULT_WEIGHTS_V2 = _resolve_weights_path("avcs_v2_weights.pt")
 DEFAULT_WEIGHTS_V1 = _resolve_weights_path("avcs_v1.pt")
-DEFAULT_WEIGHTS = DEFAULT_WEIGHTS_V2 if os.path.exists(DEFAULT_WEIGHTS_V2) else (
-    DEFAULT_WEIGHTS_V1 if os.path.exists(DEFAULT_WEIGHTS_V1) else DEFAULT_WEIGHTS_V2
-)
+if os.path.exists(DEFAULT_WEIGHTS_V2):
+    DEFAULT_WEIGHTS = DEFAULT_WEIGHTS_V2
+elif os.path.exists(DEFAULT_VAULT_V2):
+    DEFAULT_WEIGHTS = DEFAULT_VAULT_V2
+elif os.path.exists(DEFAULT_WEIGHTS_V1):
+    DEFAULT_WEIGHTS = DEFAULT_WEIGHTS_V1
+else:
+    DEFAULT_WEIGHTS = DEFAULT_WEIGHTS_V2
 
 
 @dataclass(frozen=True)
@@ -76,12 +99,25 @@ class EyeFrame:
     surprise_score: float             # Change magnitude in [0, 1]
     is_stable: bool                  # True if screen content has settled
     has_popup: bool                  # True if high-contrast modal or alert appeared
-    hotspots: List[Tuple[float, float, str, float]]  # [(norm_x, norm_y, kind, conf), ...]
+    hotspots: List[Tuple[float, float, str, float, float]]  # [(norm_x, norm_y, kind, obj_conf, cls_conf), ...]
     latency_ms: float                # Forward pass duration
 
 
 # Backwards-compatible alias: the observation dataclass is named EyeFrame.
 EyeObservation = EyeFrame
+
+# The 5-class UI morphology vocabulary emitted in EyeFrame.hotspots. Consumers
+# must branch on these exact tokens; testing for a token no producer emits
+# silently disables the branch.
+UI_CLASS_MAP: Dict[int, str] = {
+    0: "interactive_control",
+    1: "text_input",
+    2: "toggle_icon",
+    3: "modal_dialog",
+    4: "content_region",
+}
+UI_CATEGORIES = frozenset(UI_CLASS_MAP.values())
+
 
 
 class EyeStream(StreamingVisualCortexV2):
@@ -119,9 +155,10 @@ class EyeStream(StreamingVisualCortexV2):
 
         self.eval()
 
-    def load_weights(self, weights_path: str) -> bool:
+    def load_weights(self, weights_path: str, api_key: Optional[str] = None) -> bool:
         """Loads cortex weights if the checkpoint matches this architecture.
 
+        Supports both unencrypted (.pt) checkpoints and encrypted (.avcs) vaults.
         The checkpoint is verified and loaded only if state dict keys match.
         Records an explicit status in ``weights_loaded`` / ``weights_status``
         and leaves the model untouched when nothing can be mapped.
@@ -130,12 +167,55 @@ class EyeStream(StreamingVisualCortexV2):
             self.weights_loaded = False
             self.weights_status = f"weights file not found: {weights_path}"
             return False
-        try:
-            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
-        except Exception as exc:
-            self.weights_loaded = False
-            self.weights_status = f"weights unreadable: {exc}"
-            return False
+
+        is_vault = str(weights_path).endswith(".avcs")
+        if not is_vault:
+            try:
+                with open(weights_path, "rb") as f:
+                    header = f.read(5)
+                is_vault = (header == b"AVCS\x01")
+            except Exception:
+                is_vault = False
+
+        if is_vault:
+            try:
+                from avcs.vault import InvalidKeyError, ModelVault, VaultSecurityError
+            except Exception:
+                try:
+                    from .vault import InvalidKeyError, ModelVault, VaultSecurityError
+                except Exception:
+                    from avc.vault import InvalidKeyError, ModelVault, VaultSecurityError
+
+            key = (
+                api_key
+                or os.environ.get("AVC_API_KEY")
+                or os.environ.get("AVCS_API_KEY")
+                or os.environ.get("AVCS_KEY")
+            )
+            if not key:
+                self.weights_loaded = False
+                self.weights_status = "Access Denied: Missing AVC_API_KEY for encrypted model vault (.avcs)"
+                return False
+            try:
+                checkpoint = ModelVault.decrypt_to_ram(weights_path, api_key=key, map_location=self.device)
+            except InvalidKeyError:
+                self.weights_loaded = False
+                self.weights_status = "Access Denied: Invalid AVC_API_KEY for model vault"
+                return False
+            except Exception as exc:
+                self.weights_loaded = False
+                self.weights_status = f"vault decryption failed: {exc}"
+                return False
+        else:
+            try:
+                checkpoint = torch.load(weights_path, map_location=self.device, weights_only=True)
+            except Exception:
+                try:
+                    checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
+                except Exception as exc:
+                    self.weights_loaded = False
+                    self.weights_status = f"weights unreadable: {exc}"
+                    return False
 
         if not isinstance(checkpoint, dict):
             self.weights_loaded = False
@@ -281,22 +361,19 @@ class EyeStream(StreamingVisualCortexV2):
         )
         self.temporal_state = out.temporal_state
 
-        # Head 1: Surprise score & Temporal Change
-        surprise = float(np.clip(out.feature_uncertainty[0].item(), 0.0, 1.0))
-        mean_change = float(out.change_heatmap[0, 0].mean().item())
-        is_stable = (surprise < 0.08) and (mean_change < 0.05)
+        # Head 1: Surprise score & Temporal Change calibrated to inter-frame optical change
+        if hasattr(self, "_prev_features") and self._prev_features is not None:
+            spatial_delta = float(torch.abs(out.temporal_state.previous_features - self._prev_features).mean().item())
+        else:
+            spatial_delta = 0.0
+        self._prev_features = out.temporal_state.previous_features.clone()
+
+        surprise = float(np.clip(spatial_delta * 10.0, 0.0, 1.0))
+        is_stable = spatial_delta < 0.015
 
         # Head 2: 5-Class UI Objectness & Hotspots
         obj_probs = torch.sigmoid(out.ui_objectness_logits[0, 0])  # (16, 16)
         cls_probs = torch.softmax(out.ui_class_logits[0], dim=0)   # (5, 16, 16)
-
-        CLASS_MAP = {
-            0: "interactive_control",
-            1: "text_input",
-            2: "toggle_icon",
-            3: "modal_dialog",
-            4: "content_region",
-        }
 
         grid_H, grid_W = obj_probs.shape
         obj_4d = obj_probs.unsqueeze(0).unsqueeze(0)
@@ -304,19 +381,20 @@ class EyeStream(StreamingVisualCortexV2):
         is_peak = (obj_probs == max_pool) & (obj_probs >= 0.25)
         peak_idx = torch.nonzero(is_peak, as_tuple=False)
 
-        hotspots: List[Tuple[float, float, str, float]] = []
+        hotspots: List[Tuple[float, float, str, float, float]] = []
         for i in range(min(12, len(peak_idx))):
             py, px = int(peak_idx[i, 0].item()), int(peak_idx[i, 1].item())
-            val = float(obj_probs[py, px].item())
+            obj_conf = float(obj_probs[py, px].item())
             best_cls = int(torch.argmax(cls_probs[:, py, px]).item())
-            cls_name = CLASS_MAP.get(best_cls, "interactive_control")
+            cls_conf = float(cls_probs[best_cls, py, px].item())
+            cls_name = UI_CLASS_MAP.get(best_cls, "interactive_control")
             norm_x = (px + 0.5) / float(grid_W)
             norm_y = (py + 0.5) / float(grid_H)
-            hotspots.append((round(norm_x, 3), round(norm_y, 3), cls_name, round(val, 3)))
+            hotspots.append((round(norm_x, 3), round(norm_y, 3), cls_name, round(obj_conf, 3), round(cls_conf, 3)))
 
-        # Popup detection: high surprise or modal dialog class detected
-        has_popup = (surprise >= 0.25 and len(hotspots) > 0) or any(
-            h[2] == "modal_dialog" and h[3] >= 0.40 for h in hotspots
+        # Popup detection: require physical optical delta (spatial_delta >= 0.04) AND cls_name == "modal_dialog" AND cls_conf >= 0.70
+        has_popup = (spatial_delta >= 0.04) and any(
+            h[2] == "modal_dialog" and (h[4] if len(h) > 4 else h[3]) >= 0.70 for h in hotspots
         )
 
         dt_ms = (time.perf_counter() - t0) * 1000.0

@@ -23,21 +23,23 @@ def _scene_attributes(data: SyntheticScreenData) -> np.ndarray:
     """Multi-label attribute target derived from the ground-truth scene."""
     mask = data.affordance_mask
     h, w = mask.shape
-    clickable = float((mask == 1).sum()) / (h * w)
-    typeable = float((mask == 2).sum()) / (h * w)
-    scrollable = float((mask == 3).sum()) / (h * w)
+    total_px = float(h * w)
+    clickable = float((mask == 1).sum()) / total_px
+    typeable = float((mask == 2).sum()) / total_px
+    scrollable = float((mask == 3).sum()) / total_px
+    draggable = float((mask == 4).sum()) / total_px
     bright = float(data.frame.mean()) / 255.0
 
     values = {
-        "has_text": 1.0 if data.category in ("editor_code", "terminal_shell", "browser_webpage") else 0.0,
+        "has_text": 1.0 if (typeable > 0.005 or data.category in ("editor_code", "terminal_shell", "browser_webpage", "form_input", "settings_panel")) else 0.0,
         "has_toolbar": 1.0 if data.category != "desktop_canvas" else 0.0,
         "has_modal": 1.0 if data.category == "modal_dialog" else 0.0,
-        "has_input_field": 1.0 if typeable > 0.01 else 0.0,
-        "has_list": 1.0 if scrollable > 0.01 else 0.0,
+        "has_input_field": 1.0 if typeable > 0.005 else 0.0,
+        "has_list": 1.0 if scrollable > 0.005 else 0.0,
         "has_image": 1.0 if data.category == "media_playback" else 0.0,
         "is_dark_theme": 1.0 if bright < 0.35 else 0.0,
-        "is_dense": 1.0 if (clickable + typeable) > 0.15 else 0.0,
-        "has_cursor": 1.0,
+        "is_dense": 1.0 if (clickable + typeable + scrollable + draggable) > 0.06 else 0.0,
+        "has_cursor": 1.0 if data.cursor_xy != (0, 0) else 0.0,
         "has_animation": 0.0,
     }
     return np.array([values[a] for a in SCENE_ATTRIBUTES], dtype=np.float32)

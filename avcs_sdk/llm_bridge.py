@@ -24,7 +24,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 from PIL import Image
@@ -115,8 +115,14 @@ class LLMBridge:
         model_name: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 30.0,
-        vision_enabled: bool = True,
+        vision_enabled: bool = False,
     ) -> None:
+        """``vision_enabled`` defaults to False to honor the System 1/System 2
+        boundary in ``docs/AVCS_ENGINEERING_RULES.md``: screen images, crops and
+        their encodings must not be sent to System 2. Enabling it is an explicit
+        opt-in that a caller (and a product/privacy decision) must make, not a
+        default a caller inherits silently.
+        """
         self.api_key = (
             api_key
             or os.environ.get("AVC_API_KEY")
@@ -156,7 +162,7 @@ class LLMBridge:
         if not self.api_key:
             raise RuntimeError("no API key configured for LLMBridge")
 
-        if self.vision_enabled and fovea_patches and len(fovea_patches) > 0:
+        if fovea_patches and len(fovea_patches) > 0:
             content_items: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
             for patch in fovea_patches:
                 try:
@@ -257,6 +263,74 @@ class LLMBridge:
         self.conversation_history.append({"role": "assistant", "content": content})
         return command
 
+    def describe_screen(
+        self,
+        frame_or_patches: Union[np.ndarray, List[np.ndarray]],
+        prompt: str = "Describe what is visible on this screen in detail.",
+    ) -> str:
+        """Query LLM directly for natural language description of screen frame or patches.
+
+        When vision_enabled=True, encodes frame or foveal patches to base64 PNGs and queries
+        /v1/chat/completions directly for natural language description without forcing command
+        action JSON parsing.
+        When vision_enabled=False, raises PermissionError to preserve privacy.
+        """
+        if not self.vision_enabled:
+            raise PermissionError("Screen image egress disabled. Set vision_enabled=True to send pixels.")
+
+        if isinstance(frame_or_patches, np.ndarray):
+            patches = [frame_or_patches]
+        elif isinstance(frame_or_patches, (list, tuple)):
+            patches = list(frame_or_patches)
+        else:
+            raise TypeError("frame_or_patches must be a numpy ndarray or a list of numpy ndarrays")
+
+        if not self.api_key:
+            raise RuntimeError("no API key configured for LLMBridge")
+
+        content_items: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for patch in patches:
+            if isinstance(patch, np.ndarray) and patch.size > 0:
+                b64_png = encode_patch_to_base64(patch)
+                content_items.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64_png}"},
+                })
+
+        messages = [{"role": "user", "content": content_items}]
+        payload = json.dumps(
+            {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": 0.0,
+            }
+        ).encode("utf-8")
+
+        if self.base_url.endswith("/v1"):
+            endpoint = f"{self.base_url}/chat/completions"
+        elif "/v1" in self.base_url:
+            endpoint = f"{self.base_url}/chat/completions"
+        else:
+            endpoint = f"{self.base_url}/v1/chat/completions"
+
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        content = str(body["choices"][0]["message"]["content"]).strip()
+        self.conversation_history.append({"role": "user", "content": prompt})
+        self.conversation_history.append({"role": "assistant", "content": content})
+        return content
+
     def _heuristic_fallback(
         self,
         user_goal: str,
@@ -307,3 +381,17 @@ class LLMBridge:
             source="heuristic_fallback",
         )
 
+
+def describe_screen(
+    frame_or_patches: Union[np.ndarray, List[np.ndarray]],
+    prompt: str = "Describe what is visible on this screen in detail.",
+    bridge: Optional[LLMBridge] = None,
+) -> str:
+    """Module-level screen describer using LLMBridge.
+
+    When vision_enabled=True on the bridge, sends pixels to the LLM.
+    When vision_enabled=False (or if bridge is omitted), raises PermissionError.
+    """
+    if bridge is None:
+        bridge = LLMBridge(vision_enabled=False)
+    return bridge.describe_screen(frame_or_patches, prompt=prompt)

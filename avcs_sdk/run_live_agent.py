@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from typing import List, Optional
@@ -29,7 +30,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from .eye_stream import EyeStream
+from .eye_stream import EyeStream, UI_CATEGORIES
 from .fovea_reader import FovealElement, FoveaReader
 from .hand_motor import HandMotor
 from .llm_bridge import LLMBridge
@@ -41,6 +42,12 @@ from .cognitive import (
     ObstacleType,
     WorkflowCoordinator,
 )
+
+# Category tokens the eye stream actually emits. The scoring below used to test
+# for "text_like"/"graphic", which no producer emits, so those branches were
+# dead. Derive from the single vocabulary source so the two cannot drift.
+TEXT_CATEGORIES = frozenset({"text_input"})
+INTERACTIVE_CATEGORIES = UI_CATEGORIES - TEXT_CATEGORIES - {"content_region"}
 
 
 def resolve_semantic_target(
@@ -65,18 +72,20 @@ def resolve_semantic_target(
         if elem.category.lower() in q_lower:
             score += 3.0
 
-        # 2. Text / code / syntax matching
+        # 2. Text / code / syntax matching. Dense, high-contrast detail is the
+        # pixel evidence for glyph-like content; both metrics come from the
+        # foveal crop, not from a phantom attribute.
         if any(w in q_lower for w in ("code", "syntax", "text", "line", "type", "script")):
-            if elem.category == "text_like":
+            if elem.category in TEXT_CATEGORIES:
                 score += 3.0
-            score += elem.glyph_likeness * 2.0
-            score += elem.edge_density * 1.5
+            score += elem.edge_density * 0.15
+            score += elem.contrast * 0.05
 
         # 3. Interactive controls / buttons / dialogs
         if any(w in q_lower for w in ("button", "dismiss", "ok", "cancel", "close", "dialog", "click", "control")):
-            if elem.category in ("graphic", "interactive_control"):
+            if elem.category in INTERACTIVE_CATEGORIES:
                 score += 3.0
-            score += elem.contrast * 1.5
+            score += elem.contrast * 0.05
 
         # 4. Spatial quadrant matching
         cx, cy = elem.center_norm
@@ -100,16 +109,19 @@ def resolve_semantic_target(
     return scored[0][1]
 
 
-def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
+def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
     print("\n[AVCS Agent] Initializing Autonomous Live Agent...")
     print(f"[Objective]: {goal}")
-    print("[Safety Mode]: Corner breakout active (Move cursor to top-left corner to abort)\n")
+    if dry_run:
+        print("[Safety Mode]: DRY-RUN active (Physical actuation bypassed). Corner breakout active.\n")
+    else:
+        print("[Safety Mode]: LIVE ACTUATION active! Move cursor to any screen corner to abort.\n")
 
-    eye = EyeStream()
+    eye = EyeStream(api_key=api_key)
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
-    brain = LLMBridge()
+    brain = LLMBridge(api_key=api_key, base_url=base_url)
 
     # Prefrontal Cognitive Mission Operators
     planner = CognitivePlanner()
@@ -150,13 +162,14 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
 
         # 2. Foveal Inspection of Interactive Elements
         elements = fovea.inspect(eye_frame.raw_frame, eye_frame.hotspots, max_inspect=5)
-        fovea_patches = [e.patch for e in elements] if elements else None
+        fovea_patches = [e.patch for e in elements if e.patch is not None]
 
         # 3. Dynamic Obstacle Detection
         obstacle = recovery_mgr.detect_obstacle(
             surprise_score=eye_frame.surprise_score,
             has_popup=eye_frame.has_popup,
             ripple_verified=last_ripple.verified if last_ripple else None,
+            is_stable=eye_frame.is_stable,
         )
         if obstacle:
             print(f"[Obstacle Alert]: {obstacle.description} (type={obstacle.obstacle_type.value}, surprise={obstacle.surprise_magnitude:.2f})")
@@ -223,7 +236,11 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
 
                 if not dry_run:
                     pre_frame = eye_frame.raw_frame
-                    success = motor.click(screen_x, screen_y)
+                    try:
+                        success = motor.click(screen_x, screen_y)
+                    except RuntimeError as exc:
+                        print(f"[SAFETY] Motor movement halted by fail-safe: {exc}")
+                        break
                     if success:
                         last_ripple = motor.verify_ripple(eye.grab_screen, target_elem.center_norm, pre_frame)
                         last_action = f"click on {target_elem.category} at ({target_elem.center_norm[0]:.2f},{target_elem.center_norm[1]:.2f})"
@@ -238,17 +255,21 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
                         print("[WARNING] Motor movement halted by corner breakout failsafe.")
                         break
                 else:
-                    print("[DRY RUN] Physical click bypassed.")
+                    print("[DRY RUN] Physical click bypassed (pass --live to authorize physical mouse clicks).")
                     if current_step:
                         planner.mark_step_complete(current_step.id, "dry run click")
 
             elif directive.action == "type" and directive.text:
                 print(f"[Hand Motor] Typing text: '{directive.text}'")
                 if not dry_run:
-                    motor.type_text(directive.text)
-                    last_action = f"typed '{directive.text}'"
+                    try:
+                        motor.type_text(directive.text)
+                        last_action = f"typed '{directive.text}'"
+                    except RuntimeError as exc:
+                        print(f"[SAFETY] Keyboard typing halted by fail-safe: {exc}")
+                        break
                 else:
-                    print("[DRY RUN] Physical keyboard typing bypassed (remove --dry-run to actuate real keyboard).")
+                    print("[DRY RUN] Physical keyboard typing bypassed (pass --live to authorize real keystrokes).")
                 if current_step:
                     planner.mark_step_complete(current_step.id, f"typed '{directive.text}'")
 
@@ -257,9 +278,9 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = False) -> None:
     eye.close()
 
 
-def run_monitor(seconds: int = 10) -> None:
+def run_monitor(seconds: int = 10, api_key: Optional[str] = None) -> None:
     print(f"\n[AVCS Monitor] Streaming live screen commentary for {seconds} seconds...")
-    eye = EyeStream()
+    eye = EyeStream(api_key=api_key)
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
@@ -274,23 +295,29 @@ def run_monitor(seconds: int = 10) -> None:
         comm = narrator.narrate(eye_frame, active_win, elements)
 
         if comm:
-            print(f"[{time.strftime('%H:%M:%S')}] {comm.narrative} (Window: '{active_win}') | Latency: {eye_frame.latency_ms}ms")
+            safe_win = re.sub(r'[^\x20-\x7E]', '', active_win).strip() if active_win else ''
+            print(f"[{time.strftime('%H:%M:%S')}] {comm.narrative} (Window: '{safe_win}') | Latency: {eye_frame.latency_ms}ms")
         time.sleep(0.8)
 
     eye.close()
 
 
-def run_check() -> int:
+def run_check(api_key: Optional[str] = None) -> int:
     print("[AVCS Diagnostic Health Check]")
     print("Version: 0.2.0")
     print(f"Host OS: {sys.platform}")
 
     # 1. System 1 EyeStream & Retina
+    weights_loaded = False
     try:
-        eye = EyeStream()
+        eye = EyeStream(api_key=api_key)
         frame = eye.step()
         print(f"[*] System 1 Retina: OK ({frame.raw_frame.shape[1]}x{frame.raw_frame.shape[0]} px, latency={frame.latency_ms:.2f}ms)")
-        print(f"[*] Model Weights: OK ({eye.weights_status})")
+        weights_loaded = bool(eye.weights_loaded)
+        if weights_loaded:
+            print(f"[*] Model Weights: OK ({eye.weights_status})")
+        else:
+            print(f"[!] Model Weights: NOT LOADED ({eye.weights_status})")
         eye.close()
     except Exception as e:
         print(f"[!] System 1 Retina: FAILED ({e})")
@@ -331,7 +358,15 @@ def run_check() -> int:
         print(f"[!] LLM Bridge: FAILED ({e})")
         return 1
 
-    print("\n[ALL CHECKS PASSED] AVCS is 100% operational and ready for consumer deployment.")
+    if not weights_loaded:
+        print(
+            "\n[CHECKS INCOMPLETE] Plumbing is wired, but no trained checkpoint was "
+            "loaded, so perception is untrained. This is not a passing perception "
+            "check. See 'Model Weights' above."
+        )
+        return 2
+
+    print("\n[ALL CHECKS PASSED] AVCS is operational with a loaded checkpoint.")
     return 0
 
 
@@ -342,19 +377,22 @@ def main() -> None:
     parser.add_argument("--goal", type=str, default="Inspect screen and summarize active window state", help="Goal for the agent")
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
-    parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Bypass physical mouse clicks (default: True)")
+    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing")
     parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
+    parser.add_argument("--base-url", type=str, default=None, help="Custom LLM API Base URL")
     args = parser.parse_args()
 
     if args.api_key:
         os.environ["AVCS_API_KEY"] = args.api_key
 
     if args.check:
-        sys.exit(run_check())
+        sys.exit(run_check(api_key=args.api_key))
     elif args.monitor:
-        run_monitor(args.seconds)
+        run_monitor(args.seconds, api_key=args.api_key)
     else:
-        run_agent(args.goal, dry_run=args.dry_run)
+        is_dry_run = not args.live
+        run_agent(args.goal, dry_run=is_dry_run, api_key=args.api_key, base_url=args.base_url)
 
 
 if __name__ == "__main__":

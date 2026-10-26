@@ -2,7 +2,7 @@
 
 Generates realistic desktop screens and produces corresponding:
 - UI Category Label (editor, browser, terminal, modal, etc.)
-- Dense Ground-Truth Affordance Masks (static, clickable, typeable, scrollable)
+- Dense Ground-Truth Affordance Masks (static, clickable, typeable, scrollable, draggable)
 - Interactive Elements with (x, y) target coordinates
 - Temporal sequences (consecutive frames with animated cursor or modal emergence).
 """
@@ -40,14 +40,17 @@ class SyntheticScreenData:
     def choose_primary(self) -> None:
         """Picks which interactive point the grounding query refers to.
 
-        Without this the first point was always the same titlebar button, so the
-        grounding target was one constant pixel for every frame and the query
-        text carried no information. Selecting a random point per seed makes the
-        label-to-coordinate mapping learnable.
+        Groups points by affordance class and samples an affordance class uniformly
+        from those present in the scene, preventing the ~93% clickable majority-class
+        collapse while keeping label-to-coordinate mapping learnable.
         """
         if not self.interactive_points:
             return
-        idx = random.randrange(len(self.interactive_points))
+        by_class: dict[str, List[int]] = {}
+        for idx, (_, _, cls) in enumerate(self.interactive_points):
+            by_class.setdefault(cls, []).append(idx)
+        chosen_cls = random.choice(list(by_class.keys()))
+        idx = random.choice(by_class[chosen_cls])
         self.interactive_points = (
             [self.interactive_points[idx]] + self.interactive_points[:idx] + self.interactive_points[idx + 1:]
         )
@@ -167,6 +170,7 @@ def points_from_mask(
         points.append((((x0 + x1) / 2.0) / W, ((y0 + y1) / 2.0) / H, name))
     return points
 
+
 # Background color painted behind the cursor in each rendered scene, restored
 # when the cursor moves so the successor frame stays otherwise identical.
 _CURSOR_BACKDROP = np.array([32, 32, 32], dtype=np.uint8)
@@ -191,33 +195,62 @@ class ProceduralScreenGenerator:
 
         # Base canvas
         canvas = np.full((self.height, self.width, 3), 32, dtype=np.uint8)
-        mask = np.zeros((self.height, self.width), dtype=np.int64) # 0: static
+        mask = np.zeros((self.height, self.width), dtype=np.int64)  # 0: static
         cursor_xy = (self.width // 2, self.height // 2)
 
-        # 1. Render Window Header (Titlebar)
-        h_bar = 28
-        canvas[:h_bar, :] = (45, 45, 48)
-        # Window control buttons (clickable)
-        for i, col in enumerate([(255, 95, 86), (255, 189, 46), (39, 201, 63)]):
-            bx = 16 + i * 18
-            by = 14
-            canvas[by - 5:by + 5, bx - 5:bx + 5] = col
-            mask[by - 5:by + 5, bx - 5:bx + 5] = 1 # clickable
+        # Helper: Render standard Window Titlebar with 3 control buttons
+        def render_titlebar(title_bg: Tuple[int, int, int] = (45, 45, 48)) -> int:
+            h_bar = 28
+            canvas[:h_bar, :] = title_bg
+            for i, col in enumerate([(255, 95, 86), (255, 189, 46), (39, 201, 63)]):
+                bx = 16 + i * 18
+                by = 14
+                canvas[by - 5:by + 5, bx - 5:bx + 5] = col
+                mask[by - 5:by + 5, bx - 5:bx + 5] = 1  # clickable
+            return h_bar
 
-        # 2. Render Category-Specific Elements
-        if category == "editor_code":
+        # 2. Render Category-Specific Distinct Elements
+        if category == "desktop_canvas":
+            # Desktop Wallpaper: distinctive vertical gradient (teal-to-deep-navy)
+            for y_i in range(self.height):
+                alpha = y_i / max(self.height - 1, 1)
+                canvas[y_i, :] = (int(18 + 12 * alpha), int(38 + 22 * alpha), int(68 + 36 * alpha))
+            # Desktop icons in a 2-column grid
+            for col_idx, gx in enumerate([32, 96]):
+                for row_idx, gy in enumerate(range(36, self.height - 60, 56)):
+                    icon_color = (245, 195, 65) if (col_idx + row_idx) % 2 == 0 else (50, 165, 245)
+                    canvas[gy:gy + 24, gx:gx + 24] = icon_color
+                    mask[gy:gy + 24, gx:gx + 24] = 1  # clickable icon
+                    canvas[gy + 26:gy + 32, gx - 4:gx + 28] = (210, 215, 225)
+
+            # Bottom Taskbar
+            tb_h = 36
+            tb_y = self.height - tb_h
+            canvas[tb_y:, :] = (16, 16, 20)
+            canvas[tb_y + 6:tb_y + 30, 12:36] = (0, 120, 215)
+            mask[tb_y + 6:tb_y + 30, 12:36] = 1  # clickable Start button
+            canvas[tb_y + 12:tb_y + 24, self.width - 64:self.width - 12] = (130, 135, 145)
+
+        elif category == "editor_code":
+            h_bar = render_titlebar()
             # Code area
-            canvas[h_bar:, :60] = (30, 30, 30) # Line numbers gutter
-            canvas[h_bar:, 60:] = (24, 24, 24) # Editor background
-            mask[h_bar:, 60:] = 2              # typeable area
-            # Fake code lines
+            canvas[h_bar:, :60] = (30, 30, 30)  # Line numbers gutter
+            canvas[h_bar:, 60:self.width - 16] = (24, 24, 24)  # Editor background
+            mask[h_bar:, 60:self.width - 16] = 2               # typeable area
+            # Code lines
             for y in range(h_bar + 16, self.height - 20, 16):
-                lw = random.randint(80, self.width - 120)
+                lw = random.randint(80, self.width - 140)
                 canvas[y:y + 4, 75:75 + lw] = random.choice([(86, 156, 214), (220, 220, 170), (206, 145, 120)])
+            # Vertical code scrollbar on right edge
+            sb_x = self.width - 14
+            canvas[h_bar:, sb_x:sb_x + 10] = (45, 45, 50)
+            canvas[h_bar + 20:h_bar + 80, sb_x:sb_x + 10] = (90, 90, 100)
+            mask[h_bar:, sb_x:sb_x + 10] = 3  # scrollable
 
         elif category == "terminal_shell":
-            canvas[h_bar:, :] = (12, 12, 12) # Dark terminal
-            mask[h_bar:, :] = 2              # typeable
+            h_bar = render_titlebar((30, 30, 34))
+            canvas[h_bar:, :] = (12, 12, 12)  # Dark terminal
+            mask[h_bar:, :] = 2               # typeable
             # Terminal prompt
             canvas[h_bar + 15:h_bar + 25, 20:120] = (80, 250, 123)
             # Cursor
@@ -226,42 +259,170 @@ class ProceduralScreenGenerator:
             cursor_xy = (cx, cy)
 
         elif category == "modal_dialog":
+            h_bar = render_titlebar()
             # Dimmed background
             canvas[h_bar:, :] = (20, 20, 20)
             # Modal box
-            mw, mh = int(self.width * 0.5), int(self.height * 0.5)
+            mw, mh = int(self.width * 0.52), int(self.height * 0.52)
             mx = (self.width - mw) // 2
             my = (self.height - mh) // 2
             canvas[my:my + mh, mx:mx + mw] = (50, 50, 54)
+            # Modal message lines
+            canvas[my + 24:my + 30, mx + 20:mx + mw - 20] = (180, 180, 185)
+            canvas[my + 38:my + 44, mx + 20:mx + mw - 60] = (150, 150, 155)
+
+            # Cancel button (clickable)
+            btn_w, btn_h = 70, 26
+            cx_btn = mx + mw - (btn_w * 2) - 30
+            cy_btn = my + mh - btn_h - 16
+            canvas[cy_btn:cy_btn + btn_h, cx_btn:cx_btn + btn_w] = (75, 75, 80)
+            mask[cy_btn:cy_btn + btn_h, cx_btn:cx_btn + btn_w] = 1  # clickable
 
             # Confirm button (clickable)
-            btn_w, btn_h = 70, 26
-            bx = mx + mw - btn_w - 20
+            bx = mx + mw - btn_w - 18
             by = my + mh - btn_h - 16
             canvas[by:by + btn_h, bx:bx + btn_w] = (0, 122, 255)
-            mask[by:by + btn_h, bx:bx + btn_w] = 1 # clickable
+            mask[by:by + btn_h, bx:bx + btn_w] = 1  # clickable
 
-        elif category in ("browser_webpage", "form_input"):
-            # Web address bar or search box (typeable)
-            ax, ay, aw, ah = 80, 36, self.width - 160, 24
-            canvas[ay:ay + ah, ax:ax + aw] = (255, 255, 255)
-            mask[ay:ay + ah, ax:ax + aw] = 2 # typeable
+        elif category == "browser_webpage":
+            h_bar = render_titlebar((52, 53, 58))
+            # Browser Tabs
+            canvas[h_bar - 24:h_bar, 80:160] = (65, 68, 75)
+            mask[h_bar - 24:h_bar, 80:160] = 1  # clickable tab
+            canvas[h_bar - 24:h_bar, 164:240] = (42, 44, 48)
+            mask[h_bar - 24:h_bar, 164:240] = 1  # clickable tab
 
-            # Submit / Search Button (clickable)
-            bx, by, bw, bh = ax + aw - 60, ay + 2, 56, 20
+            # Navigation bar (Back / Forward / Refresh)
+            nav_y = h_bar + 6
+            for btn_i in range(2):
+                nx = 14 + btn_i * 26
+                canvas[nav_y:nav_y + 18, nx:nx + 18] = (75, 78, 85)
+                mask[nav_y:nav_y + 18, nx:nx + 18] = 1  # clickable
+
+            # URL Address Bar (typeable)
+            ax, ay, aw, ah = 76, nav_y, self.width - 150, 22
+            canvas[ay:ay + ah, ax:ax + aw] = (245, 245, 248)
+            mask[ay:ay + ah, ax:ax + aw] = 2  # typeable
+
+            # Search/Go button
+            bx, by, bw, bh = ax + aw + 8, nav_y, 50, 22
             canvas[by:by + bh, bx:bx + bw] = (0, 122, 204)
-            mask[by:by + bh, bx:bx + bw] = 1 # clickable
+            mask[by:by + bh, bx:bx + bw] = 1  # clickable
 
-            # Scrollable main feed
-            canvas[ay + ah + 15:, 50:self.width - 50] = (40, 42, 48)
-            mask[ay + ah + 15:, 50:self.width - 50] = 3 # scrollable
+            # Scrollable web feed area
+            feed_top = nav_y + ah + 10
+            canvas[feed_top:, 20:self.width - 20] = (40, 42, 48)
+            mask[feed_top:, 20:self.width - 20] = 3  # scrollable
 
-        else: # settings_panel, desktop_canvas, media_playback
-            # Sidebar navigation (clickable items)
-            canvas[h_bar:, :120] = (37, 37, 38)
-            for sy in range(h_bar + 16, self.height - 40, 32):
-                canvas[sy:sy + 18, 16:104] = (62, 62, 66)
-                mask[sy:sy + 18, 16:104] = 1 # clickable
+        elif category == "form_input":
+            h_bar = render_titlebar((48, 50, 54))
+            # Clean Form Card in distinct light-neutral theme
+            cw, ch = int(self.width * 0.72), int(self.height * 0.74)
+            cx = (self.width - cw) // 2
+            cy = h_bar + 14
+            canvas[cy:cy + ch, cx:cx + cw] = (235, 238, 245)
+
+            # Form Title header strip (dark blue banner)
+            canvas[cy:cy + 24, cx:cx + cw] = (0, 102, 204)
+
+            # Form Input Field 1 (Username)
+            f1_y = cy + 38
+            canvas[f1_y:f1_y + 22, cx + 110:cx + cw - 30] = (255, 255, 255)
+            mask[f1_y:f1_y + 22, cx + 110:cx + cw - 30] = 2  # typeable
+
+            # Form Input Field 2 (Email / Key)
+            f2_y = f1_y + 34
+            canvas[f2_y:f2_y + 22, cx + 110:cx + cw - 30] = (255, 255, 255)
+            mask[f2_y:f2_y + 22, cx + 110:cx + cw - 30] = 2  # typeable
+
+            # Checkbox option
+            cb_y = f2_y + 34
+            canvas[cb_y:cb_y + 16, cx + 110:cx + 126] = (0, 122, 255)
+            mask[cb_y:cb_y + 16, cx + 110:cx + 126] = 1  # clickable checkbox
+
+            # Submit button
+            sub_y = cb_y + 28
+            canvas[sub_y:sub_y + 26, cx + 110:cx + 190] = (40, 167, 69)
+            mask[sub_y:sub_y + 26, cx + 110:cx + 190] = 1  # clickable submit button
+
+        elif category == "media_playback":
+            h_bar = render_titlebar((24, 24, 28))
+            # Main video display viewport
+            video_bottom = self.height - 48
+            canvas[h_bar:video_bottom, :] = (14, 16, 22)
+
+            # Distinct Video Preview Artwork / Thumbnail in center
+            vw, vh = int(self.width * 0.65), int((video_bottom - h_bar) * 0.72)
+            vx = (self.width - vw) // 2
+            vy = h_bar + ((video_bottom - h_bar) - vh) // 2
+            canvas[vy:vy + vh, vx:vx + vw] = (30, 45, 65)
+            canvas[vy + 10:vy + 30, vx + 20:vx + vw - 20] = (230, 90, 40)
+
+            # Center Play icon (clickable, bright red circle)
+            p_size = 36
+            px0 = (self.width - p_size) // 2
+            py0 = h_bar + (video_bottom - h_bar - p_size) // 2
+            canvas[py0:py0 + p_size, px0:px0 + p_size] = (235, 45, 45)
+            mask[py0:py0 + p_size, px0:px0 + p_size] = 1  # clickable
+
+            # Bottom media control deck
+            deck_y = video_bottom
+            canvas[deck_y:, :] = (26, 26, 30)
+
+            # Play/Pause button on control deck
+            canvas[deck_y + 12:deck_y + 34, 16:38] = (200, 200, 210)
+            mask[deck_y + 12:deck_y + 34, 16:38] = 1  # clickable
+
+            # Timeline scrubber slider (track + draggable thumb knob)
+            scrubber_x0 = 50
+            scrubber_w = self.width - 150
+            canvas[deck_y + 21:deck_y + 25, scrubber_x0:scrubber_x0 + scrubber_w] = (65, 68, 75)
+            # Scrubber knob (draggable)
+            knob_x = scrubber_x0 + 80
+            canvas[deck_y + 16:deck_y + 30, knob_x:knob_x + 14] = (255, 255, 255)
+            mask[deck_y + 16:deck_y + 30, knob_x:knob_x + 14] = 4  # draggable slider
+
+            # Volume slider knob on right side (draggable)
+            vol_x = self.width - 60
+            canvas[deck_y + 22:deck_y + 25, vol_x:vol_x + 40] = (65, 68, 75)
+            canvas[deck_y + 18:deck_y + 28, vol_x + 15:vol_x + 25] = (255, 255, 255)
+            mask[deck_y + 18:deck_y + 28, vol_x + 15:vol_x + 25] = 4  # draggable slider
+
+        elif category == "settings_panel":
+            h_bar = render_titlebar((42, 43, 46))
+            # Search settings input box (top right of window)
+            canvas[h_bar + 6:h_bar + 26, self.width - 180:self.width - 20] = (240, 242, 246)
+            mask[h_bar + 6:h_bar + 26, self.width - 180:self.width - 20] = 2  # typeable search
+
+            # Left navigation sidebar
+            sb_w = 120
+            canvas[h_bar + 32:, :sb_w] = (34, 35, 38)
+            for sy in range(h_bar + 42, self.height - 30, 36):
+                canvas[sy:sy + 20, 14:sb_w - 14] = (75, 78, 85)
+                mask[sy:sy + 20, 14:sb_w - 14] = 1  # clickable category
+
+            # Main Settings items on right
+            content_x = sb_w + 24
+            # Item 1: Vivid Green Toggle Switch (clickable)
+            tog_y = h_bar + 50
+            canvas[tog_y:tog_y + 18, content_x + 160:content_x + 196] = (48, 209, 88)
+            mask[tog_y:tog_y + 18, content_x + 160:content_x + 196] = 1  # clickable toggle
+
+            # Item 2: Brightness Slider (draggable)
+            sl_y = tog_y + 40
+            canvas[sl_y + 6:sl_y + 10, content_x:content_x + 160] = (80, 82, 88)
+            canvas[sl_y + 2:sl_y + 14, content_x + 60:content_x + 72] = (255, 255, 255)
+            mask[sl_y + 2:sl_y + 14, content_x + 60:content_x + 72] = 4  # draggable slider
+
+            # Item 3: Grey Toggle Switch (clickable)
+            tog2_y = sl_y + 36
+            canvas[tog2_y:tog2_y + 18, content_x + 160:content_x + 196] = (120, 122, 128)
+            mask[tog2_y:tog2_y + 18, content_x + 160:content_x + 196] = 1  # clickable toggle
+
+            # Item 4: Scrollable settings list container
+            list_y = tog2_y + 32
+            canvas[list_y:self.height - 20, content_x:self.width - 20] = (42, 44, 50)
+            mask[list_y:self.height - 20, content_x:self.width - 20] = 3  # scrollable list
 
         # Interactive points are the connected components of the mask the scene
         # just painted, not a separately maintained list.
@@ -312,4 +473,3 @@ class ProceduralScreenGenerator:
             target_label=data.target_label,
             cursor_xy=(cx, cy),
         )
-
