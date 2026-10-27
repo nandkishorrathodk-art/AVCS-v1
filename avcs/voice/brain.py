@@ -560,11 +560,16 @@ class RuleBrain:
             op = ActionOp.TYPE_TEXT
         elif any(w in low for w in _ACTION_WORDS["scroll"]):
             op = ActionOp.SCROLL
+        elif self._looks_like_keypress(low):
+            op = ActionOp.PRESS_KEY
 
+        text_input, key_name = self._extract_payload(text, op)
         intent = ActionIntent.create(
             step_index=self.step_index,
             op=op,
             target_description=target,
+            text_input=text_input,
+            key_name=key_name,
             expected_outcome=f"{target} responds",
             rationale="Offline keyword match.",
         )
@@ -583,6 +588,45 @@ class RuleBrain:
         "mujhe", "mere", "mera", "ko", "karo", "kar", "karna", "karna", "hai",
         "do", "dena", "chahiye", "kaam", "kuch", "bhi", "ye", "yeh", "wo",
     })
+
+    _KEY_NAMES = frozenset({
+        "enter", "return", "tab", "esc", "escape", "space", "backspace",
+        "delete", "up", "down", "left", "right", "home", "end",
+    })
+
+    @classmethod
+    def _looks_like_keypress(cls, low: str) -> bool:
+        """True when the utterance names a bare key or a chord ("ctrl+s")."""
+        if re.search(r"(ctrl|shift|alt)\s*\+", low):
+            return True
+        tokens = re.findall(r"[a-z0-9]+", low)
+        return any(t in cls._KEY_NAMES for t in tokens)
+
+    @classmethod
+    def _extract_payload(cls, text: str, op) -> tuple[Optional[str], Optional[str]]:
+        """Pull the text to type, or the key to press, out of the utterance."""
+        if op == ActionOp.TYPE_TEXT:
+            quoted = re.search(r"['\"]([^'\"]{1,120})['\"]", text)
+            if quoted:
+                return quoted.group(1).strip(), None
+            # "type hello into the box" -> the word after the type verb, up to a
+            # preposition that starts the target clause.
+            m = re.search(r"\b(?:type|write|enter|likho|likh|bharo)\b\s+(.+)", text, re.I)
+            if m:
+                tail = re.split(r"\b(?:into|in|to|on|me|mein)\b", m.group(1), maxsplit=1, flags=re.I)[0]
+                tail = tail.strip(" .!?,\"'")
+                if tail:
+                    return tail, None
+            return None, None
+        if op == ActionOp.PRESS_KEY:
+            chord = re.search(r"(ctrl|shift|alt)\s*\+\s*([a-z0-9]+)", text, re.I)
+            if chord:
+                return None, f"{chord.group(1).lower()}+{chord.group(2).lower()}"
+            for tok in re.findall(r"[a-z0-9]+", text, re.I):
+                if tok.lower() in cls._KEY_NAMES:
+                    return None, tok.lower()
+            return None, None
+        return None, None
 
     @classmethod
     def _extract_target(cls, text: str) -> Optional[str]:

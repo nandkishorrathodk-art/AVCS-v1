@@ -352,6 +352,11 @@ sudo apt-get install espeak-ng alsa-utils sox          # mouth + mic (optional)
 # One turn, no microphone
 python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"
 
+# Autonomous multi-step: the assistant acts, looks, and decides the next step
+# until it says finish. Grant the ops it may use.
+python3 -m avcs.voice.demo --task "search box me hello type karo" \
+    --eyes --grant click type_text press_key scroll
+
 # The clarify-then-act flow with no microphone: "mujhe X kaam karna hai"
 # -> the assistant asks "kya kaam hai sir?" -> the user names the target
 python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
@@ -359,6 +364,12 @@ python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba d
 # Full loop with real eyes, the trained grounder, and a gated click
 python3 -m avcs.voice.demo --script "Save button daba do" --eyes --ground --grant click
 ```
+
+The assistant speaks, and it **acts**: `click`, `double_click`, `type_text`,
+`press_key` (including `ctrl+s` chords) and `scroll` each go to the matching hand
+operation. `--task` runs a request to completion across multiple steps, feeding
+each step's outcome back to the brain; it stops early, and says so, when the gate
+refuses a step.
 
 The LLM endpoint is read from the environment (`AVCS_LLM_ENDPOINT`,
 `AVCS_LLM_API_KEY`); any OpenAI-compatible SSE server works, including a local

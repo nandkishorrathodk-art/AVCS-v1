@@ -962,7 +962,45 @@ Traps:
   saw earlier conversation turns and answered each one in isolation. Keep both
   branches: a fix for one shape must not silently drop the other.
 
+### Action dispatch: the op picks the hand method (`avcs/voice/hands.py`)
+
+The assistant used to call `hand.click(*point)` for **every** allowed action, so a
+spoken "type this" or "scroll down" still produced a click. `dispatch(hand, op, ...)`
+is now the single point where an op becomes a hand call:
+
+| op | hand method |
+|---|---|
+| `click` / `double_click` | `click(x, y)` (twice for double) |
+| `type` / `type_text` | `type_text(text)` |
+| `press_key` | `press_key(key)`; falls back to a `ctrl+s` chord via the motor's ctypes binding |
+| `scroll` | `scroll(delta)` |
+| anything else | **fails closed** — reports "no hand implementation", never a click |
+
+Two hand contracts exist and the dispatcher must not confuse them:
+`VirtualHand` (demo default, used by `OneModelLoop`) records **normalized** (0..1)
+coordinates; `HandMotor` (Windows-only) drives the native cursor in **absolute
+pixels**. `get_screen_size` marks the latter. A hand that returns `False` is
+reported as "did not perform", not claimed as success.
+
+### Autonomous multi-step loop (`Assistant.run_task`)
+
+One turn yields at most one action. `run_task` acts, re-observes, and lets the
+brain decide the next step until it says `finish`/`stop` or the budget
+(`max_task_steps`, default 8) runs out. Two honesty properties, both pinned by
+tests:
+
+1. **It stops early on a refused step** rather than repeating a failing action
+   forever.
+2. **It is closed-loop.** `_observe` attaches a one-line `last_action` summary
+   ("last step performed click, screen changed" / "…was REFUSED by the gate") to
+   the observation, so the brain sees what the previous step did. Without it the
+   loop would re-decide the same action from an unchanged screen.
+
+The `RuleBrain` (offline, no API key) now also fills `text_input` for a type
+request and extracts a key chord, so the whole path is exercisable without an LLM.
+
 Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
 local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
-and a multi-turn clarify-then-act conversation). Full suite with the voice tests:
-**81 passed, 2 skipped**.
+a multi-turn clarify-then-act conversation, per-op dispatch, and the autonomous
+loop's finish/refuse/closed-loop paths). Full suite with the voice tests:
+**90 passed, 2 skipped**.

@@ -99,6 +99,8 @@ def build_assistant(args) -> Assistant:
 def main() -> None:
     ap = argparse.ArgumentParser(description="AVCS real-time voice assistant demo")
     ap.add_argument("--text", type=str, default=None, help="one user utterance, no microphone")
+    ap.add_argument("--task", type=str, default=None,
+                    help="run this request autonomously to completion (multi-step), no microphone")
     ap.add_argument("--script", nargs="+", default=None,
                     help="a scripted multi-turn conversation, no microphone "
                          '(e.g. --script "mujhe X kaam karna hai" "Save button daba do")')
@@ -146,9 +148,21 @@ def main() -> None:
         _print_record(rec, args.json)
         return
 
+    if args.task:
+        records = assistant.run_task(args.task, max_steps=args.turns)
+        for rec in records:
+            _print_record(rec, args.json)
+        if args.json:
+            print(json.dumps([r.to_dict() for r in records], indent=2))
+        else:
+            acted = sum(1 for r in records if r.performed)
+            verified = sum(1 for r in records if r.verified)
+            print(f"\n[summary] steps={len(records)} actions={acted} verified={verified}")
+        return
+
     if not args.listen and not args.script:
-        print("Nothing to do: pass --text, --say, --script, or --listen.")
-        print("Try: python3 -m avcs.voice.demo --text \"mujhe X kaam karna hai\"")
+        print("Nothing to do: pass --text, --task, --say, --script, or --listen.")
+        print("Try: python3 -m avcs.voice.demo --task \"Save button daba do\" --eyes --grant click")
         return
 
     report = assistant.converse(max_turns=args.turns, utterances=args.script)
@@ -174,8 +188,13 @@ def _print_record(rec, as_json: bool) -> None:
     if rec.action:
         print(f"  action: {rec.action} target={rec.target!r}")
         print(f"  gate  : {'ALLOW' if rec.gate_allowed else 'DENY'} ({rec.gate_reason})")
-        if rec.clicked:
-            print(f"  hand  : {rec.actuation} click at {rec.clicked}")
+        if rec.performed:
+            extra = f" ({rec.detail})" if rec.detail else ""
+            where = f" at {rec.clicked}" if rec.clicked else ""
+            print(f"  hand  : {rec.actuation} {rec.action}{extra}{where}")
+        if rec.verified is not None:
+            print(f"  verify: {'changed' if rec.verified else 'no change'} "
+                  f"(delta={rec.visual_delta})")
     if rec.speak_error:
         print(f"  note  : speech not played ({rec.speak_error})")
 

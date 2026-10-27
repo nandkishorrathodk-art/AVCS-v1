@@ -950,3 +950,235 @@ def test_silence_terminated_capture_falls_back_without_sox(monkeypatch):
     clip = stt.record_microphone_until_silence(max_seconds=12.0)
     assert called["seconds"] == 5.0          # capped fallback window
     assert clip.samples.size == 0
+
+
+# --------------------------------------------------------------------------- #
+# Hand dispatch: the op must pick the method (the old code always clicked)
+# --------------------------------------------------------------------------- #
+def test_dispatch_routes_each_op_to_the_right_hand_method():
+    from avcs.system1.loop import VirtualHand
+    from avcs.voice.hands import dispatch
+
+    hand = VirtualHand(1920, 1080)
+
+    r = dispatch(hand, "type_text", text="hello")
+    assert r.performed and hand.typed == ["hello"]
+    assert hand.clicks == []            # typing must NOT click
+
+    r = dispatch(hand, "scroll", scroll_delta=-5)
+    assert r.performed and hand.scrolls == [-5]
+    assert hand.clicks == []
+
+    r = dispatch(hand, "press_key", key_name="enter")
+    assert r.performed and hand.keys == ["enter"]
+    assert hand.clicks == []
+
+    r = dispatch(hand, "click", point=(0.5, 0.5))
+    assert r.performed and len(hand.clicks) == 1
+    assert hand.clicks[0] == (960, 540)
+
+    r = dispatch(hand, "double_click", point=(0.2, 0.2))
+    assert r.performed and len(hand.clicks) == 3   # two more recorded
+
+
+def test_dispatch_fails_closed_for_an_op_with_no_hand_implementation():
+    from avcs.system1.loop import VirtualHand
+    from avcs.voice.hands import dispatch
+
+    hand = VirtualHand(1920, 1080)
+    r = dispatch(hand, "observe_target", point=(0.5, 0.5))
+    assert not r.performed
+    assert hand.clicks == []
+
+
+def test_dispatch_reports_failure_when_the_hand_refuses():
+    """A hand that returns False must be reported, not claimed as success."""
+    from avcs.voice.hands import dispatch
+
+    class _RefusingHand:
+        def type_text(self, text, typing_speed_cps=25.0):
+            return False
+
+    r = dispatch(_RefusingHand(), "type_text", text="hi")
+    assert not r.performed and "not typed" in r.error
+
+
+class _AlwaysGroundPerception:
+    """Grounds every query with a high peak; the frame has real structure."""
+
+    def __init__(self) -> None:
+        self._frame = np.full((64, 64, 3), 60, dtype=np.uint8)
+        self._frame[10:30, 10:30] = 200
+
+    def observe(self, query=None):
+        from avcs.voice.assistant import ScreenObservation
+
+        return ScreenObservation(description="a dialog with buttons", hotspot_count=3)
+
+    def frame(self):
+        return self._frame
+
+    def grounding_evidence(self, query):
+        from avcs.control.capability import GroundingEvidence
+
+        return GroundingEvidence(
+            candidate_point_norm=(0.3, 0.3),
+            peak_probability=0.95,
+            target_present=True,
+            authorized=False,
+            active_query=query,
+        )
+
+
+def test_assistant_types_text_instead_of_clicking():
+    """The reported bug: a 'type' request used to produce a click."""
+    from avcs.system1.loop import VirtualHand
+
+    brain = ConversationBrain(
+        provider=_ScriptedProvider(
+            _intent("type_text", target_description="Search box", text_input="hello")
+        )
+    )
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=brain,
+        perception=_AlwaysGroundPerception(),
+        kernel=CapabilityKernel(granted_ops=["click", "type_text"]),
+        hand=hand,
+    )
+    rec = assistant.step("type hello into the search box")
+    assert rec.gate_allowed is True, rec.gate_reason
+    assert rec.performed is True
+    assert hand.typed == ["hello"]
+    assert hand.clicks == []
+    assert rec.actuation == "virtual"
+
+
+# --------------------------------------------------------------------------- #
+# Autonomous multi-step task loop
+# --------------------------------------------------------------------------- #
+class _SequenceProvider:
+    """Returns a different decision on each call, standing in for a live LLM."""
+
+    api_key = "test-key"
+
+    def __init__(self, decisions):
+        self._decisions = list(decisions)
+        self._i = 0
+
+    def plan_step(self, task, observation, history, step_index=1):
+        d = self._decisions[min(self._i, len(self._decisions) - 1)]
+        self._i += 1
+        return d
+
+    def reset(self):
+        pass
+
+
+def _intent(op_name, **kw):
+    from avcs.reasoning.contracts import ActionIntent, System2Decision
+
+    return System2Decision(
+        thought=kw.pop("thought", ""),
+        task_status="in_progress",
+        next_intent=ActionIntent.create(step_index=1, op=op_name, **kw),
+    )
+
+
+def test_run_task_executes_multiple_steps_until_finish():
+    from avcs.reasoning.contracts import ActionOp, ActionIntent, System2Decision
+    from avcs.system1.loop import VirtualHand
+
+    decisions = [
+        _intent("click", target_description="Search box"),
+        _intent("type_text", target_description="Search box", text_input="hello"),
+        System2Decision(thought="done", task_status="complete",
+                        next_intent=ActionIntent.create(step_index=3, op=ActionOp.FINISH)),
+    ]
+    brain = ConversationBrain(provider=_SequenceProvider(decisions))
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=brain,
+        perception=_AlwaysGroundPerception(),
+        kernel=CapabilityKernel(granted_ops=["click", "type_text"]),
+        hand=hand,
+    )
+    assistant.step_delay_s = 0.0
+
+    records = assistant.run_task("search for hello", max_steps=5)
+
+    kinds = [r.kind for r in records]
+    assert kinds[-1] == "finish"
+    assert kinds.count("act") == 2
+    # The two steps did the two different things, in order.
+    assert len(hand.clicks) == 1
+    assert hand.typed == ["hello"]
+
+
+def test_run_task_stops_when_the_gate_refuses_instead_of_looping():
+    from avcs.system1.loop import VirtualHand
+
+    decisions = [_intent("click", target_description="Save button")] * 5
+    brain = ConversationBrain(provider=_SequenceProvider(decisions))
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=brain,
+        perception=_AlwaysGroundPerception(),
+        kernel=CapabilityKernel(),          # no grants: fail closed
+        hand=hand,
+    )
+    assistant.step_delay_s = 0.0
+
+    records = assistant.run_task("click Save", max_steps=5)
+
+    assert len(records) == 1                # stopped after the first refusal
+    assert records[0].gate_allowed is False
+    assert hand.clicks == []
+
+
+def test_run_task_feeds_the_last_outcome_back_to_the_brain():
+    """The loop must be closed: the brain sees what the previous step did."""
+    from avcs.system1.loop import VirtualHand
+
+    seen = []
+
+    class _ObservingProvider(_SequenceProvider):
+        def plan_step(self, task, observation, history, step_index=1):
+            seen.append(dict(observation))
+            return super().plan_step(task, observation, history, step_index)
+
+    decisions = [
+        _intent("click", target_description="Search box"),
+        _intent("click", target_description="Search box"),
+    ]
+    brain = ConversationBrain(provider=_ObservingProvider(decisions))
+    assistant = _assistant(
+        brain=brain,
+        perception=_AlwaysGroundPerception(),
+        kernel=CapabilityKernel(granted_ops=["click"]),
+        hand=VirtualHand(1920, 1080),
+    )
+    assistant.step_delay_s = 0.0
+
+    assistant.run_task("click the search box", max_steps=2)
+
+    # Second call carries a summary of the first step's outcome.
+    assert "last_action" in seen[1]
+    assert "click" in seen[1]["last_action"]
+
+
+def test_rule_brain_fills_text_input_for_a_type_request():
+    """The offline brain must supply the payload, not just name the op."""
+    brain = ConversationBrain(provider=_ExplodingProvider())  # forces rule fallback
+    turn = brain.respond("type hello into the search box")
+    assert turn.intent is not None
+    assert turn.intent.op.value == "type_text"
+    assert turn.intent.text_input == "hello"
+
+
+def test_rule_brain_extracts_a_key_chord():
+    brain = ConversationBrain(provider=_ExplodingProvider())
+    turn = brain.respond("press ctrl+s to save")
+    assert turn.intent is not None
+    assert turn.intent.op.value == "press_key"
+    assert turn.intent.key_name == "ctrl+s"

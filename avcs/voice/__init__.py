@@ -34,6 +34,11 @@ from avcs.voice.brain import (
     TurnKind,
     CONVERSATION_SYSTEM_PROMPT,
 )
+from avcs.voice.hands import (
+    HandAction,
+    MUTATING_OPS,
+    dispatch,
+)
 from avcs.voice.errors import (
     AudioDeviceError,
     EngineNotAvailable,
@@ -76,6 +81,8 @@ __all__ = [
     # mouth
     "Speaker", "TtsEngine", "EspeakNgEngine", "NullTtsEngine",
     "VoiceProfile", "PcmClip", "SpeechResult", "SpeechQueue",
+    # hands
+    "HandAction", "MUTATING_OPS", "dispatch",
     # ears
     "SttEngine", "VoskEngine", "FasterWhisperEngine", "NullSttEngine",
     "AudioClip", "Transcript", "default_stt_engine", "record_microphone",

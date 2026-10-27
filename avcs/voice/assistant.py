@@ -24,11 +24,9 @@ import numpy as np
 
 from avcs.control.capability import CapabilityKernel, GroundingEvidence
 from avcs.voice.brain import AssistantTurn, ConversationBrain, TurnKind
+from avcs.voice.hands import MUTATING_OPS, dispatch
 from avcs.voice.stt import AudioClip, SttEngine, Transcript, default_stt_engine
 from avcs.voice.tts import Speaker, SpeechQueue, SpeechResult
-
-# Ops that change machine state; everything else is free to observe.
-MUTATING_OPS = frozenset({"click", "double_click", "type", "type_text", "press_key", "scroll"})
 
 
 class FrameSource(Protocol):
@@ -48,15 +46,19 @@ class ScreenObservation:
     has_modal: bool = False
     active_window: str = ""
     hotspot_count: int = 0
+    last_action: str = ""
 
     def to_brain_dict(self) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {"interactive_elements": self.hotspot_count}
+        if self.last_action:
+            extra["last_action"] = self.last_action
         return ConversationBrain.build_observation(
             screen_description=self.description,
             target_present=self.target_present,
             stability=self.stability,
             has_modal=self.has_modal,
             active_window=self.active_window,
-            extra={"interactive_elements": self.hotspot_count},
+            extra=extra,
         )
 
 
@@ -104,8 +106,11 @@ class AssistantTurnRecord:
     gate_allowed: Optional[bool] = None
     gate_reason: str = ""
     actuation: str = "none"        # "none" | "virtual" | "live"
+    performed: bool = False
+    detail: str = ""
     clicked: Optional[tuple[int, int]] = None
     verified: Optional[bool] = None
+    visual_delta: Optional[float] = None
     spoken: bool = False
     listen_error: Optional[str] = None
     speak_error: Optional[str] = None
@@ -178,6 +183,9 @@ class Assistant:
         record_audio: Optional[Callable[[float], AudioClip]] = None,
         actuation: str = "virtual",
         stream: bool = True,
+        max_task_steps: int = 8,
+        delta_threshold: float = 0.015,
+        step_delay_s: float = 0.25,
     ) -> None:
         self.brain = brain or ConversationBrain()
         self.speaker = speaker or Speaker()
@@ -188,6 +196,11 @@ class Assistant:
         self.listen_seconds = float(listen_seconds)
         self._record_audio = record_audio
         self.actuation = actuation  # "virtual" | "live"
+        self.max_task_steps = int(max_task_steps)
+        self.delta_threshold = float(delta_threshold)
+        self.step_delay_s = float(step_delay_s)
+        self._last_point: Optional[tuple[float, float]] = None
+        self._last_outcome: str = ""
         # Streaming makes the assistant talk as the reply is generated. It is on
         # by default because that is the difference between a live conversation
         # and a walkie-talkie; a caller can turn it off for a deterministic demo.
@@ -242,9 +255,13 @@ class Assistant:
         if self.perception is None:
             return ScreenObservation(description="no eyes attached (perception disabled)")
         try:
-            return self.perception.observe(query)
+            obs = self.perception.observe(query)
         except Exception as exc:
-            return ScreenObservation(description=f"perception error: {exc}")
+            obs = ScreenObservation(description=f"perception error: {exc}")
+        # Tell the brain what the previous step did, so an autonomous run can
+        # decide the next move instead of blindly repeating itself.
+        obs.last_action = self._last_outcome
+        return obs
 
     def step(self, user_text: str, turn: int = 0, stream: Optional[bool] = None) -> AssistantTurnRecord:
         """Run one conversational turn from already-transcribed user text."""
@@ -253,8 +270,89 @@ class Assistant:
         obs = self._observe(None)
         use_stream = self.stream if stream is None else bool(stream)
 
-        spoken = False
-        speak_error: Optional[str] = None
+        turn_result, spoken, speak_error = self._ask_brain(user_text, obs, use_stream)
+
+        record = AssistantTurnRecord(
+            turn=turn,
+            heard=user_text,
+            said=turn_result.speech,
+            kind=turn_result.kind.value,
+            source=turn_result.source,
+            spoken=spoken,
+            speak_error=speak_error,
+        )
+
+        if turn_result.wants_action and turn_result.intent is not None:
+            self._execute(turn_result, record)
+        return record
+
+    def run_task(self, user_text: str, max_steps: Optional[int] = None) -> List[AssistantTurnRecord]:
+        """Autonomously execute a whole task, not just one action.
+
+        A single conversational turn produces at most one action. A real
+        assistant keeps going: act, look at the result, decide the next step,
+        repeat, until the brain says ``finish``/``stop`` or the budget runs out.
+
+        The loop stops early — and says so — when an action is refused by the
+        gate or does not reach the hand, because continuing would just repeat the
+        same failing step.
+        """
+        budget = int(max_steps if max_steps is not None else self.max_task_steps)
+        records: List[AssistantTurnRecord] = []
+        # The user's request is the first (and only) human turn; every turn after
+        # it is the assistant deciding what to do next from the screen.
+        user_text = user_text
+
+        for i in range(1, budget + 1):
+            obs = self._observe(None)
+            turn_result, spoken, speak_error = self._ask_brain(user_text, obs, self.stream)
+            record = AssistantTurnRecord(
+                turn=i,
+                heard=user_text,
+                said=turn_result.speech,
+                kind=turn_result.kind.value,
+                source=turn_result.source,
+                spoken=spoken,
+                speak_error=speak_error,
+            )
+            records.append(record)
+
+            if turn_result.kind in (TurnKind.FINISH, TurnKind.STOP):
+                break
+            if turn_result.wants_action and turn_result.intent is not None:
+                self._execute(turn_result, record)
+                if not record.performed:
+                    break
+            # Close the loop: the next decision must see what the last step did
+            # and whether the screen changed, or it would just repeat itself.
+            self._last_outcome = self._outcome_summary(record)
+            # From here the screen is the speaker: the next decision is driven by
+            # what changed, not by the user, so the user text is not repeated.
+            user_text = ""
+            if self.step_delay_s > 0:
+                time.sleep(self.step_delay_s)
+
+        return records
+
+    @staticmethod
+    def _outcome_summary(record: AssistantTurnRecord) -> str:
+        """One line describing what the last step actually did, for the brain."""
+        if not record.action:
+            return ""
+        if not record.gate_allowed:
+            return f"last step {record.action} was REFUSED by the capability gate ({record.gate_reason})"
+        if not record.performed:
+            return f"last step {record.action} did not reach the hand ({record.gate_reason})"
+        change = "screen changed" if record.verified else "no visible change"
+        return f"last step performed {record.action}, {change}"
+
+    def _ask_brain(
+        self,
+        user_text: str,
+        obs: ScreenObservation,
+        use_stream: bool,
+    ) -> tuple[AssistantTurn, bool, Optional[str]]:
+        """Send one turn to the brain and return (turn, spoken, speak_error)."""
         if use_stream and hasattr(self.brain, "respond_stream"):
             # The mouth runs on a background thread, so the first sentence is
             # already audible while the rest of the reply is still being written.
@@ -269,23 +367,39 @@ class Assistant:
             turn_result = self.brain.respond(user_text, obs.to_brain_dict())
             result = self._speak(turn_result.speech)
             spoken, speak_error = result.spoken, result.error
+        return turn_result, spoken, speak_error
 
-        record = AssistantTurnRecord(
-            turn=turn,
-            heard=user_text,
-            said=turn_result.speech,
-            kind=turn_result.kind.value,
-            source=turn_result.source,
-            spoken=spoken,
-            speak_error=speak_error,
-        )
+    def _execute(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
+        """Ground the named target, then gate and run the action, then verify.
 
-        if turn_result.wants_action and turn_result.intent is not None:
-            # Now that the brain has named a target, ask perception to ground
-            # *that target* (not the raw utterance) before gating the action.
-            self._observe(turn_result.intent.target_description)
-            self._act(turn_result, record)
-        return record
+        Verification uses a fresh post-action capture of the *same* screen. When
+        there is no post-frame, ``verified`` stays ``None`` rather than being
+        reported as success.
+        """
+        intent = turn_result.intent
+        # Ask perception to ground *that target* (not the raw utterance) before
+        # gating the action.
+        self._observe(intent.target_description)
+        pre_frame = self.perception.frame() if self.perception else None
+        self._act(turn_result, record)
+
+        if record.performed and self.perception is not None:
+            post_frame = self.perception.frame()
+            if pre_frame is not None and post_frame is not None and record.clicked is not None:
+                from avcs.control.verifier import VisualRippleVerifier
+                from avcs.system1.loop import to_luma
+
+                # The delta helper only reads `ripple_radius`; a full verifier
+                # needs a HumanEye we do not have here, so call it on a shim.
+                shim = type("_Ripple", (), {"ripple_radius": 0.08})()
+                point = self._last_point or (0.5, 0.5)
+                delta = float(
+                    VisualRippleVerifier.calculate_local_photometric_delta(
+                        shim, point, to_luma(pre_frame), to_luma(post_frame)
+                    )
+                )
+                record.visual_delta = round(delta, 4)
+                record.verified = delta >= self.delta_threshold
 
     def _act(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
         intent = turn_result.intent
@@ -334,13 +448,23 @@ class Assistant:
             return
 
         point = decision.coordinate or (0.5, 0.5)
-        try:
-            clicked = self.hand.click(*point)
-            record.clicked = tuple(clicked)
+        self._last_point = point
+        result = dispatch(
+            self.hand,
+            op,
+            point=point,
+            text=intent.text_input,
+            key_name=intent.key_name,
+            scroll_delta=intent.scroll_delta,
+        )
+        record.performed = result.performed
+        record.detail = result.detail
+        record.clicked = result.point
+        if result.performed:
             record.actuation = self.actuation
-        except Exception as exc:
+        else:
             record.actuation = "none"
-            record.gate_reason = f"hand raised: {exc}"
+            record.gate_reason = f"{decision.reason}; {result.error or 'hand did not perform'}"
 
     # ------------------------------------------------------------------ #
     # Session

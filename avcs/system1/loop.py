@@ -39,18 +39,44 @@ class Hand(Protocol):
 
 
 class VirtualHand:
-    """Records clicks; no OS side effects. The honest default for a demo."""
+    """Records actions; no OS side effects. The honest default for a demo.
+
+    Implements the same surface as ``avcs_sdk.hand_motor.HandMotor`` so the
+    assistant's dispatcher can drive either one without special cases.
+    """
 
     def __init__(self, width: int, height: int) -> None:
         self.width = width
         self.height = height
         self.clicks: list[tuple[int, int]] = []
+        self.typed: list[str] = []
+        self.keys: list[str] = []
+        self.scrolls: list[int] = []
 
-    def click(self, x_norm: float, y_norm: float) -> tuple[int, int]:
-        px = int(round(x_norm * (self.width - 1)))
-        py = int(round(y_norm * (self.height - 1)))
-        self.clicks.append((px, py))
-        return (px, py)
+    def _to_px(self, x_norm: float, y_norm: float) -> tuple[int, int]:
+        return (
+            int(round(x_norm * (self.width - 1))),
+            int(round(y_norm * (self.height - 1))),
+        )
+
+    def click(self, x_norm: float, y_norm: float, double: bool = False) -> tuple[int, int]:
+        px = self._to_px(x_norm, y_norm)
+        self.clicks.append(px)
+        if double:
+            self.clicks.append(px)
+        return px
+
+    def type_text(self, text: str, typing_speed_cps: float = 25.0) -> bool:
+        self.typed.append(text)
+        return True
+
+    def press_key(self, key_name: str) -> bool:
+        self.keys.append(key_name)
+        return True
+
+    def scroll(self, delta: int) -> bool:
+        self.scrolls.append(int(delta))
+        return True
 
 
 @dataclasses.dataclass
