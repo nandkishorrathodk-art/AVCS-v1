@@ -33,6 +33,7 @@ from avcs.system1.model import (
     ACTION_NAMES,
 )
 from avcs.system1.losses import OneModelLoss, LossBreakdown
+from avcs.system1.loop import OneModelLoop, LoopStep, VirtualHand, run_sequence
 
 __all__ = [
     "OneModel",
@@ -40,6 +41,10 @@ __all__ = [
     "OneModelConfig",
     "OneModelLoss",
     "LossBreakdown",
+    "OneModelLoop",
+    "LoopStep",
+    "VirtualHand",
+    "run_sequence",
     "CATEGORY_NAMES",
     "ELEMENT_KINDS",
     "WORD_NAMES",

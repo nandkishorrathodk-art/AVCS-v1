@@ -735,6 +735,44 @@ generator's layout scores perfectly in-distribution and ~chance on a
 differently-seeded held-out draw. kind_acc 0.92 and presence 0.98 do transfer.
 
 
+### Closed loop (`avcs/system1/loop.py`)
+
+`OneModelLoop` is the glue: `frame -> OneModel -> CapabilityKernel -> Hand ->
+verify`. Perception is only the one model; the kernel is the only policy; the
+hand is the only side effect. Run it:
+
+```
+python3 -m avcs.system1.loop_demo --frames 4 --simulate-response
+python3 -m avcs.system1.loop_demo --frames 4 --grant        # fail-closed: no grant
+```
+
+Facts that are easy to get wrong:
+
+- **The gate must be fed the *presence* head, not the point softmax peak.** The
+  point softmax peak saturates at 1.000 for present *and* absent queries on this
+  corpus, so it cannot reject anything; the presence head separates them (present
+  median 1.000, absent median 0.000). The kernel's `min_peak_probability` is the
+  presence floor, default 0.5 in the loop.
+- **Verification needs a post-click capture of the *same* screen.** An earlier
+  version paired frame `i` with frame `i+1` of a slideshow; two different scenes
+  have a large photometric delta regardless of the click, so it reported
+  `verified=True` for changes the click never caused. `run_sequence` now takes
+  `post_frames`; without one, `verified` stays `None` (the honest value). The
+  delta itself is `VisualRippleVerifier.calculate_local_photometric_delta`.
+- **`VirtualHand` is the default and moves no cursor.** It records normalized
+  coordinates. Actuation is virtual so a demo cannot touch the machine; the gate
+  in front of it is the production kernel either way.
+- **The random-model tests use `min_peak_probability=0.0` on purpose.** A
+  randomly initialised model's presence is ~0.47, so a policy test that kept the
+  0.75 floor would be testing the random model's confidence, not the policy.
+
+Measured on real held-out frames with the shipped checkpoint (`--frames 4
+--simulate-response`): 3/4 queries clicked (the 4th refused by the presence
+floor at 0.245), 3/3 clicks verified against a synthesized change placed at the
+*true* target, and grounding error 0.007-0.038 normalized. Fail-closed mode
+(`--grant` with no values) clicks 0/4.
+
+
 ### Traps fixed here (each would have silently broken a checkpoint)
 
 - **`hash()` is salted per process.** The query encoder first used Python's
