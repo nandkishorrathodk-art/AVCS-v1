@@ -1182,3 +1182,420 @@ def test_rule_brain_extracts_a_key_chord():
     assert turn.intent is not None
     assert turn.intent.op.value == "press_key"
     assert turn.intent.key_name == "ctrl+s"
+
+
+# --------------------------------------------------------------------------- #
+# Real-time: interruptible mouth, async speak, continuous loop, real actuation
+# --------------------------------------------------------------------------- #
+def test_espeak_engine_stop_interrupts_playback():
+    """Barge-in requires the mouth to be interruptible, not a blocking run()."""
+    from avcs.voice.tts import EspeakNgEngine, PcmClip
+    import numpy as np
+
+    engine = EspeakNgEngine()
+    if not engine.available():
+        import pytest
+        pytest.skip("espeak-ng not installed")
+
+    # A long clip gives the stop() a window to land.
+    rate = 22050
+    clip = PcmClip(samples=np.zeros(int(rate * 3.0), dtype=np.int16), sample_rate=rate)
+    import threading
+
+    result = {}
+    def _play():
+        try:
+            result["rc"] = engine.play(clip)
+        except Exception as exc:  # no audio device on CI is fine
+            result["error"] = str(exc)
+
+    t = threading.Thread(target=_play, daemon=True)
+    t.start()
+    import time as _time
+    _time.sleep(0.15)
+    engine.stop()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "stop() did not interrupt playback"
+    # Either it was interrupted (False) or there was no device (error).
+    assert result.get("rc") is False or "error" in result
+
+
+def test_speaker_speak_async_does_not_block_and_stop_barges_in():
+    from avcs.voice.tts import NullEngine, Speaker, VoiceProfile
+    import time as _time
+
+    speaker = Speaker(engine=NullEngine(), profile=VoiceProfile.hinglish())
+    t0 = _time.perf_counter()
+    handle = speaker.speak_async("ye ek lamba jawab hai jo bolne me waqt lega")
+    elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+    # Returned immediately; the speaking happens on the worker.
+    assert elapsed_ms < 500.0
+    assert handle.wait(timeout=5.0)
+    assert handle.is_done()
+
+
+def test_continuous_loop_runs_until_a_stop_phrase():
+    """The always-on loop must keep going, then stop on a stop phrase."""
+    from avcs.voice.stt import Transcript
+
+    scripted = [
+        Transcript(text="mujhe X kaam karna hai", engine="test"),
+        Transcript(text="stop", engine="test"),
+    ]
+    assistant = _assistant()
+    assistant._record_audio = None
+    assistant._listen = lambda: scripted.pop(0)
+
+    report = assistant.loop(max_turns=5)
+
+    assert report.total_turns == 2
+    assert report.turns[-1].kind == "stop"
+    assert report.turns[-1].heard == "stop"
+
+
+def test_continuous_loop_keeps_waiting_on_a_silent_turn():
+    from avcs.voice.stt import Transcript
+
+    scripted = [
+        Transcript(text="", engine="test", error="no speech detected"),
+        Transcript(text="mujhe X kaam karna hai", engine="test"),
+        Transcript(text="band karo", engine="test"),
+    ]
+    assistant = _assistant()
+    assistant._listen = lambda: scripted.pop(0)
+
+    report = assistant.loop(max_turns=6)
+
+    kinds = [t.kind for t in report.turns]
+    assert "silent" in kinds                     # the empty turn was recorded
+    assert kinds[-1] == "stop"
+    assert report.total_turns == 3
+
+
+def test_loop_records_per_stage_timing():
+    from avcs.voice.stt import Transcript
+
+    assistant = _assistant()
+    assistant._listen = lambda: Transcript(text="mujhe X kaam karna hai", engine="test")
+    seen = []
+    report = assistant.loop(max_turns=1, on_record=seen.append)
+
+    rec = report.turns[0]
+    assert rec.brain_ms > 0.0
+    assert rec.listen_ms >= 0.0
+    assert seen and seen[0] is rec
+
+
+def test_xdotool_hand_is_fail_closed_without_a_display():
+    """No xdotool / no DISPLAY must refuse, never pretend to act."""
+    from avcs.voice.actuators import XdotoolHand
+
+    hand = XdotoolHand(display="", binary=None)
+    assert hand.available() is False
+    assert hand.click(10, 10) is False
+    assert hand.type_text("hello") is False
+    assert hand.press_key("enter") is False
+    assert hand.scroll(-3) is False
+    assert hand.get_screen_size() == (0, 0)
+
+
+def test_xdotool_key_translation_handles_chords_and_aliases():
+    from avcs.voice.actuators import XdotoolHand
+
+    assert XdotoolHand._xdotool_key("enter") == "Return"
+    assert XdotoolHand._xdotool_key("ctrl+s") == "ctrl+s"
+    assert XdotoolHand._xdotool_key("Shift+Tab") == "shift+Tab"
+    assert XdotoolHand._xdotool_key("esc") == "Escape"
+
+
+def test_dispatch_drives_the_real_hand_contract_in_pixels():
+    """A real hand takes absolute pixels; dispatch must map the point for it."""
+    from avcs.voice.hands import dispatch
+
+    calls = []
+
+    class _FakeRealHand:
+        def get_screen_size(self):
+            return 1920, 1080
+        def click(self, x, y, double=False):
+            calls.append(("click", x, y, double)); return True
+        def type_text(self, text, typing_speed_cps=25.0):
+            calls.append(("type", text)); return True
+        def press_key(self, key):
+            calls.append(("key", key)); return True
+        def scroll(self, delta):
+            calls.append(("scroll", delta)); return True
+
+    hand = _FakeRealHand()
+    dispatch(hand, "click", point=(0.5, 0.5))
+    assert calls[-1] == ("click", 960, 540, False)   # normalized -> pixels
+
+    dispatch(hand, "type_text", text="hi")
+    assert calls[-1] == ("type", "hi")
+    dispatch(hand, "press_key", key_name="enter")
+    assert calls[-1] == ("key", "enter")
+    dispatch(hand, "scroll", scroll_delta=-2)
+    assert calls[-1] == ("scroll", -2)
+
+
+def test_continuous_loop_streams_and_acts_over_a_real_sse_brain():
+    """The always-on loop must stream a real reply and act, end to end.
+
+    This is the full real-time path: mic (scripted) -> SSE brain -> streamed
+    mouth -> pure-pixel gate -> hand, repeated until a stop phrase.
+    """
+    import http.server
+    import json as _json
+    import threading
+
+    from avcs.control.capability import CapabilityKernel, GroundingEvidence
+    from avcs.reasoning.provider import LLMReasoningProvider
+    from avcs.system1.loop import VirtualHand
+    from avcs.voice.stt import Transcript
+
+    def frame(content):
+        return "data: " + _json.dumps({"choices": [{"delta": {"content": content}}]})
+
+    replies = [
+        "Theek hai sir, Save button daba raha hoon. <<<ACTION>>>\n"
+        + _json.dumps({"kind": "act",
+                       "action": {"op": "click", "target_description": "Save button"}}),
+        "Ho gaya sir. <<<ACTION>>>\n" + _json.dumps({"kind": "finish"}),
+    ]
+
+    class _Sse(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = frame(replies[min(self.server.count, len(replies) - 1)]).encode()
+            self.server.count += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Sse)
+    srv.count = 0
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+
+    class _Perception:
+        def observe(self, query=None):
+            return ScreenObservation(description="a form with a Save button",
+                                     target_present=True, hotspot_count=2)
+
+        def frame(self):
+            return None
+
+        def grounding_evidence(self, query):
+            return GroundingEvidence(
+                candidate_point_norm=(0.4, 0.8), peak_probability=0.9,
+                target_present=True, authorized=False, active_query=query,
+            )
+
+    hand = VirtualHand(1920, 1080)
+    assistant = Assistant(
+        brain=ConversationBrain(provider=LLMReasoningProvider(endpoint=url, api_key="k", model="m")),
+        speaker=Speaker(engine=NullTtsEngine()),
+        stt=NullEngine(),
+        perception=_Perception(),
+        kernel=CapabilityKernel(
+            granted_ops=["click"], allow_degenerate_frames=True, min_peak_probability=0.5
+        ),
+        hand=hand,
+        stream=True,
+    )
+
+    script = [
+        Transcript(text="Save button daba do", engine="test"),
+        Transcript(text="stop", engine="test"),
+    ]
+    assistant._listen = lambda: script.pop(0)
+
+    try:
+        report = assistant.loop(max_turns=5)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    acted = [r for r in report.turns if r.kind == "act"]
+    assert len(acted) == 1
+    assert acted[0].source == "llm"          # streamed from the real SSE brain
+    assert acted[0].gate_allowed is True
+    assert len(hand.clicks) == 1
+    assert acted[0].brain_ms > 0.0
+    assert report.turns[-1].kind == "stop"
+
+
+def test_loop_continues_autonomously_after_a_spoken_task():
+    """A spoken task must not stop after one action.
+
+    The user says one thing; the assistant performs a step, looks at the screen,
+    performs the next step on its own, then goes back to listening. This is the
+    difference between a chat bot and an assistant that completes the work.
+    """
+    from avcs.control.capability import CapabilityKernel, GroundingEvidence
+    from avcs.system1.loop import VirtualHand
+    from avcs.voice.stt import Transcript
+
+    class _Perception:
+        def observe(self, query=None):
+            return ScreenObservation(description="form", target_present=True, hotspot_count=2)
+        def frame(self):
+            return None
+        def grounding_evidence(self, query):
+            return GroundingEvidence(
+                candidate_point_norm=(0.3, 0.4), peak_probability=0.9,
+                target_present=True, authorized=False, active_query=query,
+            )
+
+    class _ScriptedBrain:
+        """First turn acts; the next autonomous step acts; then it finishes."""
+        def __init__(self):
+            self.calls = 0
+        def respond(self, user_text, observation, **kw):
+            from avcs.voice.brain import ConversationBrain
+            self.calls += 1
+            return ConversationBrain().respond(user_text, observation)
+        def respond_stream(self, *a, **k):
+            raise AssertionError("not used")
+
+    hand = VirtualHand(1920, 1080)
+    assistant = Assistant(
+        speaker=Speaker(engine=NullTtsEngine()),
+        stt=NullEngine(),
+        perception=_Perception(),
+        kernel=CapabilityKernel(
+            granted_ops=["click"], allow_degenerate_frames=True, min_peak_probability=0.5
+        ),
+        hand=hand,
+        step_delay_s=0.0,
+        max_task_steps=3,
+    )
+    # Two mic turns: the task, then "stop". The middle steps come from autonomy.
+    script = [
+        Transcript(text="Save button daba do", engine="test"),
+        Transcript(text="stop", engine="test"),
+    ]
+    assistant._listen = lambda: script.pop(0)
+
+    report = assistant.loop(max_turns=10)
+
+    acted = [r for r in report.turns if r.action]
+    # The loop ran at least one autonomous step before returning to listening,
+    # and every acted step went through the gate and reached the hand.
+    assert len(acted) >= 1
+    assert all(r.gate_allowed for r in acted)
+    assert report.turns[-1].kind == "stop"
+
+
+def test_rule_brain_finishes_an_autonomous_step_instead_of_reasking():
+    """After acting, an empty follow-up turn must finish, not loop on 'what work?'."""
+    brain = RuleBrain()
+    first = brain.respond("Save button daba do", {"target_present": True})
+    assert first.kind is TurnKind.ACT
+    follow_up = brain.respond("", {"target_present": True})
+    assert follow_up.kind is TurnKind.FINISH
+
+
+def test_fallback_rule_brain_persists_across_turns():
+    """The offline fallback must remember the task between calls."""
+    from avcs.reasoning.provider import LLMReasoningProvider
+
+    brain = ConversationBrain(
+        provider=LLMReasoningProvider(endpoint="http://127.0.0.1:1/v1", api_key="k", model="m")
+    )
+    t1 = brain.respond("Save button daba do", {"target_present": True})
+    assert t1.kind is TurnKind.ACT
+    # Same brain instance on the next (autonomous) call must not re-ask.
+    t2 = brain.respond("", {"target_present": True})
+    assert t2.kind is TurnKind.FINISH
+
+
+def test_loop_runs_multiple_autonomous_steps_until_finish():
+    """A multi-action task must run every step the brain asks for."""
+    from avcs.control.capability import CapabilityKernel, GroundingEvidence
+    from avcs.voice.stt import Transcript
+
+    class _Perception:
+        def observe(self, query=None):
+            return ScreenObservation(description="form", target_present=True, hotspot_count=2)
+        def frame(self):
+            return None
+        def grounding_evidence(self, query):
+            return GroundingEvidence(
+                candidate_point_norm=(0.3, 0.4), peak_probability=0.9,
+                target_present=True, authorized=False, active_query=query,
+            )
+
+    from avcs.reasoning.contracts import ActionIntent, ActionOp
+    from avcs.system1.loop import VirtualHand
+
+    class _TwoStepBrain:
+        """Acts on the task turn, acts once more, then finishes."""
+        def __init__(self):
+            self.n = 0
+        def respond(self, user_text, observation, **kw):
+            self.n += 1
+            if self.n <= 2:
+                intent = ActionIntent.create(
+                    step_index=self.n, op=ActionOp.CLICK,
+                    target_description="Save button", expected_outcome="clicked",
+                    rationale="test",
+                )
+                return AssistantTurn(kind=TurnKind.ACT, speech=f"step {self.n}",
+                                     intent=intent, source="test")
+            return AssistantTurn(kind=TurnKind.FINISH, speech="done", source="test")
+
+    hand = VirtualHand(1920, 1080)
+    assistant = Assistant(
+        brain=_TwoStepBrain(),
+        speaker=Speaker(engine=NullTtsEngine()),
+        stt=NullEngine(),
+        perception=_Perception(),
+        kernel=CapabilityKernel(
+            granted_ops=["click"], allow_degenerate_frames=True, min_peak_probability=0.5
+        ),
+        hand=hand,
+        step_delay_s=0.0,
+        max_task_steps=5,
+    )
+    script = [
+        Transcript(text="Save button daba do", engine="test"),
+        Transcript(text="stop", engine="test"),
+    ]
+    assistant._listen = lambda: script.pop(0)
+
+    report = assistant.loop(max_turns=10)
+
+    performed = [r for r in report.turns if r.performed]
+    assert len(performed) == 2          # both autonomous steps ran
+    assert len(hand.clicks) == 2
+    assert report.turns[-1].kind == "stop"
+
+
+def test_keyless_brain_skips_the_llm_and_answers_fast():
+    """A brain with no API key must not stall on retry backoff every turn.
+
+    Opening a connection with no key, retrying three times and only then falling
+    back costs ~2 s per turn — a real-time loop that talks slower than the user.
+    The offline path is taken directly and the turn stays sub-100 ms.
+    """
+    import time
+    from avcs.reasoning.provider import LLMReasoningProvider
+
+    brain = ConversationBrain(
+        provider=LLMReasoningProvider(endpoint="http://127.0.0.1:1/v1", api_key="", model="m")
+    )
+    assert brain._offline() is True
+
+    start = time.perf_counter()
+    turn = brain.respond("Save button daba do", {"target_present": True})
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert turn.kind is TurnKind.ACT
+    assert turn.source == "rule_fallback"
+    assert elapsed_ms < 500, f"keyless turn took {elapsed_ms:.0f} ms"

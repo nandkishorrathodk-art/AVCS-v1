@@ -290,6 +290,19 @@ def default_stt_engine(model_path: Optional[str] = None, language: Optional[str]
     return NullEngine()
 
 
+def _capture_error(tool: str, stderr: bytes) -> str:
+    """One readable line from a capture tool's stderr, without ALSA internals.
+
+    A machine with no capture device prints pages of ALSA `confmisc` noise; the
+    useful fact is only that there is no usable input device.
+    """
+    raw = stderr.decode("utf-8", "replace").strip()
+    if "cannot find card" in raw or "No such file or directory" in raw or "no default" in raw.lower():
+        return f"{tool} found no input device (no microphone on this machine)"
+    first = raw.splitlines()[0] if raw else "unknown error"
+    return f"{tool} capture failed: {first[:160]}"
+
+
 def record_microphone(seconds: float = 4.0, sample_rate: int = 16000) -> AudioClip:
     """Capture `seconds` of mono audio from the default input device.
 
@@ -319,9 +332,7 @@ def record_microphone(seconds: float = 4.0, sample_rate: int = 16000) -> AudioCl
             cmd = [sox, "-q", "-d", "-r", str(sample_rate), "-c", "1", path, "trim", "0", str(seconds)]
         proc = subprocess.run(cmd, capture_output=True, timeout=int(seconds) + 30)
         if proc.returncode != 0 or not os.path.exists(path):
-            raise EngineNotAvailable(
-                f"microphone capture failed: {proc.stderr.decode('utf-8', 'replace').strip()[:200]}"
-            )
+            raise EngineNotAvailable(_capture_error(os.path.basename(cmd[0]), proc.stderr))
         return AudioClip.read_wav(path)
     finally:
         try:
@@ -363,9 +374,7 @@ def record_microphone_until_silence(
         ]
         proc = subprocess.run(cmd, capture_output=True, timeout=int(max_seconds) + 30)
         if proc.returncode != 0 or not os.path.exists(path):
-            raise EngineNotAvailable(
-                f"microphone capture failed: {proc.stderr.decode('utf-8', 'replace').strip()[:200]}"
-            )
+            raise EngineNotAvailable(_capture_error(os.path.basename(cmd[0]), proc.stderr))
         return AudioClip.read_wav(path)
     finally:
         try:

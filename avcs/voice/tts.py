@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import wave
 from typing import Iterable, List, Optional, Tuple
 
@@ -200,6 +201,12 @@ class EspeakNgEngine(TtsEngine):
 
     def __init__(self, binary: Optional[str] = None) -> None:
         self.binary = binary or _which_any("espeak-ng", "espeak")
+        # The player subprocess is held so `stop()` can interrupt it. Without
+        # this, `play()` blocks for the whole clip and the assistant cannot be
+        # talked over -- which is the difference between a live conversation and
+        # a monologue.
+        self._player_proc: Optional[subprocess.Popen] = None
+        self._stop_flag = False
 
     def available(self) -> bool:
         return bool(self.binary and os.path.exists(self.binary))
@@ -259,12 +266,32 @@ class EspeakNgEngine(TtsEngine):
             args = [player, path]
             if os.path.basename(player) == "aplay":
                 args = [player, "-q", path]
-            proc = subprocess.run(args, capture_output=True, timeout=120)
-            return proc.returncode == 0
+            self._stop_flag = False
+            # Popen (not run) so `stop()` can terminate playback mid-sentence.
+            self._player_proc = subprocess.Popen(
+                args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            rc = self._player_proc.wait()
+            self._player_proc = None
+            if self._stop_flag:
+                # Interrupted on purpose: not a playback failure.
+                return False
+            return rc == 0
         finally:
+            self._player_proc = None
             try:
                 os.unlink(path)
             except OSError:
+                pass
+
+    def stop(self) -> None:
+        """Interrupt the current clip so the user can take the floor back."""
+        self._stop_flag = True
+        proc = self._player_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
                 pass
 
 
@@ -302,6 +329,38 @@ class NullEngine(TtsEngine):
         return False
 
 
+@dataclasses.dataclass
+class SpeechHandle:
+    """A spoken utterance running on a background thread.
+
+    `done` is set when the thread finishes. `stop()` barges in: it interrupts the
+    audio engine and marks the result so a caller can tell an interrupted clip
+    from a completed one.
+    """
+
+    text: str
+    engine: str
+    result: Optional["SpeechResult"] = None
+    error: Optional[str] = None
+    interrupted: bool = False
+    done: "threading.Event" = dataclasses.field(default_factory=threading.Event)
+    _thread: Optional["threading.Thread"] = None
+    _speaker: Optional["Speaker"] = None
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block until the utterance finishes. Returns True if it did."""
+        return self.done.wait(timeout)
+
+    def is_done(self) -> bool:
+        return self.done.is_set()
+
+    def stop(self) -> None:
+        """Interrupt this utterance mid-sentence."""
+        self.interrupted = True
+        if self._speaker is not None:
+            self._speaker.stop()
+
+
 class Speaker:
     """The assistant's mouth: synthesize once, play once, report honestly.
 
@@ -336,6 +395,33 @@ class Speaker:
 
     def synthesize(self, text: str) -> PcmClip:
         return self.engine.synthesize(text, self.profile)
+
+    def stop(self) -> None:
+        """Interrupt whatever is playing, so the user can take the floor back."""
+        self.engine.stop()
+
+    def speak_async(self, text: str) -> "SpeechHandle":
+        """Speak `text` on a background thread and return immediately.
+
+        The real-time loop must not block on audio: playing a sentence takes
+        seconds, and the eyes/brain should keep running while the mouth talks.
+        `SpeechHandle.wait()` blocks until done; `SpeechHandle.stop()` barges in.
+        """
+        import threading
+
+        handle = SpeechHandle(text=text, engine=self.engine.name)
+        handle._speaker = self
+        def _run() -> None:
+            try:
+                handle.result = self.speak(text)
+            except Exception as exc:  # never let the mouth kill the loop
+                handle.error = str(exc)
+            finally:
+                handle.done.set()
+
+        handle._thread = threading.Thread(target=_run, name="avcs-mouth", daemon=True)
+        handle._thread.start()
+        return handle
 
     def speak(self, text: str) -> SpeechResult:
         """Render and play `text`. Returns a status rather than raising."""

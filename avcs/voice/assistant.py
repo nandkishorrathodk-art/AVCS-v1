@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
 
 import numpy as np
 
@@ -114,6 +114,11 @@ class AssistantTurnRecord:
     spoken: bool = False
     listen_error: Optional[str] = None
     speak_error: Optional[str] = None
+    # Per-stage wall time in milliseconds, so "real-time" is a measurement and
+    # not a claim. listen_ms is 0 when the turn came from a script, not a mic.
+    listen_ms: float = 0.0
+    brain_ms: float = 0.0
+    act_ms: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -265,12 +270,15 @@ class Assistant:
 
     def step(self, user_text: str, turn: int = 0, stream: Optional[bool] = None) -> AssistantTurnRecord:
         """Run one conversational turn from already-transcribed user text."""
-        # First observation: morphology only, no query. The brain needs a general
-        # "what is on screen" summary before it can decide what to do.
-        obs = self._observe(None)
-        use_stream = self.stream if stream is None else bool(stream)
+        self.stream = bool(stream) if stream is not None else self.stream
+        return self._run_one(user_text, turn)
 
-        turn_result, spoken, speak_error = self._ask_brain(user_text, obs, use_stream)
+    def _run_one(self, user_text: str, turn: int) -> AssistantTurnRecord:
+        """Observe, ask the brain (timed), and act if asked. One loop step."""
+        obs = self._observe(None)
+        _t0 = time.perf_counter()
+        turn_result, spoken, speak_error = self._ask_brain(user_text, obs, self.stream)
+        brain_ms = (time.perf_counter() - _t0) * 1000.0
 
         record = AssistantTurnRecord(
             turn=turn,
@@ -280,13 +288,18 @@ class Assistant:
             source=turn_result.source,
             spoken=spoken,
             speak_error=speak_error,
+            brain_ms=round(brain_ms, 1),
         )
-
         if turn_result.wants_action and turn_result.intent is not None:
+            _t1 = time.perf_counter()
             self._execute(turn_result, record)
+            record.act_ms = round((time.perf_counter() - _t1) * 1000.0, 1)
+        # Close the loop for whatever the next step decides.
+        self._last_outcome = self._outcome_summary(record)
         return record
 
-    def run_task(self, user_text: str, max_steps: Optional[int] = None) -> List[AssistantTurnRecord]:
+    def run_task(self, user_text: str, max_steps: Optional[int] = None,
+                 on_record: Optional[Callable[[AssistantTurnRecord], None]] = None) -> List[AssistantTurnRecord]:
         """Autonomously execute a whole task, not just one action.
 
         A single conversational turn produces at most one action. A real
@@ -295,37 +308,22 @@ class Assistant:
 
         The loop stops early — and says so — when an action is refused by the
         gate or does not reach the hand, because continuing would just repeat the
-        same failing step.
+        same failing step. Speech is streamed on every step, so the assistant
+        narrates the work while it does it.
         """
         budget = int(max_steps if max_steps is not None else self.max_task_steps)
         records: List[AssistantTurnRecord] = []
-        # The user's request is the first (and only) human turn; every turn after
-        # it is the assistant deciding what to do next from the screen.
-        user_text = user_text
 
         for i in range(1, budget + 1):
-            obs = self._observe(None)
-            turn_result, spoken, speak_error = self._ask_brain(user_text, obs, self.stream)
-            record = AssistantTurnRecord(
-                turn=i,
-                heard=user_text,
-                said=turn_result.speech,
-                kind=turn_result.kind.value,
-                source=turn_result.source,
-                spoken=spoken,
-                speak_error=speak_error,
-            )
+            record = self._run_one(user_text, i)
             records.append(record)
+            if on_record:
+                on_record(record)
 
-            if turn_result.kind in (TurnKind.FINISH, TurnKind.STOP):
+            if record.kind in ("finish", "stop"):
                 break
-            if turn_result.wants_action and turn_result.intent is not None:
-                self._execute(turn_result, record)
-                if not record.performed:
-                    break
-            # Close the loop: the next decision must see what the last step did
-            # and whether the screen changed, or it would just repeat itself.
-            self._last_outcome = self._outcome_summary(record)
+            if record.action and not record.performed:
+                break
             # From here the screen is the speaker: the next decision is driven by
             # what changed, not by the user, so the user text is not repeated.
             user_text = ""
@@ -508,4 +506,85 @@ class Assistant:
             if rec.kind in ("finish", "stop"):
                 break
         report.ended_at = time.time()
+        return report
+
+    def loop(
+        self,
+        max_turns: int = 0,
+        stop_phrases: Optional[Sequence[str]] = None,
+        on_record: Optional[Callable[[AssistantTurnRecord], None]] = None,
+    ) -> ConversationReport:
+        """Continuous real-time session: listen -> think -> speak -> act -> repeat.
+
+        This is the always-on assistant. Each turn:
+          1. listens on the microphone (silence-terminated),
+          2. streams a reply and starts speaking it while the model is still
+             writing (barge-in: a new utterance stops the mouth),
+          3. grounds, gates and performs any action the brain asked for,
+          4. repeats until the user says a stop phrase or ``max_turns`` is hit
+             (``max_turns=0`` means run until stopped).
+
+        Ctrl-C ends the session cleanly and the partial report is returned, so an
+        interrupted run still reports what actually happened.
+        """
+        stops = {p.strip().lower() for p in (stop_phrases or ("stop", "band karo", "bas", "exit", "quit")) if p}
+        report = ConversationReport(started_at=time.time())
+        i = 0
+        try:
+            while max_turns <= 0 or i < max_turns:
+                i += 1
+                _t0 = time.perf_counter()
+                transcript = self._listen()
+                listen_ms = (time.perf_counter() - _t0) * 1000.0
+                user_text = transcript.normalized()
+                if not user_text:
+                    rec = AssistantTurnRecord(
+                        turn=i, heard="", said="", kind="silent", source="ears",
+                        listen_error=transcript.error, listen_ms=round(listen_ms, 1),
+                    )
+                    report.turns.append(rec)
+                    if on_record:
+                        on_record(rec)
+                    # A silent turn is normal between utterances; keep waiting.
+                    continue
+
+                if user_text.strip().lower() in stops:
+                    rec = AssistantTurnRecord(
+                        turn=i, heard=user_text, said="Theek hai sir, ruk gaya.",
+                        kind="stop", source="ears", listen_ms=round(listen_ms, 1),
+                    )
+                    report.turns.append(rec)
+                    if on_record:
+                        on_record(rec)
+                    break
+
+                rec = self._run_one(user_text, i)
+                rec.listen_ms = round(listen_ms, 1)
+                report.turns.append(rec)
+                if on_record:
+                    on_record(rec)
+                if rec.kind in ("finish", "stop"):
+                    break
+
+                # The user asked for something that needs work. Keep going on our
+                # own — act, look, decide — until the brain says finish or the
+                # step budget runs out, then go back to listening.
+                if rec.action and rec.performed:
+                    for j in range(1, max(0, self.max_task_steps) + 1):
+                        i += 1
+                        step_rec = self._run_one("", i)
+                        report.turns.append(step_rec)
+                        if on_record:
+                            on_record(step_rec)
+                        if step_rec.kind in ("finish", "stop"):
+                            break
+                        if step_rec.action and not step_rec.performed:
+                            break
+                        if self.step_delay_s > 0:
+                            time.sleep(self.step_delay_s)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.speaker.stop()
+            report.ended_at = time.time()
         return report

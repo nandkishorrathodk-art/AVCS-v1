@@ -58,31 +58,49 @@ def build_assistant(args) -> Assistant:
 
     stt = (
         default_stt_engine(model_path=args.vosk_model, language=args.stt_language)
-        if args.listen
+        if (args.listen or args.loop)
         else NullEngine()
     )
 
     perception = None
     if args.eyes:
-        if args.ground:
-            from avcs.voice.perception import GroundingPerception
+        try:
+            if args.ground:
+                from avcs.voice.perception import GroundingPerception
 
-            perception = GroundingPerception(
-                source="screen" if not args.synthetic_eyes else "synthetic"
-            )
-        else:
-            from avcs.voice.perception import EyePerception
+                perception = GroundingPerception(
+                    source="screen" if not args.synthetic_eyes else "synthetic"
+                )
+            else:
+                from avcs.voice.perception import EyePerception
 
-            perception = EyePerception(
-                source="screen" if not args.synthetic_eyes else "synthetic"
-            )
+                perception = EyePerception(
+                    source="screen" if not args.synthetic_eyes else "synthetic"
+                )
+        except Exception as exc:
+            # No checkpoint or no display: run without eyes rather than crash.
+            # The gate is fail-closed, so actions are refused with a clear reason
+            # instead of being performed blind.
+            print(f"warning: eyes unavailable ({exc}); running without perception.",
+                  file=sys.stderr)
+            perception = None
 
     kernel = CapabilityKernel(granted_ops=args.grant or ())
     hand = None
     if args.live:
-        from avcs_sdk.hand_motor import HandMotor
+        # Real actuation: use the platform's real hand (Windows HandMotor, or
+        # xdotool on Linux/X11). Fail closed when neither is present rather than
+        # silently falling back to a virtual hand the caller did not ask for.
+        from avcs.voice.actuators import default_hand
 
-        hand = HandMotor()
+        hand = default_hand()
+        if hand is None:
+            print(
+                "warning: --live requested but no real hand is available "
+                "(install xdotool and set DISPLAY, or run on Windows); "
+                "actions will be refused.",
+                file=sys.stderr,
+            )
 
     return Assistant(
         brain=brain,
@@ -93,6 +111,8 @@ def build_assistant(args) -> Assistant:
         hand=hand,
         listen_seconds=args.seconds,
         actuation="live" if args.live else "virtual",
+        stream=not args.no_stream,
+        max_task_steps=args.max_steps,
     )
 
 
@@ -106,7 +126,14 @@ def main() -> None:
                          '(e.g. --script "mujhe X kaam karna hai" "Save button daba do")')
     ap.add_argument("--say", type=str, default=None, help="speak this phrase and exit")
     ap.add_argument("--listen", action="store_true", help="record from the microphone each turn")
+    ap.add_argument("--loop", action="store_true",
+                    help="continuous real-time session: listen -> think -> speak -> act, until "
+                         "a stop phrase ('stop'/'band karo') or Ctrl-C")
     ap.add_argument("--turns", type=int, default=3, help="max conversational turns")
+    ap.add_argument("--no-stream", action="store_true",
+                    help="disable streaming speech (wait for the whole reply, then speak)")
+    ap.add_argument("--max-steps", type=int, default=8,
+                    help="max autonomous action steps per spoken task")
     ap.add_argument("--seconds", type=float, default=4.0, help="seconds to record per turn")
     ap.add_argument("--vosk-model", type=str, default=None, help="path to a Vosk model directory")
     ap.add_argument("--stt-language", type=str, default=None,
@@ -149,7 +176,7 @@ def main() -> None:
         return
 
     if args.task:
-        records = assistant.run_task(args.task, max_steps=args.turns)
+        records = assistant.run_task(args.task, max_steps=args.max_steps)
         for rec in records:
             _print_record(rec, args.json)
         if args.json:
@@ -158,6 +185,19 @@ def main() -> None:
             acted = sum(1 for r in records if r.performed)
             verified = sum(1 for r in records if r.verified)
             print(f"\n[summary] steps={len(records)} actions={acted} verified={verified}")
+        return
+
+    if args.loop:
+        # Continuous real-time session. --turns 0 means run until stopped.
+        report = assistant.loop(
+            max_turns=args.turns if args.turns else 0,
+            on_record=lambda rec: _print_record(rec, args.json),
+        )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            print(f"\n[summary] turns={report.total_turns} actions={report.actions_taken} "
+                  f"verified={report.actions_verified} duration={report.duration_s:.1f}s")
         return
 
     if not args.listen and not args.script:
@@ -197,6 +237,9 @@ def _print_record(rec, as_json: bool) -> None:
                   f"(delta={rec.visual_delta})")
     if rec.speak_error:
         print(f"  note  : speech not played ({rec.speak_error})")
+    if rec.brain_ms or rec.act_ms or rec.listen_ms:
+        print(f"  timing: listen={rec.listen_ms:.0f}ms brain={rec.brain_ms:.0f}ms "
+              f"act={rec.act_ms:.0f}ms")
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from avcs.voice.brain import (
     TurnKind,
     CONVERSATION_SYSTEM_PROMPT,
 )
+from avcs.voice.actuators import XdotoolHand, default_hand
 from avcs.voice.hands import (
     HandAction,
     MUTATING_OPS,
@@ -63,6 +64,7 @@ from avcs.voice.tts import (
     NullEngine as NullTtsEngine,
     PcmClip,
     Speaker,
+    SpeechHandle,
     SpeechQueue,
     SpeechResult,
     TtsEngine,
@@ -80,9 +82,11 @@ __all__ = [
     "EyePerception", "GroundingPerception",
     # mouth
     "Speaker", "TtsEngine", "EspeakNgEngine", "NullTtsEngine",
-    "VoiceProfile", "PcmClip", "SpeechResult", "SpeechQueue",
+    "VoiceProfile", "PcmClip", "SpeechResult", "SpeechQueue", "SpeechHandle",
     # hands
     "HandAction", "MUTATING_OPS", "dispatch",
+    # real actuation
+    "XdotoolHand", "default_hand",
     # ears
     "SttEngine", "VoskEngine", "FasterWhisperEngine", "NullSttEngine",
     "AudioClip", "Transcript", "default_stt_engine", "record_microphone",

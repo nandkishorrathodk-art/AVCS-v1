@@ -1003,4 +1003,48 @@ Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
 local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
 a multi-turn clarify-then-act conversation, per-op dispatch, and the autonomous
 loop's finish/refuse/closed-loop paths). Full suite with the voice tests:
-**90 passed, 2 skipped**.
+**103 passed, 2 skipped**.
+
+### Real-time session: streaming, barge-in, continuous loop (`Assistant.loop`)
+
+`Assistant.loop()` is the always-on assistant, and `--loop` in the demo runs it.
+Each turn: listen (silence-terminated) -> stream a reply -> ground/gate/act ->
+repeat until a stop phrase (`stop`, `band karo`, `bas`, `exit`, `quit`) or
+Ctrl-C, which ends the session cleanly with the partial report intact.
+
+Three things make it real-time, and each was a real defect before:
+
+1. **The mouth is interruptible.** `EspeakNgEngine.play` used a blocking
+   `subprocess.run`, so `TtsEngine.stop()` was a no-op and the user could never
+   talk over the assistant. It now holds the player `Popen` and `stop()`
+   terminates it; an interrupted clip returns `False`, not a playback error.
+   `Speaker.speak_async` runs the utterance on a background thread and returns a
+   `SpeechHandle` immediately, so the eyes/brain keep running while it talks.
+2. **A spoken task is completed, not just started.** After a turn that performs
+   an action, the loop keeps stepping autonomously (empty user text) until the
+   brain finishes or `max_task_steps` is hit, then returns to listening. Feeding
+   `""` is deliberate: the next decision is driven by the screen, not by
+   repeating the user's words back to the model.
+3. **The offline brain does not loop.** Two bugs made the fallback spin on
+   "Yes sir, what work would you like me to do?": `ConversationBrain._fallback`
+   built a **fresh** `RuleBrain` every call (so it forgot the task), and
+   `RuleBrain` had no "already acted" state. It is now one persistent rule brain
+   (`self._rule`) whose `respond("")` returns `FINISH` after an action. A
+   randomly-initialised or LLM-less run now terminates.
+
+Per-stage timing (`listen_ms`, `brain_ms`, `act_ms`) is recorded on every
+`AssistantTurnRecord` and printed by the demo, so "real-time" is a measurement.
+
+### Real actuation is cross-platform (`avcs/voice/actuators.py`)
+
+`HandMotor` is Windows-only (ctypes to user32). `XdotoolHand` is the Linux/X11
+equivalent: `mousemove`+`click`, `type`, `key`, and scroll via button 4/5. It is
+**fail-closed** — no `xdotool` or no `$DISPLAY` means `available()` is `False`
+and every op returns `False` (never a silent success). `default_hand()` picks the
+right one per platform or returns `None`. `--live` uses it; the capability kernel
+still gates every call. Measured on this box (no `xdotool`, no `$DISPLAY`):
+`available()` False, all ops refused — the honest outcome, pinned by a test.
+
+Also: a machine with no capture device makes ALSA dump pages of `confmisc`
+noise; `record_microphone*` now raise `EngineNotAvailable` with one readable line
+("found no input device") via `_capture_error`.

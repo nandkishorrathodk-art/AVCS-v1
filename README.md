@@ -363,6 +363,12 @@ python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba d
 
 # Full loop with real eyes, the trained grounder, and a gated click
 python3 -m avcs.voice.demo --script "Save button daba do" --eyes --ground --grant click
+
+# Continuous real-time session: listen -> think -> speak -> act, until "stop"/Ctrl-C
+python3 -m avcs.voice.demo --loop --eyes --ground --grant click type_text scroll
+
+# Real actuation on this machine (opt-in): xdotool on Linux/X11, HandMotor on Windows
+python3 -m avcs.voice.demo --loop --live --grant click type_text
 ```
 
 The assistant speaks, and it **acts**: `click`, `double_click`, `type_text`,
@@ -370,6 +376,32 @@ The assistant speaks, and it **acts**: `click`, `double_click`, `type_text`,
 operation. `--task` runs a request to completion across multiple steps, feeding
 each step's outcome back to the brain; it stops early, and says so, when the gate
 refuses a step.
+
+### Real-time behaviour
+
+* **Streaming mouth.** The reply is spoken sentence by sentence as the LLM
+  produces it (`--no-stream` disables this for a deterministic demo). The mouth
+  runs on a background thread, so the eyes and brain keep running while it talks.
+* **Barge-in.** `EspeakNgEngine.play` holds its player subprocess, so
+  `Speaker.stop()` interrupts the current clip mid-sentence. A new utterance can
+  take the floor back instead of waiting for the assistant to finish.
+* **Continuous session.** `--loop` (or `Assistant.loop()`) is the always-on
+  assistant: listen (silence-terminated) -> stream a reply -> ground, gate and
+  act -> repeat until a stop phrase (`stop`, `band karo`, `bas`) or Ctrl-C.
+* **Autonomous completion.** When a spoken request leads to an action, the loop
+  keeps going on its own — act, look at the screen, decide the next step — until
+  the brain says `finish` or the step budget (`--max-steps`, default 8) runs out,
+  then returns to listening.
+* **Measured timing.** Every turn records `listen_ms`, `brain_ms` and `act_ms`,
+  so "real-time" is a number, not a claim. The demo prints them per turn.
+
+### Real actuation
+
+`--live` uses the platform's real hand: `avcs_sdk.hand_motor.HandMotor` on
+Windows, `avcs.voice.actuators.XdotoolHand` on Linux/X11. It is **fail-closed** —
+without `xdotool` or `$DISPLAY` every operation returns `False` and the turn is
+reported as not performed, never as a success. The capability kernel still sits
+in front of it.
 
 The LLM endpoint is read from the environment (`AVCS_LLM_ENDPOINT`,
 `AVCS_LLM_API_KEY`); any OpenAI-compatible SSE server works, including a local

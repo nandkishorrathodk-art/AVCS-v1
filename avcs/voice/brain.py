@@ -229,6 +229,7 @@ class ConversationBrain:
         self.history_limit = int(history_limit)
         self.history: List[ConversationTurn] = []
         self.step_index = 0
+        self._rule: Optional[RuleBrain] = None
 
     # ------------------------------------------------------------------ #
     # History
@@ -284,6 +285,24 @@ class ConversationBrain:
     # ------------------------------------------------------------------ #
     # The turn
     # ------------------------------------------------------------------ #
+    def _offline(self) -> bool:
+        """True when the brain cannot reach an LLM and must use the rule brain.
+
+        Without this, a keyless run still opens a connection, waits out the
+        provider's retry/backoff (3 attempts, ~2 s) and *then* falls back — a
+        2-second stall on every turn of a supposed real-time loop. A provider
+        that declares no key is known-unreachable, so skip straight to the rule
+        brain. Providers that do hold a key are still tried, and still fall back
+        on a real error.
+        """
+        provider = self.provider
+        if provider is None:
+            return True
+        key = getattr(provider, "api_key", None)
+        if key is None:
+            return False  # not a keyed HTTP provider; let it answer
+        return not str(key).strip()
+
     def respond(self, user_text: str, observation: Optional[Dict[str, Any]] = None) -> AssistantTurn:
         """Produce the assistant's next turn from the user's utterance.
 
@@ -299,6 +318,11 @@ class ConversationBrain:
         observation = observation or self.build_observation()
         observation = dict(observation)
         observation.setdefault("task", self.task)
+
+        if self._offline():
+            turn = self._fallback(user_text, observation, reason="no API key configured")
+            self.record_assistant(turn.speech)
+            return turn
 
         try:
             decision = self.provider.plan_step(
@@ -350,6 +374,14 @@ class ConversationBrain:
         observation.setdefault("task", self.task)
 
         speak = on_speech if on_speech is not None else (lambda _s: None)
+
+        # Known-unreachable brain (no key): go straight to the rule brain rather
+        # than opening a connection and waiting out the retry backoff mid-loop.
+        if self._offline():
+            turn = self.respond(user_text, observation)
+            if turn.speech:
+                speak(turn.speech)
+            return turn
 
         # If the provider has no real streaming implementation (it still uses the
         # base-class hook), the reply arrives whole and its action cannot be
@@ -490,8 +522,12 @@ class ConversationBrain:
         )
 
     def _fallback(self, user_text: str, observation: Dict[str, Any], reason: str) -> AssistantTurn:
-        rule = RuleBrain()
-        turn = rule.respond(user_text, observation)
+        # One persistent rule brain, not a fresh one per call: a new instance
+        # every turn would forget the task and re-ask "what work?" on every
+        # autonomous step.
+        if self._rule is None:
+            self._rule = RuleBrain()
+        turn = self._rule.respond(user_text, observation)
         turn.source = "rule_fallback"
         turn.thought = f"LLM unavailable ({reason[:120]}); used the offline rule brain."
         return turn
@@ -520,6 +556,10 @@ class RuleBrain:
     def __init__(self) -> None:
         self.task = ""
         self.step_index = 0
+        # Set once an action has been issued for the current task, so an
+        # autonomous follow-up step (empty user text) can finish instead of
+        # asking "what work?" forever.
+        self._acted = False
 
     def respond(self, user_text: str, observation: Optional[Dict[str, Any]] = None) -> AssistantTurn:
         self.step_index += 1
@@ -528,6 +568,18 @@ class RuleBrain:
         low = text.lower()
         if text:
             self.task = text
+            self._acted = False
+
+        # An autonomous step (no new user text) after we already acted: the task
+        # is done as far as this keyword brain can tell. Finish rather than
+        # re-asking, which would loop.
+        if not text and self.task and self._acted:
+            return AssistantTurn(
+                kind=TurnKind.FINISH,
+                speech="Ho gaya sir.",
+                thought="Task already acted on; nothing further to match.",
+                source="rule_fallback",
+            )
 
         # No usable task yet -> ask, which is the behavior the user described.
         if not low or low in {"hi", "hello", "hey", "namaste"}:
@@ -573,6 +625,7 @@ class RuleBrain:
             expected_outcome=f"{target} responds",
             rationale="Offline keyword match.",
         )
+        self._acted = True
         return AssistantTurn(
             kind=TurnKind.ACT,
             speech=f"Okay sir, {op.value.replace('_', ' ')} on {target}.",
