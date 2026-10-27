@@ -152,3 +152,23 @@ def test_dataset_emits_every_target():
         assert key in item
     batch = collate([ds[0], ds[1]])
     assert batch["image"].shape == (2, 3, 64, 64)
+
+
+def test_point_norm_recovers_both_axes():
+    """A peak off-centre in *both* axes must move both coordinates.
+
+    Regression for a real bug: `point_norm` softmaxed along a single axis, so
+    the other axis' marginal stayed constant and collapsed to 0.5 no matter
+    where the peak was. A sharp, correct head then measured as a dead one and
+    grounding was wrongly reported as broken.
+    """
+    m = _model()
+    g = m.config.grid
+    out = m(torch.randn(1, 3, 64, 64), ["click Save"])
+    out.point_logits = torch.full_like(out.point_logits, -20.0)
+    cx, cy = 1, g - 2  # top-left corner, off-centre on both axes
+    out.point_logits[0, cy * g + cx] = 20.0
+    x, y = out.point_norm()[0].tolist()
+    assert abs(x - cx / (g - 1)) < 1e-4, f"x did not track the peak: {x}"
+    assert abs(y - cy / (g - 1)) < 1e-4, f"y did not track the peak: {y}"
+

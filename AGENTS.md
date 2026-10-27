@@ -700,29 +700,39 @@ Facts to keep straight:
 
 Kaggle GPU run: 12,000-frame corpus, 8,000 steps, batch 64, lr 3e-3, 930 s wall.
 Checkpoint `runs/weights/system1_one_model.pt` (20 MB, gitignored) loads with
-**0 missing / 0 unexpected**. Kaggle's reported held-out numbers and an
-independent local re-eval agree:
+**0 missing / 0 unexpected**.
 
-| metric | Kaggle held-out (401 pts) | local re-eval (16 frames) |
+**Grounding was mis-reported as broken; the bug was in the metric, not the
+model.** `OneModelOutput.point_norm()` softmaxed the heatmap along a single axis
+(`dim=-1` over `(g, g)`), which leaves the *other* axis' marginal constant, so
+that coordinate collapsed to 0.5 for every frame -- `PREDICTED y: std 0.000`.
+A sharp, correct head therefore read as a dead one. Softmax is now over the
+flattened grid. With the fix, held-out grounding over every positive
+(frame, query) pair (n=64):
+
+| metric | validation | test_heldout |
 |---|---|---|
-| kind_acc | 0.922 | 0.921 |
-| presence_acc | 0.983 | 1.000 |
-| point_median_err | 0.299 | 0.329 |
-| point_within_0.1 | 0.072 | 0.000 |
-| category_acc | 0.515 | 0.438 |
+| presence_acc | 0.984 | 0.984 |
+| point_exact_cell | 0.781 | **0.891** |
+| point_within_1cell | 1.000 | **0.938** |
 
-What actually works: **element kind (~92%) and query presence (~98%)**, and they
-transfer off the training frames. What does not: **grounding is weak** -- median
-error is ~30% of the image and only ~0-7% of targets land within 10% of the
-frame, so the point head is not yet a usable pointer. Do not quote a grounding
-number without `point_median_err` *and* `point_within_0.1`; a low median alone
-looks better than the system is.
+**Grounding is real, not a query lookup.** Shuffling the images so each query is
+paired with the wrong frame drops exact-cell accuracy 0.891 -> 0.281, i.e. the
+head genuinely reads the frame. This corpus is nonetheless query-deterministic
+(1.65 distinct target cells per query text on held-out), so a query->cell table
+would score non-trivially; always run the shuffle ablation before quoting a
+grounding number as perception.
 
-**Read held-out, not validation.** Validation `category_acc` is 1.00 while
-held-out is ~0.5. That gap is the corpus being ambiguous, not the model being
-great: several `UI_CATEGORIES` are rendered by identical code paths (see the
-cortex section), so a model that keys on the generator's layout scores perfectly
-in-distribution and ~chance on a differently-seeded held-out draw.
+Remaining honest limits on grounding: n=64 held-out is small, and the corpus is
+regenerated with the same vocabulary, so "89% exact cell" is a clean-room figure
+on software the generator draws, not a generalisation claim.
+
+**Read held-out, not validation, for the scene heads.** Validation
+`category_acc` is 1.00 while held-out is ~0.44. That gap is the corpus being
+ambiguous, not the model being great: several `UI_CATEGORIES` are rendered by
+identical code paths (see the cortex section), so a model that keys on the
+generator's layout scores perfectly in-distribution and ~chance on a
+differently-seeded held-out draw. kind_acc 0.92 and presence 0.98 do transfer.
 
 
 ### Traps fixed here (each would have silently broken a checkpoint)
@@ -734,6 +744,13 @@ in-distribution and ~chance on a differently-seeded held-out draw.
   FNV-1a (`_QueryEncoder.word_id`); `test_query_token_ids_are_stable_across_processes`
   runs two fresh interpreters and asserts the ids match. This is the same class
   of bug as "the tokenizer must travel with the weights".
+- **`point_norm` softmaxed one axis at a time.** `F.softmax(logits.reshape(b, g, g), dim=-1)`
+  normalizes each row, so the row-marginal is constant and `y` is pinned at 0.5
+  regardless of the peak. Grounding looked dead (`point_within_0.1` = 0) while
+  the argmax was 89% exact. Fixed by softmaxing the flattened grid;
+  `test_point_norm_recovers_both_axes` puts a peak in a corner and asserts both
+  coordinates move. **A grounding number quoted without the argmax-cell metric
+  was measuring this bug, not the model.**
 - **The action label was the last region's kind**, so it was effectively
   arbitrary and task-blind. It now comes from the query verb
   (`_action_from_query`). This corpus only issues `click` queries, so the head

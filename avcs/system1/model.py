@@ -77,11 +77,16 @@ class OneModelOutput:
         return [CATEGORY_NAMES[i] for i in self.category_index().tolist()]
 
     def point_norm(self) -> torch.Tensor:
-        """Soft-argmax of the grounding heatmap as normalized (x, y) in [0, 1]."""
+        """Soft-argmax of the grounding heatmap as normalized (x, y) in [0, 1].
+
+        The softmax is over the *flattened* grid, i.e. one distribution over
+        cells. Normalizing along a single axis (as this did) leaves the other
+        axis' marginal constant, so that coordinate collapses to 0.5 by
+        construction -- a sharp head then reads as a dead one.
+        """
         b, n = self.point_logits.shape
         g = int(round(n ** 0.5))
-        p = F.softmax(self.point_logits.reshape(b, g, g), dim=-1)
-        p = p / p.sum(dim=(1, 2), keepdim=True).clamp_min(1e-9)
+        p = F.softmax(self.point_logits, dim=-1).reshape(b, g, g)
         ys = torch.linspace(0.0, 1.0, g, device=p.device)
         x = (p.sum(dim=1) * ys).sum(dim=-1)
         y = (p.sum(dim=2) * ys).sum(dim=-1)

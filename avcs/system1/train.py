@@ -34,6 +34,7 @@ def evaluate(model: OneModel, loader: DataLoader, device: Optional[torch.device]
     point_err = []
     presence_ok = presence_n = 0
     kind_ok = kind_n = 0
+    exact_hit = near_hit = argmax_n = 0
     total = 0.0
     batches = 0
     for batch in loader:
@@ -58,12 +59,22 @@ def evaluate(model: OneModel, loader: DataLoader, device: Optional[torch.device]
         presence_n += true_present.numel()
 
         if true_present.any():
-            p = out.point_norm()[true_present]
             g = model.config.grid
-            ty = (batch["point_cell"][true_present] // g).float() / (g - 1)
-            tx = (batch["point_cell"][true_present] % g).float() / (g - 1)
+            p = out.point_norm()[true_present]
+            cells = batch["point_cell"][true_present]
+            ty = (cells // g).float() / (g - 1)
+            tx = (cells % g).float() / (g - 1)
             err = torch.sqrt((p[:, 0] - tx) ** 2 + (p[:, 1] - ty) ** 2)
             point_err.extend(err.tolist())
+
+            # Argmax grounding: the discrete hit that actually drives a click.
+            # Robust to peak shape, unlike the soft-argmax centroid.
+            pred = out.point_logits[true_present].argmax(dim=-1)
+            dy = (pred // g - cells // g).abs()
+            dx = (pred % g - cells % g).abs()
+            exact_hit += int((pred == cells).sum())
+            near_hit += int(((dy <= 1) & (dx <= 1)).sum())
+            argmax_n += int(cells.numel())
     model.train()
     point_err.sort()
     return {
@@ -75,6 +86,8 @@ def evaluate(model: OneModel, loader: DataLoader, device: Optional[torch.device]
         "point_within_0.1": (
             sum(1 for e in point_err if e <= 0.1) / len(point_err) if point_err else float("nan")
         ),
+        "point_exact_cell": exact_hit / max(1, argmax_n),
+        "point_within_1cell": near_hit / max(1, argmax_n),
         "n_point_eval": len(point_err),
     }
 
