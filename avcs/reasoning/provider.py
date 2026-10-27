@@ -26,6 +26,11 @@ from avcs.reasoning.contracts import (
 )
 
 
+# Server-sent-event framing used by OpenAI-compatible streaming endpoints.
+_SSE_DATA_PREFIX = "data: "
+_SSE_DONE = "[DONE]"
+
+
 class ReasoningProvider(ABC):
     """Abstract interface for System 2 high-level task planning and reasoning."""
 
@@ -39,6 +44,22 @@ class ReasoningProvider(ABC):
     ) -> System2Decision:
         """Evaluates current observation and history to propose the next machine-readable intent."""
         raise NotImplementedError
+
+    def stream_step(
+        self,
+        task: str,
+        observation: Dict[str, Any],
+        history: List[Dict[str, Any]],
+        step_index: int = 1,
+    ):
+        """Yield the raw reply in fragments as the model produces it.
+
+        The default implementation is not streaming: it calls ``plan_step`` and
+        yields the whole reply as one fragment. Providers that speak SSE override
+        this so the assistant can start talking before the reply is finished.
+        """
+        decision = self.plan_step(task, observation, history, step_index)
+        yield (decision.clarification_prompt or decision.thought or "")
 
     def reset(self) -> None:
         """Resets any internal session state."""
@@ -405,31 +426,114 @@ CRITICAL RULES:
         history: List[Dict[str, Any]],
         step_index: int = 1,
     ) -> System2Decision:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps({
-                        "task": task,
-                        "current_step": step_index,
-                        "observation": observation,
-                        "step_history_summary": [
-                            {"step": h.get("step_index"), "op": h.get("proposed_action", {}).get("op")}
-                            for h in history[-3:]
-                        ],
-                    }, indent=2),
-                },
-            ],
-            "temperature": 0.2,
-        }
+        payload = self._build_payload(task, observation, history, step_index)
 
         t0 = time.perf_counter()
         raw_response = self._post_request(payload)
         self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
 
         return self._parse_llm_json(raw_response, step_index, observation.get("frame_sequence"))
+
+    def _build_payload(self, task, observation, history, step_index, system_prompt=None):
+        """Build the OpenAI-compatible chat payload shared by step and stream.
+
+        ``history`` arrives in one of two shapes. The System 2 control loop passes
+        step records (``step_index`` / ``proposed_action``), which are summarised
+        compactly. The voice brain passes real conversation turns
+        (``{"role", "content"}``); those are forwarded verbatim as chat messages,
+        otherwise the model would answer each turn in isolation and the
+        conversation would have no memory.
+        """
+        convo = [h for h in (history or []) if isinstance(h, dict) and "content" in h]
+        steps = [h for h in (history or []) if isinstance(h, dict) and "content" not in h]
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
+        ]
+        for turn in convo:
+            role = turn.get("role", "user")
+            if role not in ("user", "assistant", "system"):
+                role = "user"
+            messages.append({"role": role, "content": str(turn.get("content", ""))})
+        messages.append({
+            "role": "user",
+            "content": json.dumps({
+                "task": task,
+                "current_step": step_index,
+                "observation": observation,
+                "step_history_summary": [
+                    {"step": h.get("step_index"), "op": h.get("proposed_action", {}).get("op")}
+                    for h in steps[-3:]
+                ],
+            }, indent=2),
+        })
+        return {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+        }
+
+    def stream_step(
+        self,
+        task,
+        observation,
+        history,
+        step_index=1,
+        system_prompt=None,
+    ):
+        """Yield the reply in fragments as the provider produces them (SSE).
+
+        Falls back to a single non-streamed fragment if the endpoint rejects
+        ``stream=true`` or the connection drops mid-stream, so a caller can treat
+        this generator exactly like a chunk iterator without special cases.
+        """
+        import json as _json
+        import urllib.request
+
+        payload = self._build_payload(task, observation, history, step_index, system_prompt)
+        payload["stream"] = True
+        url = f"{self.endpoint.rstrip('/')}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "AVCS-System2-Bridge/1.0",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(
+            url, data=_json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+        )
+        got_any = False
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or not line.startswith(_SSE_DATA_PREFIX):
+                        continue
+                    data = line[len(_SSE_DATA_PREFIX):].strip()
+                    if data == _SSE_DONE:
+                        break
+                    try:
+                        obj = _json.loads(data)
+                    except _json.JSONDecodeError:
+                        continue
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content")
+                    if piece:
+                        got_any = True
+                        yield piece
+        except Exception:
+            if got_any:
+                return
+            decision = self.plan_step(task, observation, history, step_index)
+            yield (decision.clarification_prompt or decision.thought or "")
+            return
+        if not got_any:
+            decision = self.plan_step(task, observation, history, step_index)
+            yield (decision.clarification_prompt or decision.thought or "")
 
     def _post_request(self, payload: Dict[str, Any]) -> str:
         """Executes HTTP request to LLM provider with retry/backoff and token metrics."""

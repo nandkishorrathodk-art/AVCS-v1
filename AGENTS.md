@@ -17,6 +17,9 @@ python3 -m forge.demo --steps 250              # trains, generates, debates
 python3 -m forge.pipeline_demo --steps 200     # full chain, BPE tokenizer
 python3 -m forge.control_demo                  # control kernel sections
 python3 -m forge.vision_demo --seconds 10      # real-time screen vision (synthetic if no display)
+
+python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"   # LLM brain + voice (no mic)
+python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
 ```
 
 `runs/` is gitignored and holds checkpoints. `PYTHONPATH` must point at the
@@ -880,3 +883,86 @@ AMP, `OneCycleLR`). The corpus is written to `/kaggle/temp`, **not**
 `/kaggle/working`, so it does not become part of the kernel output; otherwise a
 13k-frame corpus makes the result slow to fetch.
 
+
+
+## Real-time voice assistant (`avcs/voice/`) — LLM brain + AVCS eyes
+
+The conversational layer. It composes the existing pieces; it does not add a new
+perception model. The chain is:
+
+    ears (STT)  ->  brain (LLM)  ->  mouth (TTS)
+                        ^
+                        +-- eyes (pure-pixel AVCS perception) and gated hands
+
+Run it:
+
+```
+python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"                 # one turn, no mic
+python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
+python3 -m avcs.voice.demo --listen --turns 5 --eyes --ground --grant click
+python3 -m avcs.voice.demo --say "Ji sir, kya kaam karna hai?"             # mouth only
+```
+
+Facts to keep straight:
+
+- **The brain is an LLM, spoken to in Hinglish.** `ConversationBrain` wraps a
+  `ReasoningProvider`; the default `LLMReasoningProvider` reads its endpoint
+  from the environment (`AVCS_LLM_ENDPOINT` / `AVCS_LLM_API_KEY`) and speaks
+  OpenAI-compatible **SSE** (`stream_step`). With no key it falls back to
+  `RuleBrain` and reports `brain=rule_fallback` — an honest degradation, not a
+  silent one. `--llm-endpoint` / `--llm-model` override for a local server.
+- **The ears do not hardcode English.** `FasterWhisperEngine(language=None)`
+  lets Whisper auto-detect, which is what a Hinglish speaker needs (Hindi and
+  English in one utterance); `--stt-language` forces one. A Vosk model is bound
+  to its training language, so for Hindi pick a Hindi Vosk model by path rather
+  than passing a language. Live listening end-points on trailing silence
+  (`record_microphone_until_silence`, sox `silence`) instead of a fixed window,
+  so the reply starts when the user stops; it degrades to a fixed capture when
+  sox is absent.
+- **The mouth is streaming, and it is Hinglish by default.** The reply is split
+  into sentences as the model produces it and each sentence is spoken as soon as
+  it is complete (`Speaker.speak_stream`, `SpeechQueue` on a worker thread), so
+  the first sentence is audible while the rest is still generating.
+  `VoiceProfile.hinglish()` uses the espeak-ng `hi` voice (romanized Hindi read
+  the way the user writes it) at 150 wpm; `--voice-language english` switches.
+- **Eyes are pure pixels, no OCR.** `GroundingPerception` runs the shipped
+  `GoalConditionedGrounder` on the current frame to answer "where is <target>?",
+  and the target text comes from the user's *speech*, never from the screen.
+  `EyePerception` (morphology only) is the lighter option; it produces no
+  grounding evidence, so the gate can never authorize a click with it.
+- **The capability kernel is the only policy and it is fail-closed.** Actuation
+  needs an explicit grant (`--grant click`) and real evidence over the floor.
+  A synthetic/uniform frame is refused as degenerate, and no candidate point is
+  refused as such — both are correct outcomes, not bugs.
+- **`VirtualHand` is the default and moves no cursor.** `--live` is the explicit
+  opt-in to real mouse/keyboard (`avcs_sdk.hand_motor.HandMotor`).
+- **No soundcard in this container.** TTS *synthesis* is verified real (espeak-ng
+  produces a multi-second PCM clip); *playback* cannot complete
+  (`spoken=False`, "playback did not complete"). That is the environment, not
+  the engine. Same for the mic: `arecord` fails with "cannot find card '0'".
+  Use `--silent` and `--script` to exercise the whole loop headless.
+
+Traps:
+
+- `Assistant.converse(utterances=[...])` scripts a whole conversation without a
+  microphone; `initial_utterance=` scripts only the first turn. A turn that
+  finds no scripted utterance and no mic records `kind="silent"` and stops —
+  that trailing silent turn is honest, so filter it when asserting on kinds.
+- The stream protocol uses a sentinel: the model emits its spoken reply, then
+  `<<<ACTION>>>`, then a JSON action. The mouth must never speak the sentinel or
+  the JSON. Tests assert both are absent from every spoken string.
+- `EyePerception.observe` reads hotspot **5-tuples**
+  `(norm_x, norm_y, kind:str, obj_conf, cls_conf)`; the class name is index 2.
+  Reading a different index silently mislabels every element.
+- `LLMReasoningProvider._build_payload` serves **two** history shapes: the voice
+  brain passes real chat turns (`{"role", "content"}`) and the System 2 control
+  loop passes step records (`{"step_index", "proposed_action"}`). The dialogue
+  turns are forwarded verbatim as messages; the step records are summarised.
+  It used to collapse *everything* into a `{step, op}` summary, so the LLM never
+  saw earlier conversation turns and answered each one in isolation. Keep both
+  branches: a fix for one shape must not silently drop the other.
+
+Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
+local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
+and a multi-turn clarify-then-act conversation). Full suite with the voice tests:
+**81 passed, 2 skipped**.

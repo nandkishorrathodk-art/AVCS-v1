@@ -335,7 +335,43 @@ The first prints the home split (94.94% top-1 / 3.72 px median). The second prin
 
 ---
 
-## 7. License & Ownership
+## 7. Real-Time Voice Assistant (LLM brain + AVCS eyes)
+
+`avcs/voice/` is the conversational layer on top of System 1: **ears (STT) ->
+brain (LLM) -> mouth (TTS)**, with the pure-pixel eyes feeding the brain and a
+fail-closed capability gate in front of the hands. The brain is an LLM spoken to
+in Hinglish; its reply is **streamed sentence by sentence** so the first sentence
+is audible while the rest is still being generated. Screen perception stays
+**pure pixel, no OCR** — the target text comes from the user's speech, never
+from the screen.
+
+```bash
+python3 -m pip install torch numpy pillow mss pytest   # core
+sudo apt-get install espeak-ng alsa-utils sox          # mouth + mic (optional)
+
+# One turn, no microphone
+python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"
+
+# The clarify-then-act flow with no microphone: "mujhe X kaam karna hai"
+# -> the assistant asks "kya kaam hai sir?" -> the user names the target
+python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
+
+# Full loop with real eyes, the trained grounder, and a gated click
+python3 -m avcs.voice.demo --script "Save button daba do" --eyes --ground --grant click
+```
+
+The LLM endpoint is read from the environment (`AVCS_LLM_ENDPOINT`,
+`AVCS_LLM_API_KEY`); any OpenAI-compatible SSE server works, including a local
+one (`--llm-endpoint http://127.0.0.1:11434/v1 --llm-model llama3`). With no key
+the assistant degrades to an offline rule brain and says so (`brain=rule_fallback`).
+
+Safety is unchanged: `--grant` is explicit, the mouth never speaks the action
+sentinel or JSON, and actuation defaults to `VirtualHand` (moves no cursor).
+`--live` is the opt-in to real mouse/keyboard.
+
+---
+
+## 8. License & Ownership
 
 All rights, architecture designs, trained candidate checkpoints, and code are the proprietary intellectual property of **Parth Labs**, directed by **Nandkishor Rathod** (Project Owner & Sole Rights Holder).
 Distributed under clean-room provenance and non-cheating verification rules.
