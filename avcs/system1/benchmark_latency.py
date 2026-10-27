@@ -1,0 +1,68 @@
+"""Latency benchmark: can the one model run on a real-time screen clock?
+
+A desktop screen delivers 60-144 frames per second, i.e. 16.7-6.9 ms per frame.
+This measures the full loop step (preprocess + forward + gate) for several
+configs so a real-time target is a measured choice, not a guess.
+
+    python3 -m avcs.system1.benchmark_latency
+
+Quote the *config* with the number: latency scales with the square of the input
+size and roughly linearly with width, so "36 FPS" and "134 FPS" are the same
+architecture at different widths, not different systems.
+"""
+from __future__ import annotations
+
+import argparse
+import time
+
+import torch
+
+from avcs.system1.model import OneModel, OneModelConfig
+
+CONFIGS = (
+    ("shipped 128px w128 z256 g16", OneModelConfig(input_size=128, width=128, latent_dim=256, grid=16)),
+    ("128px w64 z128 g16", OneModelConfig(input_size=128, width=64, latent_dim=128, grid=16)),
+    ("128px w48 z96 g16", OneModelConfig(input_size=128, width=48, latent_dim=96, grid=16)),
+    ("96px  w64 z128 g12", OneModelConfig(input_size=96, width=64, latent_dim=128, grid=12)),
+    ("64px  w64 z128 g8", OneModelConfig(input_size=64, width=64, latent_dim=128, grid=8)),
+    ("64px  w32 z64 g8", OneModelConfig(input_size=64, width=32, latent_dim=64, grid=8)),
+)
+
+
+def bench(cfg: OneModelConfig, reps: int = 40) -> tuple[int, float]:
+    torch.manual_seed(0)
+    model = OneModel(cfg).eval()
+    x = torch.randn(1, 3, cfg.input_size, cfg.input_size)
+    for _ in range(5):
+        with torch.no_grad():
+            model(x, ["click Save button"])
+    times = []
+    for _ in range(reps):
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            model(x, ["click Save button"])
+            times.append(time.perf_counter() - t0)
+    # Minimum, not mean: on a loaded box the mean is scheduler noise.
+    return model.total_parameters, min(times) * 1000.0
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--reps", type=int, default=40)
+    args = ap.parse_args()
+    torch.set_num_threads(args.threads)
+
+    print(f"threads={args.threads}  reps={args.reps}  (minimum over reps)")
+    print(f"{'config':30s} {'params':>10s} {'ms':>7s} {'FPS':>6s} {'60fps':>6s} {'144fps':>7s}")
+    for name, cfg in CONFIGS:
+        params, ms = bench(cfg, args.reps)
+        fps = 1000.0 / ms
+        print(
+            f"{name:30s} {params:>10,} {ms:>7.2f} {fps:>6.0f} "
+            f"{'yes' if ms < 16.7 else 'no':>6s} {'yes' if ms < 6.9 else 'no':>7s}"
+        )
+
+
+if __name__ == "__main__":
+    main()

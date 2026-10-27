@@ -208,3 +208,30 @@ def test_scorecard_in_bbox_metric_runs_on_real_checkpoint():
             in_box += 1
     rate = in_box / len(present)
     assert rate >= 0.85, f"in-bbox rate {rate:.2f} below expectation"
+
+
+def test_loop_latency_meets_a_screen_clock_at_a_realistic_size():
+    """A 128px, width-64 model must beat the 60 FPS screen budget on CPU.
+
+    Timing takes the minimum over runs, not the mean: on a loaded box the mean
+    is dominated by scheduler preemption.
+    """
+    import time
+
+    from avcs.system1.loop import to_tensor
+
+    torch.manual_seed(0)
+    model = OneModel(OneModelConfig(input_size=128, width=64, latent_dim=128, grid=16)).eval()
+    frame = np.random.default_rng(0).integers(0, 255, (128, 128, 3), dtype=np.uint8)
+    x = to_tensor(frame, 128).unsqueeze(0)
+    for _ in range(3):
+        with torch.no_grad():
+            model(x, ["click Save button"])
+    times = []
+    for _ in range(15):
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            model(x, ["click Save button"])
+            times.append(time.perf_counter() - t0)
+    ms = min(times) * 1000.0
+    assert ms < 16.7, f"128px w64 took {ms:.1f} ms, above the 60 FPS budget"

@@ -780,6 +780,27 @@ What the diagnostics say:
 Reproduce the in-bbox number directly with
 `test_scorecard_in_bbox_metric_runs_on_real_checkpoint`.
 
+### Real-time budget (`avcs/system1/benchmark_latency.py`)
+
+A screen supplies a frame every 16.7 ms (60 FPS) to 6.9 ms (144 FPS). Measured
+full forward on 4 CPU threads, minimum over reps:
+
+| config | params | ms | FPS | 60 FPS | 144 FPS |
+|---|---|---|---|---|---|
+| **shipped** 128px w128 z256 g16 | 5,002,985 | 25.6 | 39 | **no** | no |
+| 128px w64 z128 g16 | 1,459,113 | 7.5 | 134 | yes | no |
+| 128px w48 z96 g16 | 940,505 | 4.8 | 210 | yes | yes |
+| 64px w32 z64 g8 | 568,841 | 1.3 | 759 | yes | yes |
+
+**The shipped 5M checkpoint is too slow for 60 FPS (39 FPS).** The same
+architecture at width 64 is 134 FPS -- real-time is a *config* choice, so quote
+the config with the number. Latency scales with the square of the input size and
+roughly linearly with width. `test_loop_latency_meets_a_screen_clock_at_a_realistic_size`
+pins the 128px w64 point under the 60 FPS budget, taking the minimum over runs.
+
+Speed is not the blocker; **transfer is.** A model that runs at 759 FPS but
+collapses cross-generator is not a real-time screen agent.
+
 ### Closed loop (`avcs/system1/loop.py`)
 
 `OneModelLoop` is the glue: `frame -> OneModel -> CapabilityKernel -> Hand ->
