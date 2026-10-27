@@ -735,6 +735,51 @@ generator's layout scores perfectly in-distribution and ~chance on a
 differently-seeded held-out draw. kind_acc 0.92 and presence 0.98 do transfer.
 
 
+### Phase 1 scorecard (`avcs/system1/scorecard.py`)
+
+Runs the shipped checkpoint through the production gate over *every* query in a
+split and reports the numbers that decide the next phase. Zero new model:
+
+```
+python3 -m avcs.system1.scorecard --out benchmarks/results/system1_scorecard.json
+```
+
+Measured (shipped checkpoint, grid 16, n=64 present + 16 absent per split):
+
+| metric | validation | test_heldout |
+|---|---|---|
+| point **inside target bbox** | 63/64 | **59/64** |
+| point exact cell | 49/64 | 56/64 |
+| point within 1 cell | 63/64 | 59/64 |
+| **false-click** (absent passing gate) | **1/16** | **0/16** |
+| presence separable | False | **True** |
+| latency (median) | 26 ms | 26 ms |
+
+What the diagnostics say:
+
+1. **Cell accuracy understates grounding; in-bbox is the honest metric.** A
+   point one cell off can still land inside a large control. On validation the
+   point is inside the target bbox **64/64** while exact-cell is only 49/64 --
+   every "miss" was a boundary offset inside the same control. Report in-bbox,
+   not cell, or the number reads ~20 points low.
+2. **Failures concentrate in `input_field`** on held-out (12/16 in-bbox; button,
+   icon and tab are 16/16). The four wild-misses are all `input_field` queries
+   pointing at the empty/`<none>` area. This is the target for Phase 2, not a
+   generic "grounding is weak".
+3. **Held-out calibration is clean and validation is not.** Held-out present
+   min 0.245 vs absent max 0.045 -- perfectly separable, 0 false-clicks at every
+   floor. Validation has one absent query at 0.782 (a false-click) and a present
+   query at 0.004 (a miss), so `separable=False` there. Trust held-out; a floor
+   of 0.5 is the operating point, and raising it to 0.9 buys nothing on held-out
+   (still 0 false-clicks) while costing a real click.
+4. **Wrong clicks are near, not wild.** Validation: 14 near-miss, 0 wild-miss.
+   Held-out: 3 near, 4 wild (the 4 `input_field` failures). A near-miss is a
+   resolution problem; a wild-miss is a word/kind confusion. They need different
+   fixes, so keep them separate.
+
+Reproduce the in-bbox number directly with
+`test_scorecard_in_bbox_metric_runs_on_real_checkpoint`.
+
 ### Closed loop (`avcs/system1/loop.py`)
 
 `OneModelLoop` is the glue: `frame -> OneModel -> CapabilityKernel -> Hand ->

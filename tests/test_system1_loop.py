@@ -165,3 +165,46 @@ def test_real_model_grounds_close_and_loop_verifies():
     verified = run_sequence(loop, frames, queries, post_frames=post)
     hits = [s for s in verified if s.verified]
     assert len(hits) >= len(frames) - 1, f"expected the response to be seen: {[s.verified for s in verified]}"
+
+
+def test_scorecard_query_kind_parsing():
+    from avcs.system1.scorecard import query_kind
+
+    assert query_kind("click Save button") == "button"
+    assert query_kind("click Notes input field") == "input_field"
+    assert query_kind("click View tab") == "tab"
+    assert query_kind("click icon") == "icon"
+
+
+@pytest.mark.skipif(not CKPT.is_file(), reason="one-model checkpoint not present")
+@pytest.mark.skipif(not CORPUS.is_dir(), reason="clean-room corpus not present")
+def test_scorecard_in_bbox_metric_runs_on_real_checkpoint():
+    """The scorecard's headline metric must be 'point inside the target bbox'.
+
+    Cell-accuracy understates grounding: a point one cell off can still land
+    inside a large control. Pin that the metric is computed and that a correct
+    model scores well on it.
+    """
+    from avcs.system1.scorecard import collect, load_model
+
+    model = load_model(str(CKPT))
+    g = model.config.grid
+    rows = collect(str(CORPUS), "test_heldout")
+    present = [r for r in rows if r["present"] and r["target_box"] is not None]
+    assert present, "no present queries with a target box"
+
+    import torch
+    from avcs.system1.loop import to_tensor
+
+    in_box = 0
+    for r in present:
+        p = CORPUS / "frames" / "test_heldout" / f"{r['frame_id']}.png"
+        frame = np.asarray(Image.open(p).convert("RGB"), dtype=np.uint8)
+        with torch.no_grad():
+            out = model(to_tensor(frame, model.config.input_size).unsqueeze(0), [r["query"]])
+        px, py = out.point_norm()[0].tolist()
+        x0, y0, x1, y1 = r["target_box"]
+        if x0 <= px <= x1 and y0 <= py <= y1:
+            in_box += 1
+    rate = in_box / len(present)
+    assert rate >= 0.85, f"in-bbox rate {rate:.2f} below expectation"
