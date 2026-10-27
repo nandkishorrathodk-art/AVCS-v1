@@ -1003,7 +1003,7 @@ Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
 local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
 a multi-turn clarify-then-act conversation, per-op dispatch, and the autonomous
 loop's finish/refuse/closed-loop paths). Full suite with the voice tests:
-**103 passed, 2 skipped**.
+**104 passed, 2 skipped**.
 
 ### Real-time session: streaming, barge-in, continuous loop (`Assistant.loop`)
 
