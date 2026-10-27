@@ -46,6 +46,21 @@ def test_loop_is_fail_closed_without_a_grant():
     assert "no capability grant" in step.gate_reason
 
 
+def test_presence_floor_feeds_the_loops_own_kernel():
+    # The docstring promises presence_floor becomes the kernel's
+    # min_peak_probability when the loop builds the kernel itself.
+    loop = OneModelLoop(_tiny_model(), image_size=64, presence_floor=0.5)
+    assert loop.kernel.min_peak_probability == 0.5
+
+
+def test_presence_floor_does_not_override_a_caller_supplied_kernel():
+    # An explicit kernel carries its own policy; the loop must not mutate it.
+    kernel = CapabilityKernel(granted_ops=["click"])
+    loop = OneModelLoop(_tiny_model(), kernel=kernel, image_size=64, presence_floor=0.1)
+    assert loop.kernel is kernel
+    assert loop.kernel.min_peak_probability == 0.75
+
+
 def test_granted_click_reaches_the_hand():
     loop = OneModelLoop(
         _tiny_model(),

@@ -78,7 +78,10 @@ def main() -> None:
     args = ap.parse_args()
 
     model = load_model(args.checkpoint)
-    kernel = CapabilityKernel(granted_ops=args.grant or ())
+    kernel = CapabilityKernel(
+        granted_ops=args.grant or (),
+        min_peak_probability=args.presence_floor,
+    )
     hand = VirtualHand(1920, 1080)
     loop = OneModelLoop(model, kernel=kernel, hand=hand, presence_floor=args.presence_floor)
 

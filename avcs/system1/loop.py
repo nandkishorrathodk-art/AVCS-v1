@@ -124,7 +124,10 @@ class OneModelLoop:
         softmax peak saturates at 1.0 for present and absent queries alike
         (measured on the clean-room corpus), so it cannot gate; the presence
         head separates them cleanly (present median 1.00, absent median 0.00).
-        The kernel's `min_peak_probability` is fed this value.
+        When the loop builds its own kernel, this value is also set as that
+        kernel's ``min_peak_probability``. A caller-supplied kernel keeps its
+        own explicit floor, so pass ``presence_floor`` to the kernel directly
+        if you want a non-default policy with your own kernel.
     """
 
     ripple_radius = 0.08  # reused by VisualRippleVerifier's delta math
@@ -139,7 +142,7 @@ class OneModelLoop:
         delta_threshold: float = 0.015,
     ) -> None:
         self.model = model
-        self.kernel = kernel or CapabilityKernel()
+        self.kernel = kernel if kernel is not None else CapabilityKernel(min_peak_probability=presence_floor)
         self.image_size = int(image_size or model.config.input_size)
         self.hand = hand or VirtualHand(1920, 1080)
         self.presence_floor = float(presence_floor)

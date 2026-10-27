@@ -117,7 +117,7 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
     else:
         print("[Safety Mode]: LIVE ACTUATION active! Move cursor to any screen corner to abort.\n")
 
-    eye = EyeStream(api_key=api_key)
+    eye = EyeStream()
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
@@ -280,7 +280,7 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
 
 def run_monitor(seconds: int = 10, api_key: Optional[str] = None) -> None:
     print(f"\n[AVCS Monitor] Streaming live screen commentary for {seconds} seconds...")
-    eye = EyeStream(api_key=api_key)
+    eye = EyeStream()
     fovea = FoveaReader()
     narrator = LiveNarrator()
     motor = HandMotor()
@@ -310,7 +310,7 @@ def run_check(api_key: Optional[str] = None) -> int:
     # 1. System 1 EyeStream & Retina
     weights_loaded = False
     try:
-        eye = EyeStream(api_key=api_key)
+        eye = EyeStream()
         frame = eye.step()
         print(f"[*] System 1 Retina: OK ({frame.raw_frame.shape[1]}x{frame.raw_frame.shape[0]} px, latency={frame.latency_ms:.2f}ms)")
         weights_loaded = bool(eye.weights_loaded)

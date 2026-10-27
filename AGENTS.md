@@ -429,12 +429,12 @@ win is removed Python/torch dispatch overhead, not a changed computation:
 - Test-suite baseline is **dependency-dependent**: install
   `pyproject.toml [dev]` (`pytest pytest-asyncio build wheel`) plus
   `torch numpy psutil cryptography fastapi httpx requests Pillow`. With those
-  present, the full suite is **2 failed / 1194 passed / 16 skipped**. The two
-  failures are pre-existing and environment-dependent: the cleanroom-rights
-  test (the shipped attestation binds manifest hash `abde4338…` but the current
-  manifest hashes to `06c6050d…`, so the fail-closed gate reports a binding
-  mismatch first) and the R3 latency test (passes in isolation, fails under
-  full-suite CPU contention). Always quote the installed deps with the number.
+  present, the suite in this checkout is **109 passed / 2 skipped** (measured).
+  An earlier revision of this file claimed "2 failed / 1194 passed / 16 skipped";
+  that number is **not reproducible here** — the repo collects ~111 pytest tests
+  across `tests/`, and the five `benchmarks/test_*.py` files define **zero**
+  pytest functions (they are `__main__` scripts), so no checkout of this branch
+  can reach 1194. Treat the 1194 figure as stale and re-measure before quoting.
   The Tkinter GUI tests need a display; run them under `Xvfb` and install the
   `tk8.6` system package (`libtk8.6.so`).
 - Tkinter GUI modules (`avcs/gui.py`, `avcs/runtime/live.py`, the m7 harness)
@@ -1003,7 +1003,7 @@ Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
 local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
 a multi-turn clarify-then-act conversation, per-op dispatch, and the autonomous
 loop's finish/refuse/closed-loop paths). Full suite with the voice tests:
-**104 passed, 2 skipped**.
+**109 passed, 2 skipped**.
 
 ### Real-time session: streaming, barge-in, continuous loop (`Assistant.loop`)
 
