@@ -112,7 +112,19 @@ def build_assistant(args) -> Assistant:
         record_audio = _wav_turn_reader(args.audio)
 
     perception = None
-    if args.eyes:
+    if args.lexicon_eyes:
+        # Labelled-control grounding via the AVC lexicon. This is the path that
+        # actually authorizes a click: it returns a real candidate point from a
+        # recognised control label, where the goal grounder's gate collapses.
+        try:
+            from avcs.voice.lexicon_perception import LexiconPerception
+
+            perception = LexiconPerception(source="screen" if not args.synthetic_eyes else "synthetic")
+        except Exception as exc:
+            print(f"warning: lexicon eyes unavailable ({exc}); running without perception.",
+                  file=sys.stderr)
+            perception = None
+    elif args.eyes:
         try:
             if args.ground:
                 from avcs.voice.perception import GroundingPerception
@@ -223,6 +235,8 @@ def main() -> None:
     ap.add_argument("--stt-language", type=str, default=None,
                     help="force a Whisper language (default: auto-detect, best for Hinglish)")
     ap.add_argument("--eyes", action="store_true", help="use real pure-pixel screen perception")
+    ap.add_argument("--lexicon-eyes", action="store_true",
+                    help="ground labelled controls via the AVC lexicon (authorizes clicks)")
     ap.add_argument("--synthetic-eyes", action="store_true", help="force the headless frame buffer")
     ap.add_argument("--ground", action="store_true",
                     help="with --eyes, also run the trained grounder so the gate can pass")

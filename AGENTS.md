@@ -1218,3 +1218,97 @@ It costs ~2 points at home and buys ~7 abroad. Unlike the grounder's photometric
 jitter (a documented negative result — that gap was structural), here the gap
 really is appearance, so appearance jitter closes part of it. This is a
 *positive* result and is recorded as one.
+
+## The GUI model (`avcs/gui/`) — the click step now closes
+
+`python3 -m avcs.gui.run --source desktop --port 12000` serves one page: the
+model's own view of the screen, a conversation, and a gate log.
+
+```
+python3 -m avcs.gui.run --source desktop   # synthetic desktop with real controls
+python3 -m avcs.gui.run --source screen    # the real screen
+python3 -m avcs.gui.run --live             # real actuation (needs xdotool / Windows)
+```
+
+### The bug this fixes: the click step was unreachable
+
+Before this, the assistant could name an action but never carry one out. The
+voice demo showed it plainly:
+
+```
+you   : mujhe save karna hai
+avcs  : Okay sir, click on save.
+action: click target='save'
+gate  : DENY (grounder produced no candidate point)
+```
+
+Two causes, both structural:
+
+1. `GoalConditionedGrounder.predict` returns `action_authorized=False` on every
+   call, and `GroundingPerception` needs that trained grounder, whose
+   confidence gate collapses off its training generator (0.00% gated
+   cross-generator, documented above). So the kernel never received a candidate
+   point and denied for the honest reason.
+2. Nothing connected the lexicon reader to the assistant. `grep` confirmed
+   `avc/lexicon` was referenced only by its own benchmark and tests.
+
+`avcs/voice/lexicon_perception.py` closes both. `LexiconPerception` implements
+the `Perception` protocol (`observe`, `frame`) **and** `grounding_evidence`,
+which `Assistant._act` already looked for. It reads the frame once
+(`LexiconReader.read_regions`), then answers "where is <word>?" with the centre
+of the box that read as that word, at the reader's own confidence.
+
+Measured on the synthetic desktop (900x520, controls `save/close/undo/redo`),
+real kernel, `granted_ops=["click"]`:
+
+| utterance | target | gate | point |
+|---|---|---|---|
+| mujhe save karna hai | save | **ALLOW** | [57, 68] |
+| ab close karo | close | **ALLOW** | [152, 66] |
+| undo karo | undo | **ALLOW** | [250, 66] |
+| upload karo (absent) | upload | DENY | — |
+| print karo (out of vocab) | print | DENY | — |
+
+The two refusals are different and both correct. `upload` is a real vocabulary
+word that is not on screen; `print` is **not in the closed 61-word vocabulary at
+all**, so there is no prototype to match and it is refused rather than snapped to
+the nearest label. Put `upload` on screen and the same utterance is allowed.
+
+### A Hinglish filler bug that made actionable requests look unactionable
+
+`RuleBrain._STOPWORDS` had no temporal or address words, so "ab close karo"
+("close it now") extracted the target **`ab close`** — a phrase no control is
+called. The gate then denied a request that was perfectly clear. Added the
+fillers the user actually speaks (`ab`, `abhi`, `phir`, `jaldi`, `zara`, `sir`,
+`ji`, `plz`, …). After the fix `_extract_target("ab close karo") == "close"`.
+This is the same class of bug as the prompt-echo trap: a token that is not the
+target becoming part of it.
+
+### Honesty rules the GUI keeps
+
+- **No OCR**, unchanged: the boxes come from glyph-shape matching against a
+  closed vocabulary. Nothing transcribes characters.
+- **The boxes are the model's own regions**, from the same `read_regions` call
+  the gate uses — not a hand-drawn overlay. A box on the page is evidence the
+  reader saw that control. A label below the confidence floor is drawn yellow.
+- **A refusal is shown as a refusal**, with the kernel's own reason string.
+- **Virtual by default.** The GUI attaches a `VirtualHand`, which records the
+  coordinate a granted click resolved to and moves no cursor. Real actuation
+  needs `--live` and a hand that actually exists.
+- **Provenance per turn**: `brain_source` (`llm` or `rule_fallback`),
+  `gate_allowed`, `gate_reason`, and per-stage milliseconds, so "real time" is a
+  measurement. On this box the page reports ~34 ms/frame for the full
+  grab+read+paint path at 900x520.
+
+### The synthetic desktop is not a generalisation claim
+
+`avcs/gui/desktop.py` draws controls using words from
+`avc.lexicon.vocab.LABELS`, so the corpus and the reader share a vocabulary **by
+construction**. That is the honest scope: it shows the reader working on
+software this generator draws. It is not evidence about unseen applications, and
+the cross-generator caveats for the grounder apply in spirit here too.
+
+`tests/test_gui_model.py` (25 tests) runs the real reader, kernel, assistant and
+FastAPI app — no mocks, because the thing under test is whether the pieces agree
+with each other, and a mock would assert that they do.
+

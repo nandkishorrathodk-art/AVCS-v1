@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AVCS GUI model</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #262d38;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --deny: #f85149;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .badge {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .badge.ok { color: var(--ok); border-color: #1f4d2b; }
+  .badge.deny { color: var(--deny); border-color: #5c1f1c; }
+  .badge.warn { color: var(--warn); border-color: #4d3d12; }
+  .spacer { flex: 1; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 0;
+    height: calc(100vh - 58px);
+  }
+  #screenPane { padding: 18px; overflow: auto; border-right: 1px solid var(--line); }
+  #screenWrap { position: relative; display: inline-block; }
+  #screen { display: block; max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+  .box {
+    position: absolute; border: 2px solid var(--accent); border-radius: 4px;
+    transition: opacity .15s ease;
+  }
+  .box .tag {
+    position: absolute; top: -21px; left: -2px; font-size: 11px;
+    background: var(--accent); color: #05101f; padding: 1px 6px;
+    border-radius: 4px; white-space: nowrap; font-weight: 600;
+  }
+  .box.low { border-color: var(--warn); }
+  .box.low .tag { background: var(--warn); }
+  aside { display: flex; flex-direction: column; min-height: 0; }
+  #chat { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 92%; padding: 9px 12px; border-radius: 10px; white-space: pre-wrap; }
+  .me { align-self: flex-end; background: #1f6feb; color: #fff; }
+  .ai { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
+  .meta { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+  .meta code { color: var(--text); }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--panel); }
+  input[type=text] {
+    flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0d1117; color: var(--text); font-size: 14px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line);
+    background: #21262d; color: var(--text); cursor: pointer; font-size: 14px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  #labels { padding: 10px 16px; border-top: 1px solid var(--line); }
+  #labels .lbl { font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .6px; }
+  .chip {
+    display: inline-block; font-size: 12px; padding: 3px 9px; margin: 2px 4px 2px 0;
+    border-radius: 999px; background: #1c2430; border: 1px solid var(--line);
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .row button { padding: 6px 10px; font-size: 12px; }
+  #hint { padding: 8px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AVCS GUI model</h1>
+  <span class="badge" id="bSource">source …</span>
+  <span class="badge" id="bBrain">brain …</span>
+  <span class="badge" id="bAct">actuation …</span>
+  <span class="spacer"></span>
+  <span class="badge" id="bFps">— fps</span>
+  <span class="badge" id="bRead">— ms/frame</span>
+</header>
+
+<main>
+  <section id="screenPane">
+    <div id="screenWrap">
+      <img id="screen" alt="the model's view of the screen" />
+      <div id="overlay"></div>
+    </div>
+    <div id="hint">
+      Boxes are the reader's own regions, from the same call the gate uses —
+      not a hand-drawn overlay. Yellow means the label did not clear the
+      confidence floor.
+    </div>
+  </section>
+
+  <aside>
+    <div id="chat"></div>
+    <div id="labels"><div class="lbl">controls read from pixels (no OCR)</div><div id="chips"></div></div>
+    <div class="row">
+      <button data-screen="save,close,undo,redo">toolbar</button>
+      <button data-screen="save,close,print,export">add print/export</button>
+      <button data-screen="ok,cancel,apply">dialog</button>
+      <button data-screen="save,cancel,help">help</button>
+    </div>
+    <form id="f">
+      <input type="text" id="q" autocomplete="off"
+             placeholder="say something, e.g. mujhe save karna hai" />
+      <button type="submit" id="send">Send</button>
+    </form>
+  </aside>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const overlay = $("#overlay");
+const img = $("#screen");
+let lastFrameMs = 0, lastT = performance.now(), fps = 0;
+
+async function loadCaps() {
+  try {
+    const c = await (await fetch("/api/capabilities")).json();
+    $("#bSource").textContent = "source: " + (c.source || "?");
+    const hasKey = c.brain_has_key === true;
+    const b = $("#bBrain");
+    b.textContent = "brain: " + (hasKey ? "LLM" : "rule fallback (no key)");
+    b.className = "badge " + (hasKey ? "ok" : "warn");
+    $("#bAct").textContent = "actuation: " + (c.actuation || "?");
+    $("#bAct").className = "badge " + (c.actuation === "live" ? "deny" : "ok");
+  } catch (e) { /* header is cosmetic; the stream still works */ }
+}
+
+function paint(state) {
+  if (!state.frame_size || !state.frame_size[0]) return;
+  const [w, h] = state.frame_size;
+
+  // Reload the bitmap only when the sequence changes, so a static screen does
+  // not re-download the same PNG four times a second.
+  if (img.dataset.seq !== String(state.seq)) {
+    img.dataset.seq = String(state.seq);
+    img.src = "/api/frame.png?seq=" + state.seq;
+  }
+  img.onload = () => {
+    overlay.style.width = img.clientWidth + "px";
+    overlay.style.height = img.clientHeight + "px";
+    const sx = img.clientWidth / w, sy = img.clientHeight / h;
+    overlay.innerHTML = state.regions.map((r) => {
+      const left = r.x0 * sx, top = r.y0 * sy;
+      const bw = Math.max(2, (r.x1 - r.x0) * sx), bh = Math.max(2, (r.y1 - r.y0) * sy);
+      const cls = r.known ? "box" : "box low";
+      return `<div class="${cls}" style="left:${left}px;top:${top}px;width:${bw}px;height:${bh}px">
+                <span class="tag">${r.label} · ${r.confidence.toFixed(2)}</span>
+              </div>`;
+    }).join("");
+  };
+
+  $("#chips").innerHTML = (state.labels || [])
+    .map((l) => `<span class="chip">${l}</span>`).join("") ||
+    `<span class="chip">none</span>`;
+
+  lastFrameMs = state.frame_ms;
+  $("#bRead").textContent = state.frame_ms.toFixed(1) + " ms/frame";
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.onmessage = (ev) => {
+    try { paint(JSON.parse(ev.data)); } catch (e) {}
+    const now = performance.now();
+    const dt = now - lastT; lastT = now;
+    if (dt > 0) { fps = 0.8 * fps + 0.2 * (1000 / dt); $("#bFps").textContent = fps.toFixed(1) + " fps"; }
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 1500); };
+}
+
+function addMsg(role, text, meta) {
+  const d = document.createElement("div");
+  d.className = "msg " + role;
+  d.textContent = text;
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.innerHTML = meta;
+    d.appendChild(m);
+  }
+  $("#chat").appendChild(d);
+  $("#chat").scrollTop = $("#chat").scrollHeight;
+  return d;
+}
+
+function describeTurn(r) {
+  const gate = r.gate_allowed === true ? "ALLOW" : (r.gate_allowed === false ? "DENY" : "—");
+  const cls = r.gate_allowed === true ? "ok" : (r.gate_allowed === false ? "deny" : "warn");
+  const src = r.brain_source || r.source || "?";
+  return `<span class="badge ${cls}">${gate}</span>
+    action <code>${r.action || "—"}</code>
+    target <code>${r.target || "—"}</code><br>
+    brain <code>${src}</code> · actuation <code>${r.actuation || "none"}</code>
+    · total <code>${(r.total_ms ?? 0).toFixed(0)} ms</code>
+    (brain ${(r.brain_ms ?? 0).toFixed(0)} ms)<br>
+    ${r.gate_reason ? "gate: " + r.gate_reason : ""}
+    ${r.clicked ? "<br>clicked at " + JSON.stringify(r.clicked) : ""}`;
+}
+
+$("#f").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const q = $("#q").value.trim();
+  if (!q) return;
+  $("#q").value = "";
+  addMsg("me", q);
+  $("#send").disabled = true;
+  const pending = addMsg("ai", "…");
+  try {
+    const res = await fetch("/api/turn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: q }),
+    });
+    const r = await res.json();
+    pending.remove();
+    addMsg("ai", r.said || "(no reply)", describeTurn(r));
+  } catch (e) {
+    pending.textContent = "error: " + e;
+  } finally {
+    $("#send").disabled = false;
+    $("#q").focus();
+  }
+});
+
+document.querySelectorAll("[data-screen]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const buttons = btn.dataset.screen.split(",");
+    const res = await fetch("/api/screen", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ buttons }),
+    });
+    const r = await res.json();
+    if (r.error) addMsg("ai", "screen not changed: " + r.error);
+  });
+});
+
+loadCaps();
+connect();
+$("#q").focus();
+</script>
+</body>
+</html>

@@ -669,11 +669,18 @@ class RuleBrain:
 
     # Words that describe the *task*, not the target. Kept bilingual because the
     # user speaks Hinglish; a target named by the user survives these.
+    #
+    # The temporal and address words matter more than they look. "ab close karo"
+    # ("close it now") and "please save karo" name exactly one control, but with
+    # the filler kept the extracted target is "ab close", which no control is
+    # called, so the gate denies a request that was perfectly actionable.
     _STOPWORDS = frozenset({
         "the", "a", "an", "this", "that", "please", "and", "on", "to", "for",
         "into", "in", "me", "mein", "se", "par",
         "mujhe", "mere", "mera", "ko", "karo", "kar", "karna", "hai",
         "do", "dena", "chahiye", "kaam", "kuch", "bhi", "ye", "yeh", "wo",
+        "ab", "abh", "abhi", "phir", "fir", "jaldi", "zara", "thoda", "bas",
+        "sir", "madam", "ji", "please", "plz", "ok", "okay", "haan", "nahi",
     })
 
     _KEY_NAMES = frozenset({
