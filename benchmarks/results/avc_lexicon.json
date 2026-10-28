@@ -1,0 +1,60 @@
+{
+  "stream": "avc.lexicon",
+  "checkpoint": "runs/weights/avc_lexicon.pt",
+  "vocab_size": 61,
+  "train_fonts": [
+    "DejaVuSans-Bold.ttf",
+    "DejaVuSans.ttf"
+  ],
+  "held_out_fonts": [
+    "DejaVuSansMono-Bold.ttf",
+    "DejaVuSansMono-BoldOblique.ttf",
+    "DejaVuSansMono-Oblique.ttf",
+    "DejaVuSansMono.ttf",
+    "DejaVuSerif-Bold.ttf",
+    "DejaVuSerif.ttf"
+  ],
+  "closed_vocab": {
+    "top1": 0.9508,
+    "accepted": 0.7596,
+    "n": 183
+  },
+  "gate_train_fonts": {
+    "correct_median": 0.6218,
+    "correct_p10": 0.5273,
+    "wrong_median": 0.3216,
+    "wrong_p90": 0.3882,
+    "separable": true,
+    "n": 122
+  },
+  "unknown_rejection": {
+    "rejection_rate": 1.0,
+    "n": 24
+  },
+  "cycle_consistency": {
+    "cycle_rate": 1.0,
+    "n": 18
+  },
+  "latency": {
+    "frame": "442x56",
+    "min_ms": 6.699,
+    "median_ms": 6.882
+  },
+  "held_out_font": {
+    "top1": 0.6995,
+    "accepted": 0.2131,
+    "n": 183
+  },
+  "gate_held_out_fonts": {
+    "correct_median": 0.4411,
+    "correct_p10": 0.2294,
+    "wrong_median": 0.3481,
+    "wrong_p90": 0.4426,
+    "separable": false,
+    "n": 366
+  },
+  "held_out_font_unknown_rejection": {
+    "rejection_rate": 1.0,
+    "n": 24
+  }
+}

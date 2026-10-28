@@ -1077,3 +1077,144 @@ still gates every call. Measured on this box (no `xdotool`, no `$DISPLAY`):
 Also: a machine with no capture device makes ALSA dump pages of `confmisc`
 noise; `record_microphone*` now raise `EngineNotAvailable` with one readable line
 ("found no input device") via `_capture_error`.
+
+## AVC Lexicon (`avc/lexicon/`) — reading control labels without OCR
+
+The third stream in `avc/`. Dorsal answers *where* something is interactive,
+ventral answers *what kind of screen* this is; neither can say **what a control
+is called**, and the repo forbids OCR on purpose. Lexicon answers that question
+from pixels, as *shape recognition* rather than transcription:
+
+    pixels -> segment (ink-gap geometry) -> PatchEncoder --\
+                                                            >-- shared space -> name
+    word (from speech or the LLM)        -> TextEncoder  --/
+
+Two branches, one L2-normalised space, joined by symmetric InfoNCE. The vision
+branch never sees a character; the language branch never sees a pixel. Because
+the space is shared and symmetric, both directions fall out of it:
+
+- **inverse** — `read_regions(frame)` / `describe(frame)`: name each control.
+- **forward** — `find(frame, word)`: ground a *spoken* word. The word comes from
+  the user's speech, never from the screen.
+
+Commands:
+
+```
+python3 -m avc.lexicon.train --steps 3000 --per-label 24   # ~60 s on 4 CPU cores
+python3 -m avc.lexicon.demo --synthetic "save cancel username" --find save
+python3 -m avc.lexicon.example_task                        # a multi-step task, gated
+python3 -m benchmarks.benchmark_avc_lexicon                # the honest numbers
+python3 -m pytest tests/test_avc_lexicon.py -q
+```
+
+Measured (shipped `runs/weights/avc_lexicon.pt`, 61-label closed vocabulary,
+183 samples per split):
+
+| metric | training fonts | held-out font |
+|---|---|---|
+| top-1 | **95.1%** | **70.0%** |
+| unknown-word rejection | 100% (24/24) | 100% (24/24) |
+| gate separable (correct p10 > wrong p90) | **no** | **no** |
+
+- 6.7 ms min for a 442x56 frame (six regions), still inside the 16.7 ms screen
+  clock. The 2D grouping roughly doubled this from 2.9 ms; it is the price of
+  handling a whole screen rather than one line.
+- **Fonts are the domain shift here, exactly as generators are for the
+  grounder.** `split_fonts()` trains on the sans faces and holds out serif and
+  mono. A held-out *font* is the real test; the two numbers must be quoted
+  together. 70% is not a generalisation claim — the vocabulary is closed and a
+  word outside it is refused, not guessed.
+- The five remaining training-font failures are all genuine recognition errors
+  (`on`→`no`, `name`→`menu`, `failed`→`install`), each with the correct single
+  box. They are model errors, not segmentation errors — check `nboxes` before
+  blaming the segmenter.
+- **The gate does not transfer, and on a whole screen it does not even separate
+  at home.** On training fonts the correct label's cosine (median 0.62) sits
+  clearly above the best competing label (median 0.33), but the tails overlap
+  (correct p10 0.38 vs wrong p90 0.46), so `separable=False`; on an unseen font
+  the medians themselves collide (correct 0.44 vs wrong 0.35). This is the same
+  structure the goal grounder's presence gate shows across generators, now
+  measured on text. `benchmarks/benchmark_avc_lexicon.py` reports
+  `gate_train_fonts` / `gate_held_out_fonts` for this reason — a top-1 alone
+  hides it. The operating floor is therefore chosen on *accuracy*, not on a
+  clean margin, and `accepted` is reported next to `top1` so the cost is visible.
+- Cycle consistency (find a word, read the region back) is 100% on training
+  fonts; it is the property that makes the space trustworthy, and `check_cycle`
+  measures it rather than asserting it.
+
+### Two bugs this stream hit, both worth remembering
+
+1. **The ink-crop test was wrong, and training hid it.**
+   `arr.max(axis=1) > 0.15` looks like an ink detector but is not one: on a light
+   background (0.96) the background itself clears the threshold, so *every* row
+   counted as ink and nothing was ever cropped. It went unnoticed because the
+   training renderer sizes its canvas tightly to the text, where a failed crop
+   barely matters. It became fatal the moment a caller passed a larger region:
+   the glyph shrank inside its padding and the encoder saw a scale it never
+   trained on. Ink is now detected *relative to the background median*, which
+   works for light-on-dark and dark-on-light alike. Symptom to recognise:
+   training metrics high, end-to-end accuracy near chance.
+2. **Train/serve preprocessing must be one function.**
+   The reader resized with nearest-neighbour while training used bilinear
+   ink-cropping. End-to-end accuracy read 0.08-0.15 while every training metric
+   stayed above 0.95. `avc.lexicon.render.to_patch` is now the single
+   preprocessing entry point and `patch_from_crop` delegates to it — the same
+   reasoning that makes the tokenizer travel with the weights.
+
+Both were found by measuring *end-to-end on a realistic canvas*, not by reading
+the training report. A metric that flatters a broken pipeline is worse than no
+metric.
+
+### Segmentation is 2D: blobs, not column projections (`avc/lexicon/blobs.py`)
+
+The first segmenter projected ink onto the x axis and split on gaps. That works
+for one line of bare words and fails on a real screen, in a way that is easy to
+miss because the training patches are single lines:
+
+- **A bordered button defeats a column projection.** Its frame spans the whole
+  cell, so the gap between two buttons and the gap between two letters look the
+  same, and the projection cannot separate them.
+- **A whole screen has several lines**, and a 1D projection merges them.
+
+The unit that must be separated is a 2D blob, so grouping works on blobs:
+run-length connected components (union-find, numpy-only — a per-pixel union-find
+over a full frame is ~100 ms in Python and does not fit a screen clock), then
+structural grouping.
+
+The order matters and each step was a bug first:
+
+1. **Containers are found before any merging.** A container is a component that
+   is **hollow** (ink fills < 0.25 of its box) **and encloses** another
+   component. Enclosure alone is not enough: the counter of an 'a' encloses a
+   speck, so an enclosure-only rule called letters containers and split words
+   apart. Measured separation: button frames fill 0.06, glyphs fill ≥ 0.34.
+2. **Then glyphs merge into words** on a gap ≤ 0.6 x height, joining both
+   side-by-side blobs ('v' 'a') and stacked ones (the dot of an 'i'). There is
+   **no height guard**: one was there to stop a frame absorbing a label, but it
+   also rejected a 5 px dot against a 32 px stem (ratio 6.4), which is the normal
+   case inside a word. Step 1 makes the guard unnecessary.
+3. **The reader reads the label inside the frame, not the frame.** The region box
+   is the clickable unit; the encoder was trained on word patches, so feeding it
+   a bordered button puts a rectangle where it expects a glyph. `label_box`
+   extracts the ink inside. Symptom before this fix: `save` read as `remove`.
+
+Getting steps 1-2 wrong cost real accuracy and was caught only by re-running the
+benchmark after each change: 0.973 (1D, single line only) → 0.585 (2D, broken
+merge) → 0.863 (merge fixed, height guard still splitting) → **0.951** (guard
+removed). A segmentation change that only *adds* capability can still drop the
+headline number, so measure after every step.
+
+### Augmentation: measured, and it helps
+
+`augment_patch` perturbs slant, stroke weight, aspect and blur — the axes along
+which fonts actually differ. Ablation (3000 steps, same architecture):
+
+| arm | closed_vocab | held-out font (patch) | held-out font (end-to-end) |
+|---|---|---|---|
+| no augmentation | 0.984 | 0.549 | 0.596 |
+| **with augmentation** | 0.967 | **0.721** | **0.642** |
+
+It costs ~2 points at home and buys ~7 abroad. Unlike the grounder's photometric
+jitter (a documented negative result — that gap was structural), here the gap
+really is appearance, so appearance jitter closes part of it. This is a
+*positive* result and is recorded as one.
