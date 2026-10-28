@@ -29,6 +29,7 @@ Fail-closed by construction:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
@@ -36,7 +37,11 @@ import numpy as np
 
 # Mutating operations. Everything not listed is treated as observing and needs
 # no capability grant.
-MUTATING_OPS = frozenset({"click", "double_click", "type", "type_text", "press_key", "scroll"})
+MUTATING_OPS = frozenset({
+    "click", "double_click", "right_click", "drag",
+    "type", "type_text", "press_key", "scroll",
+    "launch_app", "read_file", "list_dir",
+})
 
 # Mutating ops that need a *grounded point*: they aim at a specific place on
 # screen, so a candidate point and a peak above the floor are the evidence that
@@ -45,7 +50,11 @@ MUTATING_OPS = frozenset({"click", "double_click", "type", "type_text", "press_k
 # made the natural "type the path, press Enter" route unreachable: the kernel
 # refused with "grounder produced no candidate point" for an op that never had
 # one. They still need an explicit grant; they just are not grounded.
-POINT_OPS = frozenset({"click", "double_click"})
+#
+# `launch_app` / `read_file` / `list_dir` are also non-grounded: they are named
+# by argument (an app or a path), not located by pixels. Their containment is a
+# separate check (`path_roots` / `allowed_apps`), not the grounding floor.
+POINT_OPS = frozenset({"click", "double_click", "right_click", "drag"})
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,29 @@ class CapabilityDecision:
     op: str = ""
     query: Optional[str] = None
     coordinate: Optional[tuple[float, float]] = None
+    # Structured uncertainty, so a caller can decide *how* to react instead of
+    # pattern-matching the reason string. `confidence` is the grounding peak the
+    # decision was made on (0.0 when there was no candidate point at all), and
+    # `floor` is the threshold it was compared against. A brain that sees
+    # "0.72 vs floor 0.75" knows it was close and could ask; "0.10" means the
+    # target is not there and asking would be pointless.
+    confidence: float = 0.0
+    floor: float = 0.0
+    # How far the evidence is from the decision boundary, in the floor's units.
+    # Negative = refused by this margin, positive = allowed by it.
+    margin: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "reason": self.reason,
+            "op": self.op,
+            "query": self.query,
+            "coordinate": list(self.coordinate) if self.coordinate else None,
+            "confidence": self.confidence,
+            "floor": self.floor,
+            "margin": self.margin,
+        }
 
 
 def frame_is_degenerate(frame: np.ndarray) -> tuple[bool, str]:
@@ -123,6 +155,8 @@ class CapabilityKernel:
         allowed_queries: Optional[Sequence[str]] = None,
         min_peak_probability: float = 0.75,
         allow_degenerate_frames: bool = False,
+        allowed_apps: Optional[Iterable[str]] = None,
+        path_roots: Optional[Iterable[str]] = None,
     ) -> None:
         self.granted_ops = frozenset(o.strip().lower() for o in granted_ops if o)
         self.allowed_queries = (
@@ -130,6 +164,15 @@ class CapabilityKernel:
         )
         self.min_peak_probability = float(min_peak_probability)
         self.allow_degenerate_frames = bool(allow_degenerate_frames)
+        # Argument containment for the non-grounded ops. Absence is denial: with
+        # no allow-list a `launch_app` / `read_file` is refused, so a caller that
+        # forgets to configure the kernel gets no filesystem or process reach.
+        self.allowed_apps = (
+            None if allowed_apps is None else frozenset(a.strip().lower() for a in allowed_apps if a)
+        )
+        self.path_roots = (
+            None if path_roots is None else tuple(os.path.realpath(p) for p in path_roots)
+        )
 
     # ------------------------------------------------------------------ #
     # Policy inspection
@@ -155,8 +198,15 @@ class CapabilityKernel:
         query: Optional[str],
         evidence: GroundingEvidence,
         frame: Optional[np.ndarray] = None,
+        arguments: Optional[dict] = None,
     ) -> CapabilityDecision:
-        """Return whether `op` on `query` may proceed, and why."""
+        """Return whether `op` on `query` may proceed, and why.
+
+        ``arguments`` carries the named operands of a non-grounded op (an app
+        name for ``launch_app``, a path for ``read_file`` / ``list_dir``). They
+        are checked against the allow-lists here, in the same single decision
+        point, so there is no second place a caller can bypass.
+        """
         clean_op = (op or "").strip().lower()
 
         # Observing ops have nothing to actuate and nothing to ground, so they
@@ -171,6 +221,9 @@ class CapabilityKernel:
                 reason=f"observing op '{clean_op}' needs no capability grant",
                 op=clean_op,
                 query=query,
+                confidence=1.0,
+                floor=0.0,
+                margin=1.0,
             )
 
         if not self.is_granted(clean_op):
@@ -179,6 +232,9 @@ class CapabilityKernel:
                 reason=f"no capability grant for mutating op '{clean_op}'",
                 op=clean_op,
                 query=query,
+                confidence=1.0,
+                floor=0.0,
+                margin=1.0,
             )
 
         if clean_op not in POINT_OPS:
@@ -186,11 +242,17 @@ class CapabilityKernel:
             # it acts on the focused widget or globally. The grant above is the
             # whole decision. Requiring a grounded point here refused the natural
             # "type the path, press Enter" route for a reason that does not apply.
+            containment = self._check_arguments(clean_op, arguments or {})
+            if containment is not None:
+                return containment
             return CapabilityDecision(
                 allowed=True,
                 reason=f"capability '{clean_op}' granted (no grounded point needed)",
                 op=clean_op,
                 query=query,
+                confidence=1.0,
+                floor=0.0,
+                margin=1.0,
             )
 
         if self.allowed_queries is not None:
@@ -200,6 +262,9 @@ class CapabilityKernel:
                     reason=f"query '{query}' is not in the capability allow-list",
                     op=clean_op,
                     query=query,
+                    confidence=1.0,
+                    floor=0.0,
+                    margin=1.0,
                 )
 
         if not self.allow_degenerate_frames and frame is not None:
@@ -210,6 +275,9 @@ class CapabilityKernel:
                     reason=f"refusing to ground on a degenerate frame: {why}",
                     op=clean_op,
                     query=query,
+                    confidence=float(evidence.peak_probability),
+                    floor=self.min_peak_probability,
+                    margin=float(evidence.peak_probability) - self.min_peak_probability,
                 )
 
         if evidence.candidate_point_norm is None:
@@ -218,6 +286,9 @@ class CapabilityKernel:
                 reason="grounder produced no candidate point",
                 op=clean_op,
                 query=query,
+                confidence=float(evidence.peak_probability),
+                floor=self.min_peak_probability,
+                margin=float(evidence.peak_probability) - self.min_peak_probability,
             )
 
         peak = float(evidence.peak_probability)
@@ -230,7 +301,37 @@ class CapabilityKernel:
                 ),
                 op=clean_op,
                 query=query,
+                confidence=peak,
+                floor=self.min_peak_probability,
+                margin=peak - self.min_peak_probability,
             )
+
+        if clean_op == "drag":
+            # A drag has *two* ends. The source is grounded above; the destination
+            # must also be a real, above-floor target, or the hand would drop the
+            # item at a guessed point. Both ends are checked in the same decision
+            # point so a drag can never be half-authorized.
+            point2 = (arguments or {}).get("point2")
+            peak2 = float((arguments or {}).get("peak2") or 0.0)
+            if not point2 or len(point2) != 2:
+                return CapabilityDecision(
+                    allowed=False,
+                    reason="drag needs a destination point (no second grounded target)",
+                    op=clean_op, query=query,
+                    confidence=peak, floor=self.min_peak_probability,
+                    margin=peak - self.min_peak_probability,
+                )
+            if peak2 < self.min_peak_probability:
+                return CapabilityDecision(
+                    allowed=False,
+                    reason=(
+                        f"drag destination peak {peak2:.3f} below capability floor "
+                        f"{self.min_peak_probability:.2f} (drop target likely absent)"
+                    ),
+                    op=clean_op, query=query,
+                    confidence=peak2, floor=self.min_peak_probability,
+                    margin=peak2 - self.min_peak_probability,
+                )
 
         return CapabilityDecision(
             allowed=True,
@@ -241,6 +342,66 @@ class CapabilityKernel:
             op=clean_op,
             query=query,
             coordinate=tuple(evidence.candidate_point_norm),
+            confidence=peak,
+            floor=self.min_peak_probability,
+            margin=peak - self.min_peak_probability,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Argument containment for non-grounded ops
+    # ------------------------------------------------------------------ #
+    def _check_arguments(self, op: str, arguments: dict) -> Optional[CapabilityDecision]:
+        """Containment for ops named by argument rather than by pixels.
+
+        Returns a decision when the argument is refused, ``None`` when the op has
+        no argument to check or the argument passes. Absence of an allow-list is
+        denial, so an unconfigured kernel cannot launch or read anything.
+        """
+        if op == "launch_app":
+            app = str(arguments.get("app") or arguments.get("text_input") or "").strip()
+            if not app:
+                return self._arg_refused(op, "no app named", arguments)
+            if self.allowed_apps is None:
+                return self._arg_refused(
+                    op, "no app allow-list configured (launch is off by default)", arguments
+                )
+            if app.lower() not in self.allowed_apps:
+                return self._arg_refused(
+                    op, f"app '{app}' is not in the allow-list {sorted(self.allowed_apps)}", arguments
+                )
+            return None
+
+        if op in ("read_file", "list_dir"):
+            path = str(arguments.get("path") or arguments.get("text_input") or "").strip()
+            if not path:
+                return self._arg_refused(op, "no path given", arguments)
+            if self.path_roots is None:
+                return self._arg_refused(
+                    op, "no path roots configured (file access is off by default)", arguments
+                )
+            try:
+                real = os.path.realpath(os.path.expanduser(path))
+            except (OSError, ValueError) as exc:
+                return self._arg_refused(op, f"unresolvable path: {exc}", arguments)
+            # `realpath` collapses `..` and follows symlinks *before* the prefix
+            # check, so neither traversal nor a symlink out of the root can pass.
+            for root in self.path_roots:
+                if real == root or real.startswith(root + os.sep):
+                    return None
+            return self._arg_refused(
+                op, f"path '{real}' escapes the allowed roots {list(self.path_roots)}", arguments
+            )
+
+        return None
+
+    def _arg_refused(self, op: str, why: str, arguments: dict) -> CapabilityDecision:
+        return CapabilityDecision(
+            allowed=False,
+            reason=f"refusing '{op}': {why}",
+            op=op,
+            confidence=1.0,
+            floor=0.0,
+            margin=1.0,
         )
 
     def authorize_prediction(

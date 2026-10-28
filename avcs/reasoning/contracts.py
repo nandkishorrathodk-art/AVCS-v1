@@ -27,9 +27,14 @@ class ActionOp(str, Enum):
     OBSERVE_TARGET = "observe_target"   # Request focused visual grounding on a specific target
     CLICK = "click"                     # Click grounded target
     DOUBLE_CLICK = "double_click"       # Double click grounded target
+    RIGHT_CLICK = "right_click"         # Secondary (context-menu) click on grounded target
+    DRAG = "drag"                       # Drag from grounded target to a second target
     TYPE_TEXT = "type_text"             # Type text into focused target field
     PRESS_KEY = "press_key"             # Send hotkey or keyboard navigation key
     SCROLL = "scroll"                   # Scroll window up or down
+    LAUNCH_APP = "launch_app"           # Start an application (allow-listed binaries only)
+    READ_FILE = "read_file"             # Read a text file (allow-listed roots only)
+    LIST_DIR = "list_dir"               # List a directory (allow-listed roots only)
     WAIT = "wait"                       # Wait for UI transition or asynchronous completion
     ASK_USER = "ask_user"               # Ask user for clarification or intervention
     STOP = "stop"                       # Stop/abort execution due to unrecoverable condition

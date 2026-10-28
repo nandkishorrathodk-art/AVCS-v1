@@ -44,6 +44,19 @@ def main() -> int:
     ap.add_argument("--no-ears", action="store_true",
                     help="disable server-side speech recognition (the mic button "
                          "then reports that ears are off)")
+    ap.add_argument("--memory", default=None,
+                    help="path to the durable memory file (default ~/.avcs/memory.json)")
+    ap.add_argument("--no-memory", action="store_true",
+                    help="run without durable memory (nothing is written to disk)")
+    ap.add_argument("--trajectory", default=None,
+                    help="path to the JSONL trajectory log (default "
+                         "~/.avcs/trajectories.jsonl)")
+    ap.add_argument("--no-trajectory", action="store_true",
+                    help="do not log trajectories")
+    ap.add_argument("--path-roots", nargs="*", default=None,
+                    help="roots the file ops may read (needed for read_file/list_dir)")
+    ap.add_argument("--allowed-apps", nargs="*", default=None,
+                    help="app binaries launch_app may start (needed for launch_app)")
     args = ap.parse_args()
 
     try:
@@ -63,6 +76,10 @@ def main() -> int:
         mouth=args.mouth,
         ears=not args.no_ears,
         eyes=args.eyes,
+        memory_path=None if args.no_memory else args.memory,
+        trajectory_path=None if args.no_trajectory else args.trajectory,
+        path_roots=args.path_roots,
+        allowed_apps=args.allowed_apps,
     )
     gui = app.state.gui
     caps = gui.capabilities()

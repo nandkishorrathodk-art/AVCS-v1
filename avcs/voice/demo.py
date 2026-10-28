@@ -164,7 +164,12 @@ def build_assistant(args) -> Assistant:
     floor = args.peak_floor
     if floor is None:
         floor = 0.45 if args.lexicon_eyes else 0.75
-    kernel = CapabilityKernel(granted_ops=args.grant or (), min_peak_probability=floor)
+    kernel = CapabilityKernel(
+        granted_ops=args.grant or (),
+        min_peak_probability=floor,
+        path_roots=args.path_roots,
+        allowed_apps=args.allowed_apps,
+    )
     hand = None
     if args.live:
         # Real actuation: use the platform's real hand (Windows HandMotor, or
@@ -189,6 +194,20 @@ def build_assistant(args) -> Assistant:
 
         hand = VirtualHand(width=900, height=520)
 
+    # Durable memory and a reviewable trajectory, so the demo path has the same
+    # assistant the GUI does. `--memory` is explicit because a file on disk is a
+    # side effect; without it a run is amnesiac, which is the honest default.
+    memory = None
+    if args.memory:
+        from avcs.voice.memory import MemoryStore
+
+        memory = MemoryStore(args.memory)
+    trajectory = None
+    if args.trajectory:
+        from avcs.voice.trajectory import TrajectoryLog
+
+        trajectory = TrajectoryLog(args.trajectory)
+
     return Assistant(
         brain=brain,
         speaker=speaker,
@@ -201,6 +220,8 @@ def build_assistant(args) -> Assistant:
         actuation="live" if args.live else "virtual",
         stream=not args.no_stream,
         max_task_steps=args.max_steps,
+        memory=memory,
+        trajectory=trajectory,
     )
 
 
@@ -281,6 +302,18 @@ def main() -> None:
     ap.add_argument("--peak-floor", type=float, default=None,
                     help="kernel grounding floor (default: 0.45 for --lexicon-eyes, else 0.75)")
     ap.add_argument("--live", action="store_true", help="authorize REAL mouse/keyboard actuation")
+    ap.add_argument("--memory", type=str, default=None,
+                    help="path to a JSON memory store (default: off). Facts survive "
+                         "restarts, so the assistant can remember the user between sessions")
+    ap.add_argument("--no-memory", action="store_true",
+                    help="disable the default in-memory store (an amnesiac run)")
+    ap.add_argument("--trajectory", type=str, default=None,
+                    help="append every turn to this JSONL file, for offline review "
+                         "and a future training set (default: off)")
+    ap.add_argument("--path-roots", nargs="*", default=None,
+                    help="filesystem roots read_file/list_dir may touch (default: none)")
+    ap.add_argument("--allowed-apps", nargs="*", default=None,
+                    help="apps launch_app may open (default: none)")
     ap.add_argument("--silent", action="store_true", help="never touch the audio device")
     ap.add_argument("--no-audio", action="store_true", help="alias for --silent")
     ap.add_argument("--json", action="store_true", help="emit the turn records as JSON")

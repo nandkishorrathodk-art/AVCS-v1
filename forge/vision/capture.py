@@ -639,6 +639,75 @@ class ThreadedScreenCapture:
             return self._seq
 
 
+def list_monitors() -> list[dict]:
+    """Enumerate connected monitors as ``[{index, left, top, width, height, primary}]``.
+
+    Returns an empty list when there is no real display or no backend that can
+    enumerate them -- an honest "I cannot see the monitor layout", not a
+    fabricated single-monitor answer. ``mss`` exposes the virtual screen at
+    index 0 and each physical monitor after it, which is the layout this
+    function reports.
+    """
+    try:
+        import mss  # type: ignore
+    except Exception:
+        return []
+    try:
+        with mss.mss() as sct:
+            monitors = list(sct.monitors)
+    except Exception:
+        return []
+    out: list[dict] = []
+    # Index 0 is the union of all monitors, not a physical one, so it is skipped:
+    # reporting it as monitor 1 would double-count the desktop.
+    for idx, mon in enumerate(monitors[1:], start=1):
+        out.append({
+            "index": idx,
+            "left": int(mon.get("left", 0)),
+            "top": int(mon.get("top", 0)),
+            "width": int(mon.get("width", 0)),
+            "height": int(mon.get("height", 0)),
+            "primary": idx == 1,
+        })
+    return out
+
+
+def virtual_screen() -> Optional[dict]:
+    """The bounding box of all monitors, or None when it cannot be read.
+
+    This is what a click coordinate must be interpreted against on a
+    multi-monitor desktop: a point at x=2500 is on the second monitor, and a
+    per-monitor-relative coordinate would silently address the wrong screen.
+    """
+    try:
+        import mss  # type: ignore
+    except Exception:
+        return None
+    try:
+        with mss.mss() as sct:
+            mon = sct.monitors[0]
+    except Exception:
+        return None
+    return {
+        "left": int(mon.get("left", 0)),
+        "top": int(mon.get("top", 0)),
+        "width": int(mon.get("width", 0)),
+        "height": int(mon.get("height", 0)),
+    }
+
+
+def monitor_origin(monitor: int) -> tuple[int, int]:
+    """Absolute (left, top) of monitor ``monitor``, or (0, 0) when unknown.
+
+    A capture backend returns monitor-relative pixels; the hand needs absolute
+    ones. Without this offset a click on monitor 2 lands on monitor 1.
+    """
+    for mon in list_monitors():
+        if mon["index"] == int(monitor):
+            return int(mon["left"]), int(mon["top"])
+    return 0, 0
+
+
 def open_capture(
     prefer_real: bool = True,
     monitor: int = 1,
@@ -686,5 +755,8 @@ __all__ = [
     "Win32FastCapture",
     "Win32GDICaptureAdapter",
     "ThreadedScreenCapture",
+    "list_monitors",
+    "monitor_origin",
     "open_capture",
+    "virtual_screen",
 ]

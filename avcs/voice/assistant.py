@@ -47,11 +47,29 @@ class ScreenObservation:
     active_window: str = ""
     hotspot_count: int = 0
     last_action: str = ""
+    # Structured uncertainty from the last gate decision, if there was one. A
+    # number, not a sentence, so the model can reason about how close it was.
+    last_confidence: Optional[float] = None
+    last_confidence_floor: Optional[float] = None
 
     def to_brain_dict(self, capabilities: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         extra: Dict[str, Any] = {"interactive_elements": self.hotspot_count}
         if self.last_action:
             extra["last_action"] = self.last_action
+        if self.last_confidence is not None:
+            extra["last_confidence"] = self.last_confidence
+            if self.last_confidence_floor is not None:
+                extra["last_confidence_floor"] = self.last_confidence_floor
+                # Spell out the near-miss case, because "0.72 vs 0.75" is easy to
+                # read as a success. A near miss is the one case where asking the
+                # user beats retrying blindly. The epsilon matters: 0.6 - 0.75 is
+                # -0.15000000000000002 in float, which would miss an exact -0.15.
+                margin = self.last_confidence - self.last_confidence_floor
+                if margin < 0 and abs(margin) <= 0.15 + 1e-9:
+                    extra["confidence_note"] = (
+                        "the last target was a near miss: it may be present but "
+                        "unclear. Ask the user rather than clicking a guess."
+                    )
         if capabilities:
             # What the assistant can actually *do* right now. Without this the
             # model does not know whether it holds a click/type grant, so it
@@ -118,6 +136,10 @@ class AssistantTurnRecord:
     clicked: Optional[tuple[int, int]] = None
     verified: Optional[bool] = None
     visual_delta: Optional[float] = None
+    # Structured uncertainty from the gate, so a caller can tell "close call,
+    # worth asking" from "target simply is not there" without parsing the reason.
+    confidence: Optional[float] = None
+    confidence_floor: Optional[float] = None
     spoken: bool = False
     listen_error: Optional[str] = None
     speak_error: Optional[str] = None
@@ -198,6 +220,8 @@ class Assistant:
         max_task_steps: int = 8,
         delta_threshold: float = 0.015,
         step_delay_s: float = 0.25,
+        memory: Any = None,
+        trajectory: Any = None,
     ) -> None:
         self.brain = brain or ConversationBrain()
         self.speaker = speaker or Speaker()
@@ -213,6 +237,15 @@ class Assistant:
         self.step_delay_s = float(step_delay_s)
         self._last_point: Optional[tuple[float, float]] = None
         self._last_outcome: str = ""
+        self._last_confidence: Optional[float] = None
+        self._last_confidence_floor: Optional[float] = None
+        # Durable memory of the user, and a reviewable log of what was done.
+        # Both optional; wiring them to the brain here means a caller cannot
+        # attach a memory store and then forget to let the model read it.
+        self.memory = memory
+        self.trajectory = trajectory
+        if memory is not None and getattr(self.brain, "memory", None) is None:
+            self.brain.memory = memory
         # Streaming makes the assistant talk as the reply is generated. It is on
         # by default because that is the difference between a live conversation
         # and a walkie-talkie; a caller can turn it off for a deterministic demo.
@@ -222,7 +255,7 @@ class Assistant:
     # Capabilities (reported honestly)
     # ------------------------------------------------------------------ #
     def capabilities(self) -> Dict[str, Any]:
-        return {
+        caps = {
             "brain": type(self.brain.provider).__name__,
             "brain_has_key": bool(getattr(self.brain.provider, "api_key", "")),
             "mouth": self.speaker.engine_name,
@@ -232,7 +265,33 @@ class Assistant:
             "eyes": type(self.perception).__name__ if self.perception else "none",
             "mutating_grants": sorted(self.kernel.granted_ops),
             "actuation": self.actuation,
+            "memory": bool(self.memory),
+            "trajectory": bool(self.trajectory),
         }
+        # What the *hand* can do, so a caller can tell "not granted" from "granted
+        # but this hand has no such method". A right-click grant on a hand with
+        # no right_click() is a capability the machine does not have.
+        hand = self.hand
+        if hand is None:
+            caps["hand"] = None
+            caps["hand_ops"] = []
+        else:
+            caps["hand"] = getattr(hand, "name", type(hand).__name__)
+            caps["hand_ops"] = sorted(
+                op for op in MUTATING_OPS if callable(getattr(hand, op, None))
+                or (op == "type" and callable(getattr(hand, "type_text", None)))
+            )
+        # Report the monitor layout only when it can be read; an empty list means
+        # "unknown", not "one monitor".
+        try:
+            from forge.vision.capture import list_monitors
+
+            monitors = list_monitors()
+        except Exception:
+            monitors = []
+        caps["monitors"] = monitors
+        caps["monitor_count"] = len(monitors)
+        return caps
 
     # ------------------------------------------------------------------ #
     # One turn
@@ -273,6 +332,9 @@ class Assistant:
         # Tell the brain what the previous step did, so an autonomous run can
         # decide the next move instead of blindly repeating itself.
         obs.last_action = self._last_outcome
+        # And the gate's confidence number, so "denied" is not a flat verdict.
+        obs.last_confidence = self._last_confidence
+        obs.last_confidence_floor = self._last_confidence_floor
         return obs
 
     def step(
@@ -319,9 +381,97 @@ class Assistant:
             _t1 = time.perf_counter()
             self._execute(turn_result, record)
             record.act_ms = round((time.perf_counter() - _t1) * 1000.0, 1)
+        # Persist what the model asked to remember, and log the step for review.
+        self._apply_memories(turn_result)
+        self._log_episode(record)
+        self._log_trajectory(record, obs)
         # Close the loop for whatever the next step decides.
         self._last_outcome = self._outcome_summary(record)
         return record
+
+    def _apply_memories(self, turn_result: AssistantTurn) -> int:
+        """Store the facts the model proposed. Returns how many were stored.
+
+        The model proposes; the assistant writes. An empty or malformed proposal
+        is dropped rather than stored, so a hallucinated note cannot become a
+        permanent false belief about the user.
+        """
+        proposals = getattr(turn_result, "memories", None) or []
+        if not proposals or self.memory is None:
+            return 0
+        stored = 0
+        for item in proposals:
+            try:
+                key, value = item
+            except Exception:
+                continue
+            if self.memory.remember(str(key), str(value)) is not None:
+                stored += 1
+        if stored:
+            self.memory.save()
+        return stored
+
+    def _log_episode(self, record: AssistantTurnRecord) -> None:
+        """Add this turn to durable memory as an episode, and persist it.
+
+        Only turns that did something (an action, or a spoken reply the user
+        needs continuity from) are kept; a silent turn is not an episode.
+        """
+        if self.memory is None:
+            return
+        if not record.heard and not record.action:
+            return
+        try:
+            from avcs.voice.memory import Episode
+
+            self.memory.record_episode(
+                Episode(
+                    heard=record.heard,
+                    said=record.said,
+                    kind=record.kind,
+                    action=record.action,
+                    target=record.target,
+                    performed=record.performed,
+                    gate_allowed=record.gate_allowed,
+                    verified=record.verified,
+                    detail=record.detail,
+                )
+            )
+            self.memory.save()
+        except Exception:
+            pass
+
+    def _log_trajectory(self, record: AssistantTurnRecord, obs: Optional[ScreenObservation]) -> None:
+        if self.trajectory is None:
+            return
+        from avcs.voice.trajectory import TrajectoryStep
+
+        try:
+            self.trajectory.record(
+                TrajectoryStep(
+                    turn=record.turn,
+                    heard=record.heard,
+                    said=record.said,
+                    kind=record.kind,
+                    source=record.source,
+                    observation=(obs.description if obs is not None else ""),
+                    action=record.action,
+                    target=record.target,
+                    gate_allowed=record.gate_allowed,
+                    gate_reason=record.gate_reason,
+                    confidence=record.confidence,
+                    confidence_floor=record.confidence_floor,
+                    performed=record.performed,
+                    actuation=record.actuation,
+                    detail=record.detail,
+                    verified=record.verified,
+                    visual_delta=record.visual_delta,
+                    capabilities=self.capabilities(),
+                )
+            )
+        except Exception:
+            # A logging failure must never break a live turn.
+            pass
 
     def run_task(self, user_text: str, max_steps: Optional[int] = None,
                  on_record: Optional[Callable[[AssistantTurnRecord], None]] = None,
@@ -418,15 +568,28 @@ class Assistant:
 
     @staticmethod
     def _outcome_summary(record: AssistantTurnRecord) -> str:
-        """One line describing what the last step actually did, for the brain."""
+        """One line describing what the last step actually did, for the brain.
+
+        Carries the gate's confidence *number*, not just a verdict, so the model
+        can tell a near miss (0.72 against a 0.75 floor -- worth asking about)
+        from a clear absence (0.10 -- the target is simply not on screen). Without
+        the number both read as the same flat "denied".
+        """
         if not record.action:
             return ""
         if not record.gate_allowed:
+            conf, floor = record.confidence, record.confidence_floor
+            if conf is not None and floor:
+                return (
+                    f"last step {record.action} was REFUSED by the gate "
+                    f"(grounding confidence {conf:.2f} vs floor {floor:.2f}; {record.gate_reason})"
+                )
             return f"last step {record.action} was REFUSED by the capability gate ({record.gate_reason})"
         if not record.performed:
             return f"last step {record.action} did not reach the hand ({record.gate_reason})"
         change = "screen changed" if record.verified else "no visible change"
-        return f"last step performed {record.action}, {change}"
+        conf = f", confidence {record.confidence:.2f}" if record.confidence is not None else ""
+        return f"last step performed {record.action}{conf}, {change}"
 
     def _ask_brain(
         self,
@@ -444,6 +607,27 @@ class Assistant:
             "can_type": bool(self.hand is not None and self.kernel.is_granted("type_text")),
             "can_press_key": bool(self.hand is not None and self.kernel.is_granted("press_key")),
             "can_scroll": bool(self.hand is not None and self.kernel.is_granted("scroll")),
+            "can_right_click": bool(
+                self.hand is not None and self.kernel.is_granted("right_click")
+                and (callable(getattr(self.hand, "right_click", None))
+                     or callable(getattr(self.hand, "secondary_click", None)))
+            ),
+            "can_drag": bool(
+                self.hand is not None and self.kernel.is_granted("drag")
+                and callable(getattr(self.hand, "drag", None))
+            ),
+            "can_launch": bool(
+                self.hand is not None and self.kernel.is_granted("launch_app")
+                and callable(getattr(self.hand, "launch_app", None))
+            ),
+            "can_read_files": bool(
+                self.hand is not None and self.kernel.is_granted("read_file")
+                and callable(getattr(self.hand, "read_file", None))
+            ),
+            "can_list_dirs": bool(
+                self.hand is not None and self.kernel.is_granted("list_dir")
+                and callable(getattr(self.hand, "list_dir", None))
+            ),
             "can_see_targets": callable(getattr(self.perception, "grounding_evidence", None)),
         }
         brain_obs = obs.to_brain_dict(capabilities)
@@ -530,11 +714,42 @@ class Assistant:
                 authorized=False,
                 active_query=intent.target_description,
             )
+
+        # Named operands for the non-grounded ops. The kernel contains these, so
+        # a path or an app name never reaches a hand unvalidated.
+        parameters = intent.parameters or {}
+        path_arg = str(parameters.get("path") or intent.text_input or "").strip() or None
+        app_arg = str(parameters.get("app") or intent.text_input or "").strip() or None
+        arguments: dict = {"app": app_arg, "path": path_arg}
+
+        # A drag has two ends; both must be grounded, so resolve the destination
+        # here and hand it to the same kernel decision.
+        point2 = None
+        if op == "drag":
+            dest_query = str(parameters.get("target2") or parameters.get("destination") or "").strip()
+            if callable(producer) and dest_query:
+                try:
+                    dest_ev = producer(dest_query)
+                except Exception:
+                    dest_ev = None
+                if dest_ev is not None:
+                    point2 = dest_ev.candidate_point_norm
+                    arguments["point2"] = point2
+                    arguments["peak2"] = float(dest_ev.peak_probability)
+            if "point2" not in arguments:
+                arguments["point2"] = point2
+                arguments["peak2"] = 0.0
+
         decision = self.kernel.authorize(
-            op=op, query=intent.target_description, evidence=evidence, frame=frame
+            op=op, query=intent.target_description, evidence=evidence,
+            frame=frame, arguments=arguments,
         )
         record.gate_allowed = decision.allowed
         record.gate_reason = decision.reason
+        record.confidence = float(decision.confidence)
+        record.confidence_floor = float(decision.floor)
+        self._last_confidence = record.confidence
+        self._last_confidence_floor = record.confidence_floor
 
         if not decision.allowed:
             record.actuation = "none"
@@ -553,9 +768,12 @@ class Assistant:
             self.hand,
             op,
             point=point,
+            point2=point2,
             text=intent.text_input,
             key_name=intent.key_name,
             scroll_delta=intent.scroll_delta,
+            app_name=app_arg,
+            path_arg=path_arg,
         )
         record.performed = result.performed
         record.detail = result.detail

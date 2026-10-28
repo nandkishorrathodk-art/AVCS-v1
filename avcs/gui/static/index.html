@@ -130,6 +130,7 @@
   <span class="badge" id="bEars">ears …</span>
   <span class="badge" id="bEyes">eyes …</span>
   <span class="badge" id="bHand">hand: —</span>
+  <span class="badge" id="bMemory">memory: —</span>
   <span class="spacer"></span>
   <span class="badge" id="bFps">— fps</span>
   <span class="badge" id="bRead">— ms/frame</span>
@@ -203,6 +204,15 @@ async function loadCaps() {
     } else {
       bh.textContent = "hand: virtual (moves no cursor)";
       bh.className = "badge warn";
+    }
+
+    // Memory is a capability the assistant either has or does not. Saying "on"
+    // when no store is attached would be the same overclaim as a fake hand.
+    const bm = $("#bMemory");
+    if (bm) {
+      const on = c.memory === true;
+      bm.textContent = "memory: " + (on ? "on" : "off");
+      bm.className = "badge " + (on ? "ok" : "warn");
     }
   } catch (e) { /* cosmetic */ }
 }

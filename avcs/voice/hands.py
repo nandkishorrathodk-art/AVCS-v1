@@ -14,8 +14,14 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Callable, Optional
 
-# Ops that change machine state; everything else is free to observe.
-MUTATING_OPS = frozenset({"click", "double_click", "type", "type_text", "press_key", "scroll"})
+# Ops that change machine state; everything else is free to observe. Kept in
+# sync with `avcs.control.capability.MUTATING_OPS`; a test asserts the two sets
+# are equal, so a new op cannot be added to one and forgotten in the other.
+MUTATING_OPS = frozenset({
+    "click", "double_click", "right_click", "drag",
+    "type", "type_text", "press_key", "scroll",
+    "launch_app", "read_file", "list_dir",
+})
 
 
 @dataclasses.dataclass
@@ -111,19 +117,82 @@ def _press_hotkey(hand: Any, key_name: str) -> Optional[bool]:
             keybd(vk, 0, KEYEVENTF_KEYUP, 0)
 
 
+def _right_click_via(hand: Any, point_px: tuple[float, float]) -> Optional[bool]:
+    """Issue a secondary click through a hand that has no ``right_click()``.
+
+    Returns ``True``/``False`` when a secondary click was attempted, and ``None``
+    when this hand has no way to do one. ``None`` is distinct from ``False`` on
+    purpose: "cannot right-click" must not be reported as "clicked and failed",
+    and it must never degrade into a primary click.
+    """
+    for name in ("secondary_click", "context_click", "click_right"):
+        fn = _resolve(hand, name)
+        if fn is not None:
+            try:
+                return fn(point_px[0], point_px[1]) is not False
+            except TypeError:
+                return fn(point_px) is not False
+    click = _resolve(hand, "click")
+    if click is None:
+        return None
+    # `click(x, y, button=2)`-style signatures, if the hand offers one.
+    try:
+        return click(point_px[0], point_px[1], button="right") is not False
+    except TypeError:
+        pass
+    try:
+        return click(point_px[0], point_px[1], button=2) is not False
+    except TypeError:
+        pass
+    return None
+
+
 def dispatch(
     hand: Any,
     op: str,
     *,
     point: Optional[tuple[float, float]] = None,
+    point2: Optional[tuple[float, float]] = None,
     text: Optional[str] = None,
     key_name: Optional[str] = None,
     scroll_delta: Optional[int] = None,
+    app_name: Optional[str] = None,
+    path_arg: Optional[str] = None,
 ) -> HandAction:
     """Run the hand method the op names. Fail closed on anything else."""
     clean = (op or "").strip().lower()
     if clean == "type":
         clean = "type_text"
+
+    if clean == "right_click":
+        if point is None:
+            return HandAction(clean, False, error="no grounded coordinate for right_click")
+        # A secondary click is a *different* action, so it must never be issued
+        # through the primary-click path. Prefer a dedicated method, then a
+        # button-aware click, and fail closed rather than silently clicking
+        # primary -- a context menu that never opens is better than an
+        # accidental left-click on the wrong thing.
+        if callable(getattr(hand, "get_screen_size", None)):
+            arg = _normalized_to_pixels(hand, point)
+        else:
+            arg = (float(point[0]), float(point[1]))
+        right = _resolve(hand, "right_click")
+        if right is not None:
+            try:
+                ret = right(arg[0], arg[1])
+            except TypeError:
+                ret = right(*point)
+        else:
+            ret = _right_click_via(hand, arg)
+            if ret is None:
+                return HandAction(
+                    clean, False,
+                    error="hand cannot issue a secondary click (no right_click())",
+                )
+        if ret is False:
+            return HandAction(clean, False, error="hand reported the click did not happen")
+        px = ret if isinstance(ret, tuple) else arg
+        return HandAction(clean, True, point=px)
 
     if clean in ("click", "double_click"):
         if point is None:
@@ -148,6 +217,63 @@ def dispatch(
             return HandAction(clean, False, error="hand reported the click did not happen")
         px = ret if isinstance(ret, tuple) else arg
         return HandAction(clean, True, point=px)
+
+    if clean == "drag":
+        if point is None:
+            return HandAction(clean, False, error="no grounded coordinate for drag source")
+        dest = point2
+        if dest is None:
+            return HandAction(clean, False, error="no grounded coordinate for drag destination")
+        fn = _resolve(hand, "drag")
+        if fn is None:
+            return HandAction(clean, False, error="hand has no drag()")
+        if callable(getattr(hand, "get_screen_size", None)):
+            src_px = _normalized_to_pixels(hand, point)
+            dst_px = _normalized_to_pixels(hand, dest)
+        else:
+            src_px = (float(point[0]), float(point[1]))
+            dst_px = (float(dest[0]), float(dest[1]))
+        try:
+            ok = fn(src_px[0], src_px[1], dst_px[0], dst_px[1])
+        except TypeError:
+            ok = fn(src_px, dst_px)
+        if ok is False:
+            return HandAction(clean, False, error="hand reported the drag did not happen")
+        return HandAction(clean, True, point=dst_px, detail=f"{src_px}->{dst_px}")
+
+    if clean == "launch_app":
+        app = (app_name or text or "").strip()
+        if not app:
+            return HandAction(clean, False, error="no app named to launch")
+        fn = _resolve(hand, "launch_app")
+        if fn is None:
+            return HandAction(clean, False, error="hand has no launch_app()")
+        try:
+            ok = fn(app)
+        except TypeError:
+            ok = fn(app, [])
+        if ok is False:
+            return HandAction(clean, False, error=f"could not launch '{app}'")
+        return HandAction(clean, True, detail=f"launched {app}")
+
+    if clean in ("read_file", "list_dir"):
+        path = (path_arg or text or "").strip()
+        if not path:
+            return HandAction(clean, False, error="no path given")
+        fn = _resolve(hand, "read_file" if clean == "read_file" else "list_dir")
+        if fn is None:
+            return HandAction(clean, False, error=f"hand has no {clean}()")
+        try:
+            result = fn(path)
+        except Exception as exc:
+            return HandAction(clean, False, error=f"{clean} failed: {exc}")
+        if result is None or result is False:
+            return HandAction(clean, False, error=f"{clean} returned nothing")
+        text_out = str(result)
+        # Keep the payload bounded: a huge file must not be pasted into a prompt.
+        if len(text_out) > 4000:
+            text_out = text_out[:4000] + "\n...[truncated]"
+        return HandAction(clean, True, detail=text_out)
 
     if clean == "type_text":
         if not text:

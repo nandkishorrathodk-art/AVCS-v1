@@ -56,6 +56,10 @@ class AssistantTurn:
     thought: str = ""                             # private reasoning, not spoken
     source: str = "llm"                           # "llm" | "rule_fallback"
     confidence: float = 1.0
+    # Facts the model asked to persist about the user, as ``[[key, value], ...]``.
+    # The model may propose a memory but may not write one: the assistant applies
+    # it, so an unparseable or empty proposal is dropped instead of stored.
+    memories: Optional[List[Any]] = None
 
     @property
     def wants_action(self) -> bool:
@@ -69,6 +73,7 @@ class AssistantTurn:
             "source": self.source,
             "confidence": self.confidence,
             "intent": self.intent.to_dict() if self.intent else None,
+            "memories": list(self.memories or []),
         }
 
 
@@ -126,13 +131,18 @@ Reply with ONE JSON object and nothing else:
   "thought": "one line of private reasoning",
   "kind": "reply" | "ask" | "act" | "finish" | "stop",
   "action": {
-    "op": "observe_target" | "click" | "double_click" | "type_text" | "press_key" | "scroll" | "wait" | "ask_user" | "stop" | "finish",
+    "op": "observe_target" | "click" | "double_click" | "right_click" | "drag" | "type_text" | "press_key" | "scroll" | "launch_app" | "read_file" | "list_dir" | "wait" | "ask_user" | "stop" | "finish",
     "target_description": "natural-language target, e.g. 'Save button', or null",
     "text_input": "text to type, or null",
     "key_name": "key name, or null"
-  }
+  },
+  "memory": [{"key": "short label", "value": "durable fact about the user"}]
 }
 `action` is required when kind is "act". For "reply"/"ask" you may omit it or set op to "wait".
+
+The observation may carry "memory" (facts you stored about this user, prefixed
+"stored note:") and "recent_actions" (what you already did). Honour both. Add to
+the "memory" list only durable facts the user stated; never screen contents.
 """
 
 
@@ -200,13 +210,22 @@ After your spoken sentences, output the sentinel on its own line, then ONE JSON 
 <<<ACTION>>>
 {{"kind": "reply"|"ask"|"act"|"finish"|"stop",
   "thought": "one line of private reasoning",
-  "action": {{"op": "observe_target"|"click"|"double_click"|"type_text"|"press_key"|"scroll"|"wait"|"ask_user"|"stop"|"finish",
+  "action": {{"op": "observe_target"|"click"|"double_click"|"right_click"|"drag"|"type_text"|"press_key"|"scroll"|"launch_app"|"read_file"|"list_dir"|"wait"|"ask_user"|"stop"|"finish",
              "target_description": "natural-language target or null",
              "text_input": "text to type or null",
-             "key_name": "key name or null"}}}}
+             "key_name": "key name or null",
+             "parameters": {{"path": "path for read_file/list_dir, or null",
+                             "app": "app name for launch_app, or null",
+                             "destination": "second point's target for drag, or null",
+                             "target2": "alias for destination, or null"}}}},
+  "memory": [{{"key": "short label", "value": "durable fact about the user"}}]}}
 
 Rules: never output coordinates. `action` is required when kind is "act". Use kind "ask"
 when you need clarification, "reply" for plain conversation, "finish" when the task is done.
+A named operand is REQUIRED for the ops that need one: `read_file` and `list_dir` need
+`parameters.path`, `launch_app` needs `parameters.app`, and `drag` needs a source target
+(`target_description`) plus `parameters.destination`. An op emitted without its operand is
+refused, so ask the user for it instead of emitting an incomplete action.
 
 The observation includes a "capabilities" object: what you can actually do right now
 (can_click, can_type, can_press_key, can_scroll, can_see_targets). Obey it:
@@ -225,7 +244,42 @@ The observation includes a "capabilities" object: what you can actually do right
   Ctrl+S"), emit that action in the same reply. Never say you are doing something
   and then stop without doing it: an announced action that is not emitted is a
   false statement about the world.
+
+Memory: the observation may contain "memory" (facts you stored about this user,
+each prefixed "stored note:") and "recent_actions" (what you already did). Use
+them: do not ask again for something a stored note already answers, and do not
+repeat a step recent_actions says already failed. To remember something durable
+about the user, add it to the "memory" list in your JSON. Only store facts the
+user stated or clearly implied ("user's name is Rahul", "user prefers Hinglish").
+Never store screen contents, guesses, or anything the user did not say.
 """
+
+
+def _parse_memories(raw: Any) -> List[Any]:
+    """Normalise a model's ``memory`` proposal into ``[[key, value], ...]``.
+
+    The model is asked for a list of ``{"key", "value"}`` objects but reliably
+    drifts into a bare string, a list of strings, or a dict. Accept all of them
+    and drop anything empty, because a memory the user did not mean is worse
+    than no memory at all.
+    """
+    out: List[Any] = []
+    if raw is None:
+        return out
+    items = raw if isinstance(raw, list) else [raw]
+    for item in items:
+        if isinstance(item, dict):
+            key = str(item.get("key") or item.get("name") or "").strip()
+            value = str(item.get("value") or item.get("text") or "").strip()
+            if value:
+                out.append([key, value])
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            key, value = str(item[0] or "").strip(), str(item[1] or "").strip()
+            if value:
+                out.append([key, value])
+        elif isinstance(item, str) and item.strip():
+            out.append(["", item.strip()])
+    return out
 
 
 def _split_stream_reply(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
@@ -270,6 +324,8 @@ class ConversationBrain:
         task: str = "",
         history_limit: int = 12,
         language: str = "hinglish",
+        memory: Any = None,
+        memory_recall_limit: int = 4,
     ) -> None:
         if provider is None:
             from avcs.reasoning.provider import LLMReasoningProvider
@@ -281,6 +337,10 @@ class ConversationBrain:
         self.history: List[ConversationTurn] = []
         self.step_index = 0
         self._rule: Optional[RuleBrain] = None
+        # Durable memory: facts about the user, plus what the assistant has
+        # already done. Optional, so a test or a one-shot run can stay amnesiac.
+        self.memory = memory
+        self.memory_recall_limit = int(memory_recall_limit)
         self.language = (language or "hinglish").lower()
         if self.language not in _LANGUAGE_INSTRUCTIONS:
             raise ValueError(
@@ -289,6 +349,47 @@ class ConversationBrain:
 
     def _system_prompt(self, base: str) -> str:
         return base + _LANGUAGE_INSTRUCTIONS[self.language]
+
+    # ------------------------------------------------------------------ #
+    # Durable memory
+    # ------------------------------------------------------------------ #
+    def _recall(self, query: str) -> List[str]:
+        """Stored facts relevant to this request, as labelled note strings.
+
+        Labelled ``stored note:`` so the model treats them as its own memory and
+        not as a fresh observation of the screen -- conflating the two would let
+        a stale note override what is actually in front of it.
+        """
+        if self.memory is None or not query:
+            return []
+        try:
+            facts = self.memory.recall(query, limit=self.memory_recall_limit)
+        except Exception:
+            return []
+        return [f"stored note: {f.as_text()}" for f in facts]
+
+    def _inject_memory(self, observation: Dict[str, Any], user_text: str) -> Dict[str, Any]:
+        """Attach recalled facts and a recap of recent actions to the observation."""
+        recalled = self._recall(user_text)
+        if recalled:
+            observation["memory"] = recalled
+        if self.memory is not None:
+            recap = ""
+            try:
+                recap = self.memory.episode_summary(3)
+            except Exception:
+                recap = ""
+            if recap:
+                # What the assistant already did, so it does not repeat a step
+                # that just failed and can refer back to it naturally.
+                observation["recent_actions"] = recap
+        return observation
+
+    def remember(self, key: str, value: str) -> bool:
+        """Persist one fact about the user. False when there is no store."""
+        if self.memory is None:
+            return False
+        return self.memory.remember(key, value) is not None
 
     # ------------------------------------------------------------------ #
     # History
@@ -380,6 +481,7 @@ class ConversationBrain:
         observation = observation or self.build_observation()
         observation = dict(observation)
         observation.setdefault("task", self.task)
+        observation = self._inject_memory(observation, user_text)
 
         if self._offline():
             turn = self._fallback(user_text, observation, reason="no API key configured")
@@ -471,6 +573,7 @@ class ConversationBrain:
         observation = observation or self.build_observation()
         observation = dict(observation)
         observation.setdefault("task", self.task)
+        observation = self._inject_memory(observation, user_text)
 
         speak = on_speech if on_speech is not None else (lambda _s: None)
 
@@ -576,6 +679,14 @@ class ConversationBrain:
             ).strip().lower()
             if kind == TurnKind.ACT and op_name:
                 try:
+                    # Named operands live in `parameters` so they travel with the
+                    # intent without widening the coordinate-free contract.
+                    params = action.get("parameters")
+                    if not isinstance(params, dict):
+                        params = {}
+                    for key in ("path", "app", "target2", "destination"):
+                        if action.get(key) is not None:
+                            params.setdefault(key, action.get(key))
                     intent = ActionIntent.create(
                         step_index=self.step_index,
                         op=op_name,
@@ -584,7 +695,9 @@ class ConversationBrain:
                         ),
                         text_input=action.get("text_input") or action.get("text"),
                         key_name=action.get("key_name") or action.get("key"),
+                        scroll_delta=action.get("scroll_delta") or action.get("delta"),
                         rationale=thought,
+                        parameters=params or None,
                     )
                 except Exception:
                     intent = None
@@ -592,8 +705,10 @@ class ConversationBrain:
                 kind = TurnKind.REPLY
 
         speech = spoken_text.strip() or self._DEFAULT_SPEECH[kind]
+        memories = _parse_memories(action_obj.get("memory") if isinstance(action_obj, dict) else None)
         return AssistantTurn(
-            kind=kind, speech=speech, intent=intent, thought=thought, source="llm"
+            kind=kind, speech=speech, intent=intent, thought=thought, source="llm",
+            memories=memories,
         )
 
     def _turn_from_decision(self, decision: System2Decision) -> AssistantTurn:
@@ -648,6 +763,27 @@ _ACTION_WORDS = {
     "save": ("save",),
     "search": ("search", "dhundo", "find"),
     "scroll": ("scroll", "neeche", "upar"),
+    "read_file": ("padho", "padh", "read", "dikhao file", "file dikhao"),
+    "list_dir": ("list", "listdir", "list_dir", "files dikhao", "folder dikhao"),
+    "launch_app": ("launch", "kholo app", "chalu karo", "start karo", "open app"),
+    "right_click": ("right click", "right-click", "secondary click"),
+    "drag": ("drag", "kheencho", "khinch", "move karo"),
+}
+
+# Ops that need a named operand in `parameters`, and the key it belongs under.
+_OPERAND_OPS = {
+    "read_file": "path",
+    "list_dir": "path",
+    "launch_app": "app",
+}
+
+# Words that name the action itself, so they are stripped from the target. Kept
+# deliberately tiny: only "right"/"secondary" qualify, because "right click" puts
+# the action word *inside* the target span ("save button right click"). The verb
+# itself ("click", "drag", "scroll") must stay, or the object-verb split loses the
+# token that marks where the target ends.
+_OP_PHRASE_WORDS = {
+    "right_click": ("right", "secondary"),
 }
 
 
@@ -696,7 +832,30 @@ class RuleBrain:
                 source="rule_fallback",
             )
 
-        target = self._extract_target(text)
+        # Operand ops come before target extraction: "read_file" needs a path,
+        # not an on-screen target, so the target-not-found branch would wrongly
+        # refuse an actionable request. The operand is the thing the user named.
+        operand_op = self._operand_op(low)
+        if operand_op is not None:
+            return self._operand_turn(text, low, operand_op)
+
+        op = ActionOp.CLICK
+        if any(w in low for w in _ACTION_WORDS["right_click"]):
+            op = ActionOp.RIGHT_CLICK
+        elif any(w in low for w in _ACTION_WORDS["drag"]):
+            op = ActionOp.DRAG
+        elif any(w in low for w in _ACTION_WORDS["type"]):
+            op = ActionOp.TYPE_TEXT
+        elif any(w in low for w in _ACTION_WORDS["scroll"]):
+            op = ActionOp.SCROLL
+        elif self._looks_like_keypress(low):
+            op = ActionOp.PRESS_KEY
+
+        # The op's own words are not part of the target: "save button par right
+        # click karo" names the control "save button", and keeping "right" in the
+        # target makes the gate look for a control called "save button right",
+        # which is on no screen. Strip them before extraction, not after.
+        target = self._extract_target(text, strip=_OP_PHRASE_WORDS.get(op, ()))
         if target is None:
             return AssistantTurn(
                 kind=TurnKind.ASK,
@@ -712,14 +871,6 @@ class RuleBrain:
                 thought="Target reported absent by perception.",
                 source="rule_fallback",
             )
-
-        op = ActionOp.CLICK
-        if any(w in low for w in _ACTION_WORDS["type"]):
-            op = ActionOp.TYPE_TEXT
-        elif any(w in low for w in _ACTION_WORDS["scroll"]):
-            op = ActionOp.SCROLL
-        elif self._looks_like_keypress(low):
-            op = ActionOp.PRESS_KEY
 
         text_input, key_name = self._extract_payload(text, op)
         intent = ActionIntent.create(
@@ -760,6 +911,74 @@ class RuleBrain:
         "enter", "return", "tab", "esc", "escape", "space", "backspace",
         "delete", "up", "down", "left", "right", "home", "end",
     })
+
+    @classmethod
+    def _operand_op(cls, low: str) -> Optional[str]:
+        """Which operand op (if any) this utterance asks for.
+
+        Order matters: "open app" must win over the generic "open" click verb,
+        and "files dikhao" over the plain "dikhao". The longest, most specific
+        phrase is matched first so a generic verb cannot shadow it.
+        """
+        # Most specific first.
+        for op in ("list_dir", "read_file", "launch_app"):
+            if any(w in low for w in _ACTION_WORDS[op]):
+                return op
+        return None
+
+    def _operand_turn(self, text: str, low: str, op_name: str) -> AssistantTurn:
+        """Build a read_file/list_dir/launch_app turn, or ask for the operand."""
+        key = _OPERAND_OPS[op_name]
+        operand = self._extract_operand(text, key)
+        if not operand:
+            # Fail to a question, not to a broken action: an op without its
+            # operand is refused by the gate, and the user's request was clear.
+            what = "path" if key == "path" else "app name"
+            return AssistantTurn(
+                kind=TurnKind.ASK,
+                speech=f"Ji sir, kaun sa {what}?",
+                thought=f"{op_name} needs a {what}.",
+                source="rule_fallback",
+            )
+        intent = ActionIntent.create(
+            step_index=self.step_index,
+            op=op_name,
+            parameters={key: operand},
+            expected_outcome=f"{op_name} {operand}",
+            rationale="Offline keyword match.",
+        )
+        self._acted = True
+        return AssistantTurn(
+            kind=TurnKind.ACT,
+            speech=f"Okay sir, {op_name.replace('_', ' ')} {operand}.",
+            intent=intent,
+            thought="Keyword match produced an operand action.",
+            source="rule_fallback",
+        )
+
+    @classmethod
+    def _extract_operand(cls, text: str, key: str) -> Optional[str]:
+        """Pull a path or app name out of the utterance.
+
+        Quoted text wins; otherwise the last token that looks like a path (has a
+        slash or a dot-extension) or a single bare word after the verb.
+        """
+        quoted = re.search(r"['\"]([^'\"]{1,200})['\"]", text)
+        if quoted:
+            return quoted.group(1).strip()
+        for tok in re.findall(r"[^\s,]+", text):
+            if "/" in tok or re.search(r"\.[a-z0-9]{1,5}$", tok, re.I):
+                return tok.strip(" .!?,\"'")
+        # A bare name after the verb ("launch firefox").
+        m = re.search(
+            r"\b(?:launch|start|chalu|kholo|padho|padh|read|list|dikhao)\b\s+([a-z0-9_.\-/]+)",
+            text, re.I,
+        )
+        if m:
+            candidate = m.group(1).strip().lower()
+            if candidate not in cls._STOPWORDS and candidate not in _ACTION_WORDS["launch_app"]:
+                return candidate
+        return None
 
     @classmethod
     def _looks_like_keypress(cls, low: str) -> bool:
@@ -815,7 +1034,7 @@ class RuleBrain:
         return " ".join(kept[:4]) if kept else None
 
     @classmethod
-    def _extract_target(cls, text: str) -> Optional[str]:
+    def _extract_target(cls, text: str, strip: tuple = ()) -> Optional[str]:
         """Find the target phrase, in either word order the user actually speaks.
 
         English is verb-object ("click the Save button" -> take what follows).
@@ -823,12 +1042,16 @@ class RuleBrain:
         following the verb there leaves only the sentence tail and produces a
         one-letter target. Trailing auxiliaries are dropped first so the real
         action verb is the one left in verb position.
+
+        ``strip`` holds the action's own words (e.g. "right", "click" for a
+        right-click), which name the action, not the target.
         """
         quoted = re.search(r"['\"]([^'\"]{1,40})['\"]", text)
         if quoted:
             return quoted.group(1).strip()
 
-        tokens = re.findall(r"[A-Za-z0-9_-]+", text)
+        drop = {w.lower() for w in strip}
+        tokens = [t for t in re.findall(r"[A-Za-z0-9_-]+", text) if t.lower() not in drop]
         while len(tokens) > 1 and tokens[-1].lower() in cls._AUX_TAIL:
             tokens.pop()
         if not tokens:

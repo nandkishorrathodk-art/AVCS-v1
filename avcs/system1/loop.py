@@ -17,6 +17,7 @@ it for a real OS motor to actually click; the gate in front of it is unchanged.
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Optional, Protocol, Sequence
 
 import numpy as np
@@ -45,6 +46,8 @@ class VirtualHand:
     assistant's dispatcher can drive either one without special cases.
     """
 
+    name = "virtual-hand"
+
     def __init__(self, width: int, height: int) -> None:
         self.width = width
         self.height = height
@@ -52,6 +55,9 @@ class VirtualHand:
         self.typed: list[str] = []
         self.keys: list[str] = []
         self.scrolls: list[int] = []
+        self.right_clicks: list[tuple[int, int]] = []
+        self.drags: list[tuple[tuple[int, int], tuple[int, int]]] = []
+        self.launched: list[str] = []
 
     def _to_px(self, x_norm: float, y_norm: float) -> tuple[int, int]:
         return (
@@ -65,6 +71,44 @@ class VirtualHand:
         if double:
             self.clicks.append(px)
         return px
+
+    def right_click(self, x_norm: float, y_norm: float) -> tuple[int, int]:
+        px = self._to_px(x_norm, y_norm)
+        self.right_clicks.append(px)
+        return px
+
+    def drag(
+        self, x1_norm: float, y1_norm: float, x2_norm: float, y2_norm: float
+    ) -> tuple[int, int]:
+        src = self._to_px(x1_norm, y1_norm)
+        dst = self._to_px(x2_norm, y2_norm)
+        self.drags.append((src, dst))
+        return dst
+
+    def launch_app(self, app_name: str) -> bool:
+        # Virtual: records the request, starts nothing. The honest default for a
+        # demo is that no process is spawned on the host.
+        self.launched.append(str(app_name))
+        return True
+
+    def read_file(self, path: str) -> Optional[str]:
+        """Virtual hands still read real files, but only under the given root.
+
+        A demo that pretends to read a file it never opened would make the
+        perception story unfalsifiable, so this one actually opens the file --
+        the containment lives in the kernel's path_roots, not here.
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except Exception:
+            return None
+
+    def list_dir(self, path: str) -> Optional[str]:
+        try:
+            return "\n".join(sorted(os.listdir(path)))
+        except Exception:
+            return None
 
     def type_text(self, text: str, typing_speed_cps: float = 25.0) -> bool:
         self.typed.append(text)

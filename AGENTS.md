@@ -1630,3 +1630,111 @@ connected. `xdotool getmouselocation` between two short-lived `xdotool`
 invocations reports the default centre because the server resets with no client;
 keep a window alive (as the test does) or chain the move and the read in one
 `xdotool` call.
+
+## Persistent memory, trajectory log, and the wider op set (`avcs/voice/`)
+
+The assistant now carries durable memory, logs every turn, and can do more than
+click. All of it is opt-in and all of it is fail-closed.
+
+### Memory (`avcs/voice/memory.py`)
+
+A JSON store of **facts** (user-scoped, keyed, LRU-evicted at `max_facts`) and
+**episodes** (what happened, in order). `Assistant` attaches it to the brain
+(`brain.memory`) so the model reads recalled facts in its observation and can
+write new ones back (`memory` list in its JSON). A fact survives a server
+restart; an episode is a log entry, not a belief.
+
+- `--memory PATH` on `avcs.voice.demo`, or `--memory` on `avcs.gui.run`.
+  Without it a run is amnesiac, which is the honest default: a file on disk is a
+  side effect.
+- Measured across a restart: "mera naam Rahul hai yaad rakho" stored
+  `User ka naam Rahul hai`; a fresh process answered "Aapka naam Rahul hai" and
+  the header reported `memory: True`. The GUI badge reports `on`/`off` from the
+  real capability, never a cosmetic "on".
+
+### Trajectory (`avcs/voice/trajectory.py`)
+
+Append-only JSONL, one row per turn, with the three booleans kept separate
+(`gate_allowed`, `performed`, `verified`) so a reviewer can tell "allowed but the
+hand failed" from "refused". It is **write-only on purpose**: no `train`/
+`learn`/`finetune` method exists, and a test asserts that. Rejection-sampling
+self-training was tried in this repo and made the model worse; a log that quietly
+feeds the model would repeat that mistake.
+
+### The wider op set
+
+`right_click`, `drag`, `launch_app`, `read_file` and `list_dir` are now real
+across the contract (`ActionOp`), the kernel, the hands (`VirtualHand`,
+`XdotoolHand`, `HandMotor`) and the dispatcher.
+
+- **`right_click` must never degrade into a primary click.** The dispatcher's
+  branch was falling through to `click`, so a right-click that could not be
+  performed silently became a left click -- a destructive wrong action. It now
+  returns a `HandAction` that reports "did not perform", and a test pins it.
+- **`launch_app` / `read_file` / `list_dir` are allow-listed.** The kernel takes
+  `allowed_apps` and `path_roots`; with neither, the ops are off. `read_file`
+  refuses a path outside the roots *and* refuses traversal even when the string
+  has a valid prefix (`/root_evil` vs `/root`), resolved via `os.path.realpath`.
+  Measured live: `read_file /tmp/avcs_gui_test/note.txt` ->
+  `gate_reason: "capability 'read_file' granted (no grounded point needed)"`,
+  `performed: True`, `detail: "hello avcs\n"` -- the real file contents.
+- **`drag` needs both ends grounded.** A half-authorized drag (source grounded,
+  no destination) is refused, and a low-confidence destination is refused.
+
+### Two prompt/parser bugs the wider ops exposed
+
+1. **The LLM never emitted an operand, because the schema did not have one.**
+   `CONVERSATION_SYSTEM_PROMPT`'s JSON example listed only
+   `target_description` / `text_input` / `key_name`, so `read_file` came back
+   with no path and the gate refused it for the honest reason "no path given".
+   The parser already accepted `parameters` (and `path`/`app`/`destination` at
+   the top level), but a schema the model is never shown is a schema it cannot
+   fill. The example now includes `parameters` and states which op requires
+   which operand, so an op emitted without one is a model error, not a
+   prompt gap.
+2. **`RuleBrain` could not reach the new ops at all**, so the offline path was
+   untestable for them. It now extracts a path/app, asks for the operand when it
+   is missing ("padho" -> "Ji sir, kaun sa path?"), and handles `right_click`
+   and `drag`.
+   - Operand ops are matched **before** target extraction: `read_file` needs a
+     path, not an on-screen target, so the target-not-found branch would wrongly
+     refuse an actionable request.
+   - The action's own word is stripped from the target: "save button par right
+     click karo" names the control **`save button`**, but the object-verb split
+     kept "right" and the gate looked for a control called "save button right",
+     which is on no screen. Only `right`/`secondary` are stripped -- the verb
+     itself must stay, or the split loses the token that marks where the target
+     ends. `test_rule_brain_does_not_put_the_action_word_in_the_target` pins it.
+     This is the same class as the `ab close` filler bug above.
+
+### The GUI hand in virtual mode (a claim that was false, now true)
+
+AGENTS.md previously stated "the GUI attaches a `VirtualHand` by default". It
+did **not**: the non-live branch left `self.hand = None`, so `can_click` was
+False and *every* granted click was refused with "no hand attached" -- the same
+symptom as a broken grounder, for an unrelated reason. The GUI now attaches
+`VirtualHand(width, height)` in virtual mode (size from `_frame_size()`,
+defaulting to 900x520), and `capabilities()` reports `actuation: virtual` with
+`hand: virtual-hand`. Virtual mode maps the normalized point into real pixels via
+the frame size, so the recorded coordinate is comparable to a live one.
+`test_gui_virtual_mode_attaches_a_hand_so_a_grant_is_reachable` pins it.
+
+Measured live through the GUI on the synthetic desktop
+(`--source demo --eyes lexicon --grant click right_click drag read_file`):
+
+| utterance | op | gate | performed |
+|---|---|---|---|
+| mujhe save karna hai | click | ALLOW | True |
+| save button par right click karo | right_click | ALLOW | True |
+| save button ko close button par drag karo | drag | ALLOW | True |
+| note.txt file padho (no path) | read_file | DENY (no path given) | False |
+| read_file /tmp/avcs_gui_test/note.txt | read_file | ALLOW | True |
+| list_dir /tmp/avcs_gui_test | list_dir | ALLOW (LLM did not emit it) | False |
+
+The last row is honest and worth keeping: the model *described* listing the
+directory but emitted no action, so nothing ran. A narration without an emitted
+action is a false statement about the world, and the page shows no `ALLOW` for
+it. The system prompt already forbids it; the trajectory log is where that
+failure becomes measurable.
+
+Full suite after these changes: **271 passed, 2 skipped**.

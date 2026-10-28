@@ -242,10 +242,27 @@ def test_stream_emits_a_description(client):
 
 
 def test_assistant_is_virtual_by_default():
+    """Virtual mode must still attach a hand, or a grant is unreachable.
+
+    The bug this pins: with `hand is None`, `can_click` was reported False, the
+    model answered "I have no capability", and a granted click was refused with
+    "no hand attached". A virtual hand is inert but real, so the gate decides and
+    the record says which actuation happened.
+    """
     gui = GuiApp(source="demo", mouth="silent", ears=False)
     assert gui.live is False
     assert gui.capabilities()["actuation"] == "virtual"
-    assert gui.hand is None
+    assert gui.hand is not None
+    assert gui.capabilities()["hand"] == "virtual-hand"
+
+
+def test_a_granted_click_is_reachable_in_virtual_mode():
+    gui = GuiApp(source="demo", mouth="silent", ears=False,
+                 grants=["click"], eyes="lexicon")
+    caps = gui.capabilities()
+    assert caps["can_act"] is True
+    # The hand advertises the op, so the brain is told it can click.
+    assert "click" in caps["hand_ops"]
 
 
 def test_live_without_a_hand_reports_unavailable_not_live(monkeypatch):

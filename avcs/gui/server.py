@@ -40,6 +40,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 from avcs.control.capability import MUTATING_OPS, CapabilityKernel
+from avcs.system1.loop import VirtualHand
 from avcs.voice.assistant import Assistant
 from avcs.voice.brain import ConversationBrain
 from avcs.voice.scene_perception import ScenePerception
@@ -221,6 +222,10 @@ class GuiApp:
         ears: bool = True,
         eyes: str = "scene",
         brain: Optional[ConversationBrain] = None,
+        memory_path: Optional[str] = None,
+        trajectory_path: Optional[str] = None,
+        path_roots: Optional[List[str]] = None,
+        allowed_apps: Optional[List[str]] = None,
     ) -> None:
         self.eyes = eyes
         self.screen = ScreenModel(
@@ -232,11 +237,26 @@ class GuiApp:
         # scene eyes would be a capability with no evidence behind it.
         default_grants: List[str] = [] if eyes != "lexicon" else ["click"]
         self.grants = list(grants if grants is not None else default_grants)
+        # `path_roots` / `allowed_apps` are the containment for the file and
+        # launch ops. They default to off (None), so a caller that grants
+        # `read_file` without naming a root still cannot read anything.
+        self.path_roots = list(path_roots) if path_roots else None
+        self.allowed_apps = list(allowed_apps) if allowed_apps else None
         self.kernel = CapabilityKernel(
             granted_ops=self.grants,
             min_peak_probability=float(min_peak),
+            path_roots=self.path_roots,
+            allowed_apps=self.allowed_apps,
         )
-        self.brain = brain if brain is not None else ConversationBrain()
+        # Durable memory and a reviewable trajectory log. Both are on by default
+        # for the GUI (that is what makes it an assistant rather than a demo),
+        # and both are plain files under ~/.avcs that the user can delete.
+        from avcs.voice.memory import MemoryStore, default_memory_path
+        from avcs.voice.trajectory import TrajectoryLog
+
+        self.memory = MemoryStore(memory_path or default_memory_path())
+        self.trajectory = TrajectoryLog(trajectory_path or TrajectoryLog.default_path())
+        self.brain = brain if brain is not None else ConversationBrain(memory=self.memory)
         self.mouth_engine = self._build_mouth(mouth)
         self.speaker = Speaker(engine=self.mouth_engine, profile=VoiceProfile.hinglish())
         self.stt = default_stt_engine() if ears else None
@@ -246,6 +266,16 @@ class GuiApp:
             from avcs.voice.actuators import default_hand
 
             self.hand = default_hand()
+        elif not self.live:
+            # Virtual mode always has a hand, granted or not. Without one the
+            # grant is unreachable: `_ask_brain` reports `can_click=False`, the
+            # model says "I have no capability", and a granted action is refused
+            # with "no hand attached" -- the wrong reason, since the real reason
+            # is the missing grant. The virtual hand records the coordinate a
+            # granted action resolved to and moves no cursor: the gate is the
+            # production kernel, only the side effect is inert.
+            width, height = self._frame_size()
+            self.hand = VirtualHand(width, height)
         self.assistant = Assistant(
             brain=self.brain,
             speaker=self.speaker,
@@ -253,8 +283,16 @@ class GuiApp:
             kernel=self.kernel,
             hand=self.hand,
             # Say "live" only when a real hand exists, so a turn record does not
-            # claim real actuation on a machine that cannot actuate.
-            actuation="live" if self.hand is not None else "virtual",
+            # claim real actuation on a machine that cannot actuate. A virtual
+            # hand is a granted capability with an inert side effect, so it is
+            # reported as "virtual".
+            actuation=(
+                "live"
+                if (self.hand is not None and not isinstance(self.hand, VirtualHand))
+                else "virtual"
+            ),
+            memory=self.memory,
+            trajectory=self.trajectory,
         )
         self.transcript: List[Dict[str, Any]] = []
 
@@ -279,22 +317,45 @@ class GuiApp:
             return BrowserEngine()
         return BrowserEngine()
 
+    def _frame_size(self) -> tuple[int, int]:
+        """The frame size, so the virtual hand maps normalized points into pixels.
+
+        The frame itself is the source of truth: a demo canvas and a real desktop
+        both report their size here, so the hand's pixel space always matches the
+        screen the gate grounded against.
+        """
+        try:
+            frame = self.perception.frame()
+            if frame is not None:
+                h, w = frame.shape[:2]
+                return int(w), int(h)
+        except Exception:
+            pass
+        return (900, 520)
+
     def capabilities(self) -> Dict[str, Any]:
         caps = self.assistant.capabilities()
         # Report what can *actually* actuate, not what was requested. `--live`
         # with no hand (no xdotool/X11 on Linux, no user32 on Windows) must not
         # read as "live": every op would be refused, and the page would be
         # claiming a capability the machine does not have.
-        if self.hand is not None:
+        if self.hand is not None and not isinstance(self.hand, VirtualHand):
             caps["actuation"] = "live"
         elif self.live:
             caps["actuation"] = "live-unavailable"
         else:
-            caps["actuation"] = "virtual"
+            # A virtual hand is a real, granted capability whose side effect is
+            # inert. Calling that "live" would overclaim; calling it "none" would
+            # underclaim. The record says which, per turn, via `actuation`.
+            caps["actuation"] = "virtual" if self.hand is not None else "none"
         caps["hand"] = getattr(self.hand, "name", None)
         caps["mouth"] = self.speaker.engine_name
         caps["eyes"] = type(self.screen.perception).__name__
         caps["can_act"] = bool(self.grants)
+        caps["memory"] = bool(self.memory)
+        caps["trajectory"] = bool(self.trajectory)
+        caps["path_roots"] = self.path_roots
+        caps["allowed_apps"] = self.allowed_apps
         return caps
 
     def _entry(self, record, total_ms: float) -> Dict[str, Any]:
@@ -380,10 +441,16 @@ def build_app(
     ears: bool = True,
     eyes: str = "scene",
     brain: Optional[ConversationBrain] = None,
+    memory_path: Optional[str] = None,
+    trajectory_path: Optional[str] = None,
+    path_roots: Optional[List[str]] = None,
+    allowed_apps: Optional[List[str]] = None,
 ) -> FastAPI:
     gui = GuiApp(
         source=source, category=category, grants=grants, checkpoint=checkpoint,
         live=live, mouth=mouth, ears=ears, eyes=eyes, brain=brain,
+        memory_path=memory_path, trajectory_path=trajectory_path,
+        path_roots=path_roots, allowed_apps=allowed_apps,
     )
     app = FastAPI(title="AVCS assistant")
     app.state.gui = gui
@@ -398,6 +465,32 @@ def build_app(
     @app.get("/api/capabilities")
     def capabilities() -> JSONResponse:
         return JSONResponse(gui.capabilities())
+
+    @app.get("/api/memory")
+    def memory() -> JSONResponse:
+        """What the assistant remembers about this user, so it is inspectable.
+
+        Memory the user cannot see is a privacy problem, so it is a plain
+        endpoint over a plain file.
+        """
+        return JSONResponse({
+            **gui.memory.to_dict(),
+            "trajectory": gui.trajectory.summary(),
+        })
+
+    class _ForgetRequest(BaseModel):
+        key: str
+
+    @app.post("/api/memory/forget")
+    def forget(req: _ForgetRequest) -> JSONResponse:
+        removed = gui.memory.forget(req.key)
+        if removed:
+            gui.memory.save()
+        return JSONResponse({"forgotten": removed, "key": req.key})
+
+    @app.get("/api/trajectory")
+    def trajectory() -> JSONResponse:
+        return JSONResponse(gui.trajectory.summary())
 
     @app.get("/api/frame")
     def frame() -> JSONResponse:

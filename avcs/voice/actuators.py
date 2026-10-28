@@ -94,6 +94,64 @@ class XdotoolHand:
     def double_click(self, x: int, y: int) -> bool:
         return self.click(x, y, double=True)
 
+    def right_click(self, x: int, y: int) -> bool:
+        # Button 3 is the secondary button in X11; button 1 is primary.
+        self._run(["mousemove", str(int(x)), str(int(y))])
+        return self._run(["click", "3"])
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int) -> bool:
+        """Press at (x1,y1), move to (x2,y2), release. Fails closed on any step."""
+        if not self._run(["mousemove", str(int(x1)), str(int(y1))]):
+            return False
+        if not self._run(["mousedown", "1"]):
+            return False
+        if not self._run(["mousemove", str(int(x2)), str(int(y2))]):
+            self._run(["mouseup", "1"])
+            return False
+        return self._run(["mouseup", "1"])
+
+    def launch_app(self, app_name: str) -> bool:
+        """Start an allow-listed application, detached from this process.
+
+        The binary is looked up with ``shutil.which`` and run without a shell, so
+        a name containing shell metacharacters cannot become a command. The
+        allow-list lives in the kernel; this layer only refuses an empty name.
+        """
+        name = (app_name or "").strip()
+        if not name:
+            return False
+        binary = shutil.which(name)
+        if binary is None:
+            return False
+        try:
+            subprocess.Popen(
+                [binary],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=self._env(),
+            )
+            return True
+        except Exception:
+            return False
+
+    def read_file(self, path: str) -> Optional[str]:
+        """Read a text file. Returns None (never raises) when it cannot."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except Exception:
+            return None
+
+    def list_dir(self, path: str) -> Optional[str]:
+        """List a directory, one entry per line. Returns None when it cannot."""
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception:
+            return None
+        return "\n".join(entries)
+
     def type_text(self, text: str, typing_speed_cps: float = 25.0) -> bool:
         # --delay is per-key milliseconds; 25 chars/s -> 40 ms.
         delay = int(max(0, round(1000.0 / max(1.0, typing_speed_cps))))
