@@ -1,8 +1,10 @@
-"""Tests for the lexicon perception adapter and the GUI model.
+"""Tests for the lexicon perception adapter (the control-grounding path).
 
-These run the real code paths: a real `LexiconReader` on rendered frames, the
-real `CapabilityKernel`, the real `Assistant`, and the real FastAPI app through
-`TestClient`. Nothing here is mocked, because the thing under test is precisely
+This is the *opt-in* path that can read a control label from pixels and ground a
+click; the assistant's default eyes are `ScenePerception` (see
+`tests/test_assistant_gui.py`). These run the real code paths: a real
+`LexiconReader` on rendered frames, the real `CapabilityKernel` and the real
+`Assistant`. Nothing here is mocked, because the thing under test is precisely
 whether the pieces agree with each other -- a mock would assert that they do.
 """
 from __future__ import annotations
@@ -11,7 +13,6 @@ import pytest
 
 from avcs.control.capability import CapabilityKernel
 from avcs.gui.desktop import DesktopSource, render
-from avcs.gui.server import GuiApp, build_app
 from avcs.voice.assistant import Assistant
 from avcs.voice.brain import ConversationBrain, RuleBrain
 from avcs.voice.lexicon_perception import LexiconPerception
@@ -174,12 +175,23 @@ def test_kernel_denies_without_grant(perception):
 # full assistant loop
 # --------------------------------------------------------------------------- #
 def _assistant(perception):
+    # Force the offline rule brain: these tests verify the *grounding and gate*
+    # mechanics, which must be deterministic. A live LLM would make the target
+    # (and therefore the pass/fail) depend on a network round-trip.
     return Assistant(
-        brain=ConversationBrain(),
+        brain=ConversationBrain(provider=_OfflineProvider()),
         perception=perception,
         kernel=_kernel(),
         hand=None,
+        stream=False,
     )
+
+
+class _OfflineProvider:
+    """A provider that declares no key, so the brain uses the rule fallback."""
+
+    api_key = ""
+
 
 
 def test_assistant_hinglish_target_is_clean(perception):
@@ -207,110 +219,3 @@ def test_assistant_denies_absent_control(perception):
     rec = asst.step("upload karo")
     assert rec.gate_allowed is False
     assert "no candidate point" in rec.gate_reason
-
-
-# --------------------------------------------------------------------------- #
-# GUI app
-# --------------------------------------------------------------------------- #
-@pytest.fixture(scope="module")
-def client():
-    from fastapi.testclient import TestClient
-
-    return TestClient(build_app(source="desktop"))
-
-
-def test_gui_index_serves_html(client):
-    res = client.get("/")
-    assert res.status_code == 200
-    assert "AVCS GUI model" in res.text
-    assert "api/stream" in res.text
-
-
-def test_gui_capabilities_report_honest_state(client):
-    caps = client.get("/api/capabilities").json()
-    assert caps["brain"] in ("LLMReasoningProvider", "ConversationBrain")
-    assert isinstance(caps["brain_has_key"], bool)
-    assert caps["actuation"] == "virtual"
-    assert caps["eyes"] == "LexiconPerception"
-
-
-def test_gui_frame_returns_regions(client):
-    data = client.get("/api/frame").json()
-    assert data["frame_size"][0] > 0
-    labels = {r["label"] for r in data["regions"]}
-    assert {"save", "close"} <= labels
-    for r in data["regions"]:
-        assert r["x1"] > r["x0"] and r["y1"] > r["y0"]
-        assert 0.0 <= r["confidence"] <= 1.0
-
-
-def test_gui_frame_png_is_a_png(client):
-    res = client.get("/api/frame.png")
-    assert res.status_code == 200
-    assert res.headers["content-type"] == "image/png"
-    assert res.content[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-def test_gui_turn_allows_present_control(client):
-    rec = client.post("/api/turn", json={"text": "mujhe save karna hai"}).json()
-    assert rec["gate_allowed"] is True
-    assert rec["target"] == "save"
-    assert rec["actuation"] == "virtual"
-    assert rec["clicked"] is not None
-    assert rec["brain_source"] in ("llm", "rule_fallback")
-
-
-def test_gui_turn_denies_absent_control(client):
-    rec = client.post("/api/turn", json={"text": "upload karo"}).json()
-    assert rec["gate_allowed"] is False
-    assert rec["clicked"] is None
-
-
-def test_gui_screen_swap_changes_what_is_read(client):
-    client.post("/api/screen", json={"buttons": ["ok", "cancel", "apply"]})
-    labels = {r["label"] for r in client.get("/api/frame").json()["regions"]}
-    assert {"ok", "cancel", "apply"} <= labels
-
-    rec = client.post("/api/turn", json={"text": "apply karo"}).json()
-    assert rec["gate_allowed"] is True
-
-    # A control that is no longer on screen must be refused.
-    rec = client.post("/api/turn", json={"text": "save karo"}).json()
-    assert rec["gate_allowed"] is False
-
-    client.post("/api/screen", json={"buttons": ["save", "close", "undo", "redo"]})
-
-
-def test_gui_stream_emits_a_state_object(client):
-    with client.stream("GET", "/api/stream") as res:
-        assert res.status_code == 200
-        assert res.headers["content-type"].startswith("text/event-stream")
-        for line in res.iter_lines():
-            if line.startswith("data: "):
-                import json
-
-                payload = json.loads(line[len("data: "):])
-                assert "regions" in payload and "seq" in payload
-                break
-
-
-def test_gui_is_virtual_by_default(tmp_path):
-    gui = GuiApp(source="desktop")
-    assert gui.live is False
-    assert gui.capabilities()["actuation"] == "virtual"
-
-
-def test_lexicon_confidence_scale_differs_from_grounder(perception):
-    """A correct lexicon read sits below the goal grounder's 0.75 floor.
-
-    This is why the kernel floor is a per-perception choice: the grounder's
-    `peak_probability` is calibrated above 0.75 on a hit, while the lexicon's
-    confidence is a cosine margin against 61 prototypes and reads lower for a
-    control it got right. Reusing 0.75 here would refuse every real control, so
-    the demo selects 0.45 for `--lexicon-eyes`. If this test starts failing
-    because confidences rose above 0.75, the floor default can be revisited.
-    """
-    perception.grab()
-    ev = perception.grounding_evidence("save")
-    assert ev is not None
-    assert 0.0 < ev.peak_probability < 0.75

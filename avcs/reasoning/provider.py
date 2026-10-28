@@ -357,23 +357,17 @@ CRITICAL RULES:
         retry_delay_seconds: float = 1.0,
     ) -> None:
         _load_dotenv_if_needed()
-        raw_key = api_key or os.environ.get("AVCS_LLM_API_KEY") or os.environ.get("NVIDIA_API_KEY", "")
-        self.api_key = raw_key.strip()
+        # Resolve endpoint/key/model from the caller, the user's environment, or
+        # the platform-managed key. Doing this in one place is what makes the
+        # brain *live* out of the box inside a managed runtime instead of
+        # silently degrading to the rule brain.
+        from avcs.reasoning.credentials import resolve_llm_credentials
 
-        # Infer default endpoint & model based on key provenance
-        default_endpoint = (
-            "https://integrate.api.nvidia.com/v1"
-            if self.api_key.startswith("nvapi-")
-            else "http://localhost:11434/v1"
-        )
-        self.endpoint = (endpoint or os.environ.get("AVCS_LLM_ENDPOINT") or default_endpoint).rstrip("/")
-
-        default_model = (
-            "meta/llama-3.2-11b-vision-instruct"
-            if "nvidia.com" in self.endpoint
-            else "llama3.2"
-        )
-        self.model = model or os.environ.get("AVCS_LLM_MODEL") or default_model
+        creds = resolve_llm_credentials(api_key=api_key, endpoint=endpoint, model=model)
+        self.api_key = creds.api_key
+        self.endpoint = creds.endpoint.rstrip("/")
+        self.model = creds.model
+        self.credential_source = creds.source
 
         self.timeout_seconds = float(os.environ.get("AVCS_LLM_TIMEOUT", timeout_seconds))
         self.max_retries = max_retries
@@ -412,7 +406,10 @@ CRITICAL RULES:
             "messages": [
                 {"role": "user", "content": "Respond with JSON: {\"status\": \"verified\"}"}
             ],
-            "max_tokens": 32,
+            # Reasoning models spend the first tokens on hidden reasoning, so a
+            # tight budget returns content:null and the probe looks failed when
+            # the endpoint is fine. Leave room for the visible answer.
+            "max_tokens": 512,
             "temperature": 0.0,
         }
         raw = self._post_request(probe_payload)
@@ -424,7 +421,7 @@ CRITICAL RULES:
             "latency_ms": round(dt, 2),
             "masked_key": self.masked_api_key,
             "last_usage": self.last_usage,
-            "probe_output": raw.strip(),
+            "probe_output": (raw or "").strip(),
         }
 
     def plan_step(
@@ -442,6 +439,36 @@ CRITICAL RULES:
         self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
 
         return self._parse_llm_json(raw_response, step_index, observation.get("frame_sequence"))
+
+    def _extract_message_text(self, data: Dict[str, Any]) -> str:
+        """Assistant text from an OpenAI-compatible body (reasoning-model safe)."""
+        from avcs.reasoning.credentials import extract_message_text
+
+        return extract_message_text(data)
+
+    def raw_step(
+        self,
+        task: str,
+        observation: Dict[str, Any],
+        history: List[Dict[str, Any]],
+        step_index: int = 1,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """Return the model's raw reply text for an arbitrary system prompt.
+
+        ``plan_step`` is bound to the System 2 *planner* schema (``next_intent``).
+        A live conversation uses a different schema (``speech`` / ``kind`` /
+        ``action``), so the voice brain needs the reply text itself and parses it
+        against the conversation contract. Without this the model's ``action``
+        field was silently dropped and every turn degraded to a bare
+        ``observe_target``.
+        """
+        payload = self._build_payload(task, observation, history, step_index, system_prompt)
+
+        t0 = time.perf_counter()
+        raw_response = self._post_request(payload)
+        self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
+        return raw_response
 
     def _build_payload(self, task, observation, history, step_index, system_prompt=None):
         """Build the OpenAI-compatible chat payload shared by step and stream.
@@ -579,7 +606,7 @@ CRITICAL RULES:
                         for k, v in self.last_usage.items():
                             self.total_usage[k] = self.total_usage.get(k, 0) + v
 
-                    return data["choices"][0]["message"]["content"]
+                    return self._extract_message_text(data)
 
             except urllib.error.HTTPError as err:
                 last_err = err

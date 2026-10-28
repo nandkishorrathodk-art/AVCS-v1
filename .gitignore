@@ -34,3 +34,5 @@ m8-live-results/
 .agents/
 .gravitas/
 scratch/
+# Downloaded speech-recognition models (see `avcs.voice.demo --get-ears`)
+models/

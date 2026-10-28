@@ -268,16 +268,34 @@ class Assistant:
         obs.last_action = self._last_outcome
         return obs
 
-    def step(self, user_text: str, turn: int = 0, stream: Optional[bool] = None) -> AssistantTurnRecord:
-        """Run one conversational turn from already-transcribed user text."""
-        self.stream = bool(stream) if stream is not None else self.stream
-        return self._run_one(user_text, turn)
+    def step(
+        self,
+        user_text: str,
+        turn: int = 0,
+        stream: Optional[bool] = None,
+        on_speech: Optional[Callable[[str], None]] = None,
+    ) -> AssistantTurnRecord:
+        """Run one conversational turn from already-transcribed user text.
 
-    def _run_one(self, user_text: str, turn: int) -> AssistantTurnRecord:
+        ``on_speech`` receives each sentence the moment it is spoken. The GUI
+        uses it to forward speech to the browser as it is produced, so the page
+        hears the first sentence while the model is still writing the rest.
+        """
+        self.stream = bool(stream) if stream is not None else self.stream
+        return self._run_one(user_text, turn, on_speech=on_speech)
+
+    def _run_one(
+        self,
+        user_text: str,
+        turn: int,
+        on_speech: Optional[Callable[[str], None]] = None,
+    ) -> AssistantTurnRecord:
         """Observe, ask the brain (timed), and act if asked. One loop step."""
         obs = self._observe(None)
         _t0 = time.perf_counter()
-        turn_result, spoken, speak_error = self._ask_brain(user_text, obs, self.stream)
+        turn_result, spoken, speak_error = self._ask_brain(
+            user_text, obs, self.stream, on_speech=on_speech
+        )
         brain_ms = (time.perf_counter() - _t0) * 1000.0
 
         record = AssistantTurnRecord(
@@ -349,20 +367,29 @@ class Assistant:
         user_text: str,
         obs: ScreenObservation,
         use_stream: bool,
+        on_speech: Optional[Callable[[str], None]] = None,
     ) -> tuple[AssistantTurn, bool, Optional[str]]:
         """Send one turn to the brain and return (turn, spoken, speak_error)."""
         if use_stream and hasattr(self.brain, "respond_stream"):
             # The mouth runs on a background thread, so the first sentence is
             # already audible while the rest of the reply is still being written.
             queue = SpeechQueue(self.speaker)
+
+            def _say(sentence: str) -> None:
+                if on_speech is not None:
+                    on_speech(sentence)
+                queue.say(sentence)
+
             turn_result = self.brain.respond_stream(
-                user_text, obs.to_brain_dict(), on_speech=queue.say
+                user_text, obs.to_brain_dict(), on_speech=_say
             )
             results = queue.drain()
             spoken = any(r.spoken for r in results)
             speak_error = next((r.error for r in results if r.error), None)
         else:
             turn_result = self.brain.respond(user_text, obs.to_brain_dict())
+            if on_speech is not None and turn_result.speech:
+                on_speech(turn_result.speech)
             result = self._speak(turn_result.speech)
             spoken, speak_error = result.spoken, result.error
         return turn_result, spoken, speak_error

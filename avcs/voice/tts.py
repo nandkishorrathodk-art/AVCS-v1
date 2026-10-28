@@ -295,6 +295,59 @@ class EspeakNgEngine(TtsEngine):
                 pass
 
 
+class BrowserEngine(TtsEngine):
+    """A mouth for a browser page instead of the local sound card.
+
+    The GUI serves the assistant to a browser, which may be on a different
+    machine than the process doing the reasoning (a container with no sound card
+    is the normal case here). espeak-ng still *synthesizes* the audio -- so the
+    voice is identical to the local path -- but instead of handing the clip to
+    ``aplay`` this engine parks the most recent WAV for the page to fetch and
+    play through the Web Audio API.
+
+    ``play()`` therefore returns ``True`` (the clip was delivered to the page,
+    which is the client's mouth) and the honest "did the speaker actually move
+    air" signal is the browser's, not ours.
+    """
+
+    name = "browser"
+    silent = False
+
+    def __init__(self, synthesize_with: Optional[TtsEngine] = None) -> None:
+        self._synth = synthesize_with or EspeakNgEngine()
+        self._lock = threading.Lock()
+        self._latest: Optional[PcmClip] = None
+        self._seq = 0
+
+    def available(self) -> bool:
+        return self._synth.available()
+
+    def synthesize(self, text: str, profile: VoiceProfile) -> PcmClip:
+        return self._synth.synthesize(text, profile)
+
+    def play(self, clip: PcmClip) -> bool:
+        if clip.is_empty:
+            return False
+        with self._lock:
+            self._latest = clip
+            self._seq += 1
+        return True
+
+    def take_latest(self, after_seq: int = 0) -> tuple[int, Optional[bytes]]:
+        """Return ``(seq, wav_bytes)`` for the newest clip, or ``(seq, None)``.
+
+        The page polls with the last sequence it played, so a clip is fetched
+        exactly once even if the poll is slower than speech.
+        """
+        with self._lock:
+            if self._latest is None or self._seq <= after_seq:
+                return self._seq, None
+            return self._seq, self._latest.to_wav_bytes()
+
+    def stop(self) -> None:
+        self._synth.stop()
+
+
 class NullEngine(TtsEngine):
     """A silent engine for headless machines and tests.
 

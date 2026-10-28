@@ -79,6 +79,26 @@ class AudioClip:
             arr = arr.reshape(-1, channels).mean(axis=1)
         return cls(samples=arr, sample_rate=rate)
 
+    @classmethod
+    def read_wav_bytes(cls, data: bytes) -> "AudioClip":
+        """Parse an in-memory WAV. Used for audio posted from a browser."""
+        import io
+
+        with wave.open(io.BytesIO(data), "rb") as w:
+            rate = w.getframerate()
+            channels = w.getnchannels()
+            width = w.getsampwidth()
+            raw = w.readframes(w.getnframes())
+        if width == 2:
+            arr = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32767.0
+        elif width == 1:
+            arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        else:
+            raise ValueError(f"unsupported WAV sample width: {width} bytes")
+        if channels > 1:
+            arr = arr.reshape(-1, channels).mean(axis=1)
+        return cls(samples=arr, sample_rate=rate)
+
     def write_wav(self, path: str) -> None:
         pcm = self.to_pcm16_bytes()
         with wave.open(path, "wb") as w:
@@ -272,6 +292,78 @@ class FasterWhisperEngine(SttEngine):
         return Transcript(text=text, engine=self.name, confidence=conf)
 
 
+def find_vosk_model() -> Optional[str]:
+    """Locate a Vosk model directory on this machine, or ``None``.
+
+    A recognizer that only works when the caller passes an explicit path is not
+    usable out of the box. This checks the environment, then the conventional
+    places a downloaded model lands (``models/`` in the repo, ``~/.cache/vosk``,
+    ``/opt/vosk``), so installing a model is enough to give the assistant ears.
+    """
+    env = os.environ.get("AVCS_VOSK_MODEL")
+    if env and os.path.isdir(env):
+        return env
+
+    roots = [
+        os.path.join(os.getcwd(), "models"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "models"),
+        os.path.expanduser("~/.cache/vosk"),
+        os.path.expanduser("~/.local/share/vosk"),
+        "/opt/vosk",
+        "/usr/local/share/vosk",
+    ]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        # Prefer a Hindi/Indian-English model when several are present: the
+        # assistant speaks Hinglish, so that is the one it should hear with.
+        candidates = sorted(
+            (d for d in os.listdir(root) if d.startswith("vosk-model")),
+            key=lambda d: ("hi" not in d.lower() and "in" not in d.lower(), d),
+        )
+        for name in candidates:
+            path = os.path.join(root, name)
+            if os.path.isdir(path):
+                return path
+    return None
+
+
+def download_vosk_model(dest_dir: str = "models", model: Optional[str] = None) -> Optional[str]:
+    """Download and extract a small Vosk model so the assistant has ears.
+
+    Returns the model directory, or ``None`` on failure. Kept dependency-free
+    (urllib + zipfile) and CPU-only, matching the rest of this repo. A model
+    already present in ``dest_dir`` is reused rather than re-downloaded.
+    """
+    import urllib.request
+    import zipfile
+
+    url = model or os.environ.get("AVCS_VOSK_MODEL_URL") or (
+        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+    )
+    name = url.rstrip("/").split("/")[-1]
+    if name.endswith(".zip"):
+        name = name[:-4]
+    os.makedirs(dest_dir, exist_ok=True)
+    target = os.path.join(dest_dir, name)
+    if os.path.isdir(target):
+        return target
+
+    zip_path = os.path.join(dest_dir, name + ".zip")
+    try:
+        urllib.request.urlretrieve(url, zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dest_dir)
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(zip_path)
+        except OSError:
+            pass
+    return target if os.path.isdir(target) else None
+
+
 def default_stt_engine(model_path: Optional[str] = None, language: Optional[str] = None) -> SttEngine:
     """Best available offline recognizer, or a silent one. Never raises.
 
@@ -281,7 +373,7 @@ def default_stt_engine(model_path: Optional[str] = None, language: Optional[str]
     the language it was trained on, so choose a Hindi/Indian-English Vosk model
     by path instead.
     """
-    vosk = VoskEngine(model_path=model_path)
+    vosk = VoskEngine(model_path=model_path or find_vosk_model())
     if vosk.available():
         return vosk
     fw = FasterWhisperEngine(language=language)

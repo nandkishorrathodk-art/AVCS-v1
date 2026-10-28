@@ -43,6 +43,24 @@ def test_observing_ops_never_need_a_grant():
         assert k.is_granted(op)
 
 
+def test_authorize_allows_an_observing_op_with_no_evidence():
+    """A "look at the screen" step must not be refused for want of a point.
+
+    `authorize` used to run the grounding checks on every op, so an observing op
+    with no candidate point came back denied -- a plain perception step read as a
+    denied click. Observing ops actuate nothing, so they are allowed outright.
+    """
+    k = CapabilityKernel()  # no grants, no evidence, no frame
+    d = k.authorize(
+        op="observe_target",
+        query="current screen",
+        evidence=GroundingEvidence(candidate_point_norm=None, peak_probability=0.0),
+    )
+    assert d.allowed
+    assert d.coordinate is None
+    assert "observing" in d.reason
+
+
 def test_mutating_op_refused_without_grant_even_with_perfect_evidence():
     k = CapabilityKernel()  # no grants
     decision = k.authorize(

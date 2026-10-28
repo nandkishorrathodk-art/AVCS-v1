@@ -1,27 +1,29 @@
-"""The GUI model: one screen, one conversation, one live loop.
+"""The GUI assistant: one screen, one conversation, one live loop.
 
-This is the runnable face of AVCS. It puts the pieces that already exist behind
-one browser page and shows what each one is doing, in real time:
+This is the runnable face of AVCS, and the thing it runs is an **assistant**, not
+a control detector. The page shows three things and nothing else:
 
-  screen  ->  lexicon reader  ->  named regions  ->  brain  ->  kernel  ->  hand
-             (pixels, no OCR)      (this is new)     (LLM or      (fail-     (virtual
-                                                     fallback)    closed)     by default)
+  * what the assistant *sees* -- the live screen and the model's own reading of
+    it (tone, structure, motion, change), from pure pixels;
+  * what it *says* -- a Hinglish conversation, streamed sentence by sentence, and
+    spoken out loud in the browser;
+  * what it *hears* -- the microphone, transcribed on the server.
 
-The screen panel is the *model's* view, not a screenshot with boxes drawn on it
-by hand: the boxes come from `LexiconReader.read_regions`, the same call the
-gate uses. So a box on the page is evidence the reader saw that control.
+The perception here is `ScenePerception`: it describes a scene, it does not read
+control labels and it does not ground a point. So there is no click path by
+default and no mutating grant. A caller can opt in to the lexicon eyes and a
+`click` grant (the capability kernel still gates every action), but that is not
+what this page is for.
 
-Design rules this server keeps, matching the rest of the repo:
+Design rules kept from the rest of the repo:
 
-- **No OCR.** Region labels come from glyph-shape matching against a closed
-  vocabulary. Nothing here transcribes characters.
-- **Fail closed.** The kernel decides every action. A refusal is shown as a
-  refusal, with the kernel's own reason, and is never dressed up as success.
+- **No OCR.** The description is rendered from typed pixel state.
+- **Coordinate-free boundary.** The brain receives text only, never an image or
+  a coordinate.
 - **Honest provenance.** Every turn carries `brain_source` (`llm` or
-  `rule_fallback`), `gate_allowed`, and per-stage timings, so "real time" is a
-  measurement rather than a claim.
-- **Virtual by default.** The hand records coordinates and moves no cursor
-  unless the server was started with live actuation explicitly enabled.
+  `rule_fallback`) and per-stage timings, so "real time" is a measurement.
+- **Fail closed.** With the default (scene) eyes there is no grounding evidence,
+  so any mutating action is refused by the kernel and shown as a refusal.
 """
 from __future__ import annotations
 
@@ -34,14 +36,15 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from avcs.control.capability import CapabilityKernel
-from avcs.gui.desktop import HEIGHT, WIDTH
+from avcs.control.capability import MUTATING_OPS, CapabilityKernel
 from avcs.voice.assistant import Assistant
 from avcs.voice.brain import ConversationBrain
-from avcs.voice.lexicon_perception import LexiconPerception
+from avcs.voice.scene_perception import ScenePerception
+from avcs.voice.stt import default_stt_engine
+from avcs.voice.tts import BrowserEngine, EspeakNgEngine, Speaker, VoiceProfile
 
 FRAME_POLL_S = 0.25
 
@@ -52,8 +55,9 @@ class GuiState:
 
     frame_png: Optional[bytes] = None
     frame_size: tuple[int, int] = (0, 0)
+    description: str = ""
+    reading: Dict[str, Any] = field(default_factory=dict)
     regions: List[Dict[str, Any]] = field(default_factory=list)
-    labels: List[str] = field(default_factory=list)
     frame_ms: float = 0.0
     seq: int = 0
 
@@ -61,60 +65,101 @@ class GuiState:
 class ScreenModel:
     """Owns the screen source and the per-frame read, shared by every request.
 
-    One reader, one cached read per frame. If every HTTP request re-ran the
-    encoder the page would show a different region set on each paint and the
+    One perception, one cached read per frame. If every HTTP request re-ran the
+    perception the page would describe a different frame on each paint and the
     "live" view would be a flicker, not a stream.
     """
 
-    def __init__(self, source: str = "synthetic", checkpoint: Optional[str] = None) -> None:
-        if source in ("desktop", "synthetic-desktop"):
-            # A synthetic desktop with real controls in it, so the reader has
-            # something to read. The flat gray EyeStream buffer has none.
-            from avcs.gui.desktop import DesktopSource
+    def __init__(
+        self,
+        source: str = "demo",
+        category: str = "desktop",
+        *,
+        eyes: str = "scene",
+        checkpoint: Optional[str] = None,
+    ) -> None:
+        self._demo = None
+        self._source_name = source
+        if eyes == "lexicon":
+            # Opt-in control reader: needed only to ground a click. Not the
+            # assistant's default eyes.
+            from avcs.voice.lexicon_perception import LexiconPerception
 
-            self._desktop = DesktopSource()
-            self.perception = LexiconPerception(
-                frame_source=self._desktop,
-                checkpoint=checkpoint,
-                floor=0.0,
-            )
+            if source in ("demo", "desktop", "synthetic-desktop"):
+                from avcs.gui.desktop import DesktopSource
+
+                self._demo = DesktopSource()
+                self.perception = LexiconPerception(
+                    frame_source=self._demo, checkpoint=checkpoint, floor=0.0
+                )
+            else:
+                self.perception = LexiconPerception(
+                    source=source, checkpoint=checkpoint, floor=0.0
+                )
         else:
-            self._desktop = None
-            self.perception = LexiconPerception(
-                source=source,
-                checkpoint=checkpoint,
-                floor=0.0,
+            frame_source = None
+            if source in ("demo", "desktop", "synthetic-desktop"):
+                from avcs.gui.demo_source import DemoSceneSource
+
+                self._demo = DemoSceneSource(category=category)
+                frame_source = self._demo
+            self.perception = ScenePerception(
+                frame_source=frame_source,
+                source="screen" if frame_source is None else source,
             )
         self.seq = 0
         self._last_state = GuiState()
 
+    @property
+    def demo_source(self):
+        return self._demo
+
     def snapshot(self) -> GuiState:
         t0 = time.perf_counter()
-        frame = self.perception.grab()
-        grab_ms = (time.perf_counter() - t0) * 1000.0
-        if frame is None:
-            self._last_state = GuiState(frame_ms=grab_ms, seq=self.seq)
-            return self._last_state
+        obs = self.perception.observe()
+        read_ms = (time.perf_counter() - t0) * 1000.0
 
-        regions = []
-        for r in self.perception.regions():
-            box = r.box
-            regions.append({
-                "x0": int(box.x0), "y0": int(box.y0),
-                "x1": int(box.x1), "y1": int(box.y1),
-                "label": r.label,
-                "confidence": round(float(r.readout.confidence), 4),
-                "known": bool(r.known),
-            })
+        frame = self.perception.frame()
+        reading: Dict[str, Any] = {}
+        summariser = getattr(self.perception, "state_summary", None)
+        if callable(summariser):
+            try:
+                reading = summariser() or {}
+            except Exception:
+                reading = {}
 
-        h, w = frame.shape[:2]
+        # The lexicon path has no scene summary; expose its regions instead so
+        # the panel is never blank, without pretending they are scene facts.
+        regions: List[Dict[str, Any]] = []
+        region_lister = getattr(self.perception, "regions", None)
+        if callable(region_lister):
+            try:
+                for r in region_lister():
+                    box = r.box
+                    regions.append({
+                        "x0": int(box.x0), "y0": int(box.y0),
+                        "x1": int(box.x1), "y1": int(box.y1),
+                        "label": r.label,
+                        "confidence": round(float(r.readout.confidence), 4),
+                        "known": bool(r.known),
+                    })
+            except Exception:
+                regions = []
+
         self.seq += 1
+        size = (0, 0)
+        png = None
+        if frame is not None:
+            h, w = frame.shape[:2]
+            size = (int(w), int(h))
+            png = _png(frame)
         self._last_state = GuiState(
-            frame_png=_png(frame),
-            frame_size=(int(w), int(h)),
+            frame_png=png,
+            frame_size=size,
+            description=obs.description,
+            reading=reading,
             regions=regions,
-            labels=sorted({r["label"] for r in regions}),
-            frame_ms=round(grab_ms, 2),
+            frame_ms=round(read_ms, 2),
             seq=self.seq,
         )
         return self._last_state
@@ -132,79 +177,164 @@ class TurnRequest(BaseModel):
     text: str
 
 
-class ScreenRequest(BaseModel):
-    buttons: List[str]
+class SceneRequest(BaseModel):
+    category: str
+
+
+class AudioRequest(BaseModel):
+    # Base64 WAV (or raw base64 PCM16) recorded in the browser and posted here.
+    audio_base64: str
+    sample_rate: int = 16000
+    is_wav: bool = True
+
+
+def _decode_audio(req: AudioRequest):
+    """Turn the browser's recording into an ``AudioClip`` the ears understand."""
+    import base64
+
+    from avcs.voice.stt import AudioClip
+
+    raw = base64.b64decode(req.audio_base64)
+    if req.is_wav or raw[:4] == b"RIFF":
+        try:
+            return AudioClip.read_wav_bytes(raw)
+        except Exception:
+            pass
+    return AudioClip.from_pcm16_bytes(raw, int(req.sample_rate))
 
 
 class GuiApp:
-    """Wires the screen, the brain, the kernel and the hand into one object."""
+    """Wires the screen, the brain, the mouth and the ears into one assistant."""
 
     def __init__(
         self,
-        source: str = "synthetic",
+        source: str = "demo",
+        category: str = "desktop",
         grants: Optional[List[str]] = None,
         checkpoint: Optional[str] = None,
         live: bool = False,
         min_peak: float = 0.45,
+        mouth: str = "browser",
+        ears: bool = True,
+        eyes: str = "scene",
+        brain: Optional[ConversationBrain] = None,
     ) -> None:
-        self.screen = ScreenModel(source=source, checkpoint=checkpoint)
-        self.grants = list(grants or ["click"])
+        self.eyes = eyes
+        self.screen = ScreenModel(
+            source=source, category=category, eyes=eyes, checkpoint=checkpoint
+        )
+        # The assistant's default is *no mutating capability*: it looks, talks
+        # and hears. A grant only exists if the caller asked for one AND the eyes
+        # can actually ground a point (the lexicon reader). Granting `click` to
+        # scene eyes would be a capability with no evidence behind it.
+        default_grants: List[str] = [] if eyes != "lexicon" else ["click"]
+        self.grants = list(grants if grants is not None else default_grants)
         self.kernel = CapabilityKernel(
             granted_ops=self.grants,
             min_peak_probability=float(min_peak),
         )
-        self.brain = ConversationBrain()
+        self.brain = brain if brain is not None else ConversationBrain()
+        self.mouth_engine = self._build_mouth(mouth)
+        self.speaker = Speaker(engine=self.mouth_engine, profile=VoiceProfile.hinglish())
+        self.stt = default_stt_engine() if ears else None
         self.hand = None
         self.live = bool(live)
-        if self.live:
+        if self.live and self.grants:
             from avcs.voice.actuators import default_hand
 
             self.hand = default_hand()
-        else:
-            # A virtual hand records the coordinates a granted click resolved to
-            # and touches nothing. Attaching it (rather than leaving the hand
-            # None) means an authorized click is *shown* to have happened, at a
-            # real point, while the machine stays untouched.
-            from avcs.system1.loop import VirtualHand
-
-            self.hand = VirtualHand(width=WIDTH, height=HEIGHT)
         self.assistant = Assistant(
             brain=self.brain,
+            speaker=self.speaker,
             perception=self.screen.perception,
             kernel=self.kernel,
             hand=self.hand,
         )
         self.transcript: List[Dict[str, Any]] = []
 
+    @staticmethod
+    def _build_mouth(mouth: str):
+        """Pick where the assistant's voice comes out.
+
+        ``browser`` synthesizes locally with espeak-ng and parks the WAV for the
+        page to play (the normal case: the server has no sound card, the browser
+        does). ``local`` uses the server's own audio device. ``silent`` renders
+        but never plays, for tests.
+        """
+        mouth = (mouth or "browser").lower()
+        if mouth == "silent":
+            from avcs.voice.tts import NullEngine
+
+            return NullEngine()
+        if mouth == "local":
+            espeak = EspeakNgEngine()
+            if espeak.available():
+                return espeak
+            return BrowserEngine()
+        return BrowserEngine()
+
     def capabilities(self) -> Dict[str, Any]:
         caps = self.assistant.capabilities()
-        caps["actuation"] = "live" if self.live else "virtual"
-        eye = getattr(self.screen.perception, "_eye", None)
-        caps["source"] = type(eye).__name__ if eye is not None else "fixture"
+        caps["actuation"] = "live" if self.live and self.grants else "virtual"
+        caps["mouth"] = self.speaker.engine_name
+        caps["eyes"] = type(self.screen.perception).__name__
+        caps["can_act"] = bool(self.grants)
         return caps
 
-    def turn(self, text: str) -> Dict[str, Any]:
+    def turn(self, text: str, on_speech=None) -> Dict[str, Any]:
         """Run one conversational turn and record it honestly."""
         self.screen.snapshot()
         t0 = time.perf_counter()
-        record = self.assistant.step(text)
+        record = self.assistant.step(text, on_speech=on_speech)
         total_ms = (time.perf_counter() - t0) * 1000.0
 
         entry = record.to_dict()
         entry["total_ms"] = round(total_ms, 2)
         entry["brain_source"] = record.source
+        # Whether this turn tried to *do* something. A perception step (the brain
+        # asking to look at the screen) is not a gated click, and the page must
+        # not draw it as one.
+        entry["mutating"] = bool(record.action and record.action in MUTATING_OPS)
         self.transcript.append(entry)
         return entry
 
+    def hear(self, req: AudioRequest) -> Dict[str, Any]:
+        """Transcribe a browser recording with the same ears the voice loop uses."""
+        if self.stt is None:
+            return {"text": "", "error": "ears disabled", "engine": "none"}
+        try:
+            clip = _decode_audio(req)
+        except Exception as exc:
+            return {"text": "", "error": f"bad audio: {exc}", "engine": self.stt.name}
+        clip = clip.trim_silence()
+        if clip.samples.size == 0:
+            return {"text": "", "error": "no speech detected", "engine": self.stt.name}
+        transcript = self.stt.transcribe(clip)
+        return {
+            "text": transcript.normalized(),
+            "error": transcript.error,
+            "engine": transcript.engine,
+            "confidence": transcript.confidence,
+            "duration_s": round(clip.duration_s, 3),
+        }
+
 
 def build_app(
-    source: str = "synthetic",
+    source: str = "demo",
+    category: str = "desktop",
     grants: Optional[List[str]] = None,
     checkpoint: Optional[str] = None,
     live: bool = False,
+    mouth: str = "browser",
+    ears: bool = True,
+    eyes: str = "scene",
+    brain: Optional[ConversationBrain] = None,
 ) -> FastAPI:
-    gui = GuiApp(source=source, grants=grants, checkpoint=checkpoint, live=live)
-    app = FastAPI(title="AVCS GUI model")
+    gui = GuiApp(
+        source=source, category=category, grants=grants, checkpoint=checkpoint,
+        live=live, mouth=mouth, ears=ears, eyes=eyes, brain=brain,
+    )
+    app = FastAPI(title="AVCS assistant")
     app.state.gui = gui
 
     @app.get("/", response_class=HTMLResponse)
@@ -224,8 +354,9 @@ def build_app(
         return JSONResponse({
             "seq": st.seq,
             "frame_size": list(st.frame_size),
+            "description": st.description,
+            "reading": st.reading,
             "regions": st.regions,
-            "labels": st.labels,
             "frame_ms": st.frame_ms,
         })
 
@@ -240,23 +371,91 @@ def build_app(
     def turn(req: TurnRequest) -> JSONResponse:
         return JSONResponse(gui.turn(req.text))
 
-    @app.post("/api/screen")
-    def set_screen(req: ScreenRequest) -> JSONResponse:
-        """Change which controls are on the synthetic desktop.
+    @app.post("/api/turn.stream")
+    async def turn_stream(req: TurnRequest):
+        """Run one turn and stream speech sentences + the final record as SSE.
 
-        This is how the "target absent" path is shown rather than described: put
-        a control on screen, ask for it (allowed), take it away, ask again
-        (refused). Only available for the synthetic desktop; a real screen is not
+        This is the real-time path the page uses. The browser hears each sentence
+        the moment the brain produces it (``speech`` events), and gets the final
+        record (``turn``) when the turn is complete.
+        """
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue[Optional[dict]]" = asyncio.Queue()
+
+        def _emit(event: Dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        def _run() -> None:
+            try:
+                record = gui.turn(req.text, on_speech=lambda s: _emit({"type": "speech", "text": s}))
+                _emit({"type": "turn", "record": record})
+            except Exception as exc:  # a turn must never kill the stream
+                _emit({"type": "error", "error": str(exc)})
+            finally:
+                _emit(None)
+
+        task = asyncio.ensure_future(loop.run_in_executor(None, _run))
+
+        async def gen():
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    yield f"data: {json.dumps(item)}\n\n"
+            finally:
+                await task
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/speech.wav")
+    def speech_wav(after: int = 0):
+        """The newest spoken clip as WAV, or 204 when there is nothing new.
+
+        The page plays this through the Web Audio API, so the assistant's voice
+        reaches the user even when the *server* has no sound card (the normal
+        case in a container).
+        """
+        engine = gui.mouth_engine
+        taker = getattr(engine, "take_latest", None)
+        if not callable(taker):
+            return JSONResponse({"error": "mouth engine cannot serve audio"}, status_code=409)
+        seq, wav = taker(after_seq=int(after))
+        if wav is None:
+            # 204 must carry no body at all, so use a bare Response; a
+            # JSONResponse would set Content-Length and then send a payload,
+            # which uvicorn rejects with "Response content longer than
+            # Content-Length".
+            return Response(status_code=204, headers={"X-Speech-Seq": str(seq)})
+        return StreamingResponse(
+            io.BytesIO(wav), media_type="audio/wav",
+            headers={"X-Speech-Seq": str(seq), "Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/hear")
+    def hear(req: AudioRequest) -> JSONResponse:
+        """Transcribe a recording from the browser (the assistant's ears)."""
+        return JSONResponse(gui.hear(req))
+
+    @app.post("/api/scene")
+    def set_scene(req: SceneRequest) -> JSONResponse:
+        """Switch which scene the assistant is looking at.
+
+        Only available for the scripted demo source; a real screen is not
         editable and the call says so.
         """
-        desktop = getattr(gui.screen, "_desktop", None)
-        if desktop is None:
+        src = gui.screen.demo_source
+        setter = getattr(src, "set_category", None)
+        if not callable(setter):
             return JSONResponse(
-                {"error": "screen is not editable (not a synthetic desktop)"},
+                {"error": "screen is not a scripted demo (cannot switch scenes)"},
                 status_code=409,
             )
-        desktop.set_buttons(req.buttons)
-        return JSONResponse({"buttons": list(desktop.buttons)})
+        try:
+            setter(req.category)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"category": src.category})
 
     @app.get("/api/stream")
     async def stream():
@@ -272,8 +471,9 @@ def build_app(
                 payload = {
                     "seq": st.seq,
                     "frame_size": list(st.frame_size),
+                    "description": st.description,
+                    "reading": st.reading,
                     "regions": st.regions,
-                    "labels": st.labels,
                     "frame_ms": st.frame_ms,
                 }
                 yield f"data: {json.dumps(payload)}\n\n"

@@ -29,6 +29,8 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 from PIL import Image
 
+from avcs.reasoning.credentials import extract_message_text
+
 from .narrator import LiveCommentary
 
 DEFAULT_BASE_URL = "https://api.parthlabs.in/v1"
@@ -140,12 +142,30 @@ class LLMBridge:
             or os.environ.get("AVCS_LLM_ENDPOINT")
             or DEFAULT_BASE_URL
         ).rstrip("/")
+        explicit_model = model_name or os.environ.get("AVC_MODEL") or os.environ.get("AVCS_LLM_MODEL")
         self.model_name = (
-            model_name
-            or os.environ.get("AVC_MODEL")
-            or os.environ.get("AVCS_LLM_MODEL")
+            explicit_model
             or ("avc-reasoner-v1" if "api.parthlabs.in" in self.base_url else "gemini-flash-lite-latest")
         )
+
+        # With no key in the environment, fall back to the platform-managed key
+        # and its proxy endpoint. This is what makes the packaged assistant live
+        # out of the box inside a managed runtime instead of quietly degrading to
+        # the heuristic planner. An explicitly empty api_key ("") still means
+        # "force offline" -- see resolve_llm_credentials.
+        self.credential_source = "user" if self.api_key else "none"
+        if api_key is None and not self.api_key:
+            from avcs.reasoning.credentials import resolve_llm_credentials
+
+            creds = resolve_llm_credentials(endpoint=base_url)
+            if creds.live:
+                self.api_key = creds.api_key
+                self.base_url = creds.endpoint.rstrip("/")
+                self.credential_source = creds.source
+                # A model name the caller never chose must not outlive the
+                # endpoint it belonged to; use the one the new endpoint serves.
+                if not explicit_model:
+                    self.model_name = creds.model
         self.timeout = timeout
         self.vision_enabled = vision_enabled
         self.conversation_history: List[Dict[str, Any]] = []
@@ -198,7 +218,13 @@ class LLMBridge:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
 
-        return body["choices"][0]["message"]["content"]
+        # Reasoning models may return content:null with the answer in
+        # reasoning_content; the shared extractor falls through the known fields
+        # instead of indexing ["content"] and raising an opaque TypeError.
+        text = extract_message_text(body)
+        if not text:
+            raise ValueError("model returned an empty message")
+        return text
 
     @staticmethod
     def _parse_command(content: str, goal: str) -> LLMCommand:
@@ -326,7 +352,7 @@ class LLMBridge:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
 
-        content = str(body["choices"][0]["message"]["content"]).strip()
+        content = str(extract_message_text(body)).strip()
         self.conversation_history.append({"role": "user", "content": prompt})
         self.conversation_history.append({"role": "assistant", "content": content})
         return content

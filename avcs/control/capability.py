@@ -150,7 +150,21 @@ class CapabilityKernel:
         """Return whether `op` on `query` may proceed, and why."""
         clean_op = (op or "").strip().lower()
 
-        if clean_op in MUTATING_OPS and not self.is_granted(clean_op):
+        # Observing ops have nothing to actuate and nothing to ground, so they
+        # are allowed without a grant, without a query allow-list and without a
+        # candidate point -- exactly what `is_granted` already reports. Running
+        # the grounding checks on them was a bug: it made a plain "look at the
+        # screen" step fail with "grounder produced no candidate point", which
+        # reads as a denied click for an action that was never a click.
+        if clean_op not in MUTATING_OPS:
+            return CapabilityDecision(
+                allowed=True,
+                reason=f"observing op '{clean_op}' needs no capability grant",
+                op=clean_op,
+                query=query,
+            )
+
+        if not self.is_granted(clean_op):
             return CapabilityDecision(
                 allowed=False,
                 reason=f"no capability grant for mutating op '{clean_op}'",

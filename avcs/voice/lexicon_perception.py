@@ -191,6 +191,11 @@ class LexiconPerception:
         like, not by a character transcription. The query must also be inside the
         closed vocabulary: a word the model was never trained on has no prototype
         and cannot be grounded.
+
+        An LLM names targets the way a person does ("the Save button", "Edit
+        menu"), which is rarely the bare vocabulary word ("save", "edit_menu").
+        Each candidate form is tried in order, so a natural-language target still
+        grounds while an unknown word still fails closed.
         """
         want = query.strip().lower()
         if not want:
@@ -199,18 +204,68 @@ class LexiconPerception:
             vocab = {lbl.lower() for lbl in self.reader.labels}
         except Exception:
             vocab = set()
-        if vocab and want not in vocab:
-            return None
 
         best = None
-        for r in self._last_regions:
-            if r.label.strip().lower() != want:
+        for candidate in self._candidate_words(want):
+            if vocab and candidate not in vocab:
                 continue
-            if not r.known and r.readout.confidence < self.label_floor:
-                continue
-            if best is None or r.readout.confidence > best.readout.confidence:
-                best = r
-        return best
+            for r in self._last_regions:
+                if r.label.strip().lower() != candidate:
+                    continue
+                if not r.known and r.readout.confidence < self.label_floor:
+                    continue
+                if best is None or r.readout.confidence > best.readout.confidence:
+                    best = r
+            if best is not None:
+                return best
+        return None
+
+    # Generic nouns a person appends to a control name ("the Save button",
+    # "Search field", "File menu"). They carry no identity of their own, so the
+    # head word is the target. Order matters: longest phrase first.
+    _GENERIC_SUFFIXES = (
+        "button", "btn", "icon", "field", "input", "box", "menu", "tab",
+        "link", "control", "option", "item", "entry", "bar",
+    )
+    _LEADING_FILLER = ("the ", "a ", "an ", "please ", "click ", "press ", "tap ", "open ")
+
+    @classmethod
+    def _candidate_words(cls, want: str) -> List[str]:
+        """Vocabulary forms to try for a natural-language target, best first.
+
+        ``"the save button"`` -> ``["the save button", "save button", "save"]``.
+        Underscored vocabulary entries are also tried with the separator as a
+        space, so "edit menu" can reach ``edit_menu``.
+        """
+        seen: List[str] = []
+
+        def add(value: str) -> None:
+            value = value.strip(" .!?,\"'")
+            if value and value not in seen:
+                seen.append(value)
+
+        add(want)
+        add(want.replace("_", " "))
+        # The reverse too: a person says "edit menu", the vocabulary stores
+        # "edit_menu".
+        add(want.replace(" ", "_"))
+        for filler in cls._LEADING_FILLER:
+            if want.startswith(filler):
+                add(want[len(filler):])
+        # Strip generic suffixes from the front and from the de-filled form.
+        bases = list(seen)
+        for base in bases:
+            words = base.split()
+            while words and words[-1] in cls._GENERIC_SUFFIXES:
+                words = words[:-1]
+                add(" ".join(words))
+        # The head word alone, so "save button" reaches the "save" prototype.
+        for base in list(seen):
+            parts = base.split()
+            if len(parts) > 1:
+                add(parts[0])
+                add(parts[-1])
+        return seen
 
     @staticmethod
     def _describe(labels: Sequence[str]) -> str:

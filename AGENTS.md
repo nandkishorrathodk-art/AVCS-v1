@@ -20,7 +20,16 @@ python3 -m forge.vision_demo --seconds 10      # real-time screen vision (synthe
 
 python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"   # LLM brain + voice (no mic)
 python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
+python3 -m avcs.voice.demo --get-ears             # download a Vosk model (once)
+python3 -m avcs.voice.demo --check-llm            # exit 0 only if the brain works
+python3 -m avcs.voice.demo --listen --eyes --ground --grant click   # live session
+python3 -m avcs_sdk.run_live_agent --goal "save the file" --dry-run # packaged agent
 ```
+
+The brain resolves its key from the user's environment, then from the
+platform-managed key, so it is live without any setup in a managed runtime. With
+no key anywhere it degrades to the offline `RuleBrain` and says so
+(`brain=rule_fallback`).
 
 `runs/` is gitignored and holds checkpoints. `PYTHONPATH` must point at the
 repo root when running scripts from outside it.
@@ -1031,8 +1040,90 @@ request and extracts a key chord, so the whole path is exercisable without an LL
 Tests: `tests/test_voice_assistant.py` (includes a full-stack turn over a real
 local SSE server: SSE brain -> streamed mouth -> eyes -> gate -> `VirtualHand`,
 a multi-turn clarify-then-act conversation, per-op dispatch, and the autonomous
-loop's finish/refuse/closed-loop paths). Full suite with the voice tests:
-**109 passed, 2 skipped**.
+loop's finish/refuse/closed-loop paths). Full suite: **209 passed, 2 skipped**
+(`tests/test_live_assistant.py` adds 18 for the live-brain wiring below).
+
+### Live LLM brain: the key is resolved, not pasted (`avcs/reasoning/credentials.py`)
+
+The brain reads its endpoint/key/model from, in order: explicit arguments, the
+user's environment (`AVCS_LLM_API_KEY` and the vendor aliases), then the
+**platform-managed key** (`SESSION_API_KEY` + `OH_LLM_API_KEY_REFRESH_URL`,
+fetched once and cached in-process). That last source is what makes
+`ConversationBrain()` live out of the box inside a managed runtime instead of
+silently degrading to `RuleBrain`. Nothing logs the key; `mask()` is the only
+rendering used in messages. An explicitly empty `api_key=""` means **force
+offline** — the platform key is not substituted — which is how the keyless tests
+stay keyless.
+
+Four bugs this path exposed, all fixed:
+
+- **`verify_live_connection` crashed on reasoning models.** `deepseek-v4-*` (and
+  any R1-style model) can return `content: null` with the answer in
+  `reasoning_content`; indexing `["content"]` and calling `.strip()` raised
+  `'NoneType' object has no attribute 'strip'`, so a healthy endpoint reported
+  `FAILED`. `extract_message_text` falls through `content` / `reasoning_content`
+  / `reasoning` / `text`. The probe's `max_tokens` also went 32 → 512: a tight
+  budget is spent on hidden reasoning and leaves `content` empty.
+- **The non-streaming conversation path used the wrong schema.** It called
+  `plan_step`, which parses the System 2 *planner* contract (`next_intent`). The
+  conversation prompt emits `speech`/`kind`/`action`, so the model's action was
+  silently dropped and every turn became a bare `observe_target`. The brain now
+  calls `raw_step` and parses the conversation contract itself. (The streaming
+  path was always correct; only `respond()` — used by the GUI and non-stream
+  callers — was wrong.)
+- **The stream parser only read `action["op"]`.** Models paraphrase the keys
+  even when the prompt names them (`type` for `op`, `target` for
+  `target_description`), and a valid action was downgraded to a reply. Both
+  spellings are accepted now.
+- **The task was sticky.** `if user_text and not self.task` meant the first
+  utterance stuck for the whole session, so "ab close karo" after "save karo"
+  still clicked save. A new spoken instruction now replaces the task; an
+  autonomous step (empty text) keeps it.
+
+`avcs_sdk.llm_bridge.LLMBridge` uses the same resolver and extractor, so the
+packaged `python3 -m avcs_sdk.run_live_agent` is live too (`planner=llm`).
+
+### A natural-language target reaches the closed vocabulary (`LexiconPerception`)
+
+An LLM names targets the way a person does — "the Save button", "Edit menu" —
+which is rarely the bare vocabulary word (`save`, `edit_menu`). `_match` tries
+candidate forms in order (strip leading filler, strip generic suffixes
+`button`/`field`/`menu`/…, try the head word, try `_`↔space both ways) and only
+then matches against a read label, still fail-closed on an unknown word. Before
+this the demo said "Ji, main save kar deta hoon" and the gate denied with
+`grounder produced no candidate point`, because the model said "save button" and
+the reader's label is "save".
+
+### The mouth can be the browser (`BrowserEngine`)
+
+The server is a container with no sound card; the browser has one. `BrowserEngine`
+still synthesizes with espeak-ng (same voice) but parks the newest WAV for the
+page to fetch (`GET /api/speech.wav`, `X-Speech-Seq`) and play through the Web
+Audio API, instead of handing it to `aplay`. `play()` returns `True` because the
+clip *was* delivered to the client's mouth. `--mouth browser|local|silent` picks
+it; `browser` is the default.
+
+### The ears find their own model (`avcs/voice/stt.py`)
+
+`default_stt_engine()` now calls `find_vosk_model()`, which looks in
+`AVCS_VOSK_MODEL`, then `models/`, `~/.cache/vosk`, `/opt/vosk`, preferring a
+Hindi/Indian-English model. `python3 -m avcs.voice.demo --get-ears` downloads a
+small model into `models/` (urllib + zipfile, no new dependency). So ears are
+zero-config after one command, and `--audio a.wav,b.wav` exercises the whole
+ears -> brain -> mouth loop headless.
+
+Measured live on this box (managed proxy, `deepseek-v4.1-flash`):
+
+| check | result |
+|---|---|
+| `--check-llm` | exit 0, ~284 ms, `{"status": "verified"}` |
+| `respond("mujhe save karna hai")` | `act` / `click` / "Save button", `brain=llm` |
+| `respond("tum kaun ho")` | Hinglish reply, no action |
+| GUI `/api/turn` save→close→undo | each grounds at its own point (57,68)/(152,66)/(250,66) |
+| `/api/turn.stream` | `speech` event then `turn` event; speech WAV 7.3 s @22.05 kHz |
+| `/api/hear` on an espeak WAV | vosk transcript returned |
+| `--audio` loop | ears → live LLM → mouth, then `stop` ends the session |
+
 
 ### Real-time session: streaming, barge-in, continuous loop (`Assistant.loop`)
 
@@ -1368,3 +1459,59 @@ prints the truth:
   `mouth_available: True` as "it can speak here".
 
 
+
+## The assistant GUI (`avcs/gui/`, `avcs/voice/scene_perception.py`) — a brain, not a clicker
+
+The GUI is an **AI assistant** first: it looks at a screen, talks about it in
+Hinglish, and only actuates if a caller opts in. The control-grounding path is
+still there, but it is opt-in, not the product.
+
+```
+python3 -m avcs.gui.run --port 12000                 # looks + talks (no capability)
+python3 -m avcs.gui.run --source screen              # the real screen
+python3 -m avcs.gui.run --eyes lexicon --grant click # opt in to the click path
+```
+
+`ScenePerception` (`avcs/voice/scene_perception.py`) is the default eyes: pure
+pixel perception via `forge/vision`, returning a `ScreenObservation`. It
+**never names a control label** -- it stays at scene level ("a mid-tone, detailed
+screen, structure reads as panel"). That is the whole point: a scene describer
+is not a button detector, and a page that framed every reply as a gated click
+would be the clicker the user rejected. `DemoSceneSource`
+(`avcs/gui/demo_source.py`) scripts scene *archetypes*
+(`desktop/terminal/media/dialog/scroll`), not controls.
+
+Default capabilities with scene eyes are empty: `can_act: False`, `actuation:
+virtual`. `--eyes lexicon` is the only thing that turns on a `click` grant,
+because only the lexicon reader produces a grounding point.
+
+### Two bugs fixed on this path
+
+1. **`CapabilityKernel.authorize` ran the grounding checks on observing ops.**
+   `is_granted` already says observing ops need no capability, but `authorize`
+   then demanded a candidate point anyway, so a plain "look at the screen" step
+   (`observe_target`) came back **denied** -- a perception step rendered as a
+   denied click. Observing ops now return `allowed=True` before any grounding
+   check. A caller can still tell a real actuation apart from a glance: the GUI
+   marks each transcript entry with `mutating: bool` and the page shows a
+   `LOOK` badge instead of `ALLOW`/`DENY` for a non-mutating action.
+   `test_authorize_allows_an_observing_op_with_no_evidence` pins it.
+
+2. **A `204` response carried a body.** The mouth-polling endpoint
+   (`/api/speech.wav`) returned `JSONResponse({...}, status_code=204)` when there
+   was nothing new. A 204 must have no body, so uvicorn raised
+   `RuntimeError: Response content longer than Content-Length` on every idle
+   poll -- and the browser polls four times a second, so the log filled with
+   tracebacks. It now returns a bare `Response(status_code=204)`.
+   `test_speech_endpoint_returns_204_with_no_body_when_idle` pins it.
+
+### The live brain is not deterministic; tests must inject one
+
+`ConversationBrain()` resolves a real LLM when a key is present (here the
+platform-managed key resolves), so any test that asserts on an assistant's
+*decision* becomes a network round-trip. `GuiApp(..., brain=...)` and the
+`_assistant(brain=...)` helper exist for this: a test that pins gating or the
+autonomous loop passes an offline brain (`ConversationBrain(provider=...)`
+whose provider raises, so it falls back to `RuleBrain`). Verified live
+end-to-end: the page renders a Hinglish reply with `brain llm` and no click, and
+`/api/speech.wav` returns a real WAV (espeak-ng) for the mouth to play.

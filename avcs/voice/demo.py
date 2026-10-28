@@ -258,6 +258,9 @@ def main() -> None:
                     help="max autonomous action steps per spoken task")
     ap.add_argument("--seconds", type=float, default=4.0, help="seconds to record per turn")
     ap.add_argument("--vosk-model", type=str, default=None, help="path to a Vosk model directory")
+    ap.add_argument("--get-ears", action="store_true",
+                    help="download a small Vosk model (into models/) and exit, so "
+                         "the assistant can hear without any further setup")
     ap.add_argument("--stt-language", type=str, default=None,
                     help="force a Whisper language (default: auto-detect, best for Hinglish)")
     ap.add_argument("--eyes", action="store_true", help="use real pure-pixel screen perception")
@@ -285,6 +288,18 @@ def main() -> None:
                     help="probe the configured LLM endpoint with one minimal request and "
                          "report honestly whether the key, endpoint and model work, then exit")
     args = ap.parse_args()
+
+    if args.get_ears:
+        from avcs.voice.stt import download_vosk_model, find_vosk_model
+
+        path = find_vosk_model() or download_vosk_model()
+        if path:
+            print(f"ears ready: {path}")
+            print(f"run: python3 -m avcs.voice.demo --listen --eyes --ground --grant click")
+        else:
+            print("could not download a Vosk model; install one manually and set "
+                  "AVCS_VOSK_MODEL, or 'python3 -m pip install faster-whisper'")
+        return
 
     assistant = build_assistant(args)
 

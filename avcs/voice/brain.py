@@ -342,8 +342,11 @@ class ConversationBrain:
         labels the result ``rule_fallback``.
         """
         self.record_user(user_text)
-        if user_text and not self.task:
-            # The first actionable utterance becomes the task.
+        if user_text:
+            # The user's current request *is* the task. It is updated on every
+            # spoken turn so a new instruction ("ab close karo") replaces the old
+            # one instead of the first utterance sticking for the whole session.
+            # An autonomous step passes "" and leaves the task untouched.
             self.task = user_text.strip()
 
         self.step_index += 1
@@ -357,19 +360,53 @@ class ConversationBrain:
             return turn
 
         try:
-            decision = self.provider.plan_step(
-                task=self.task,
-                observation=observation,
-                history=[t.to_message() for t in self.history[:-1]],
-                step_index=self.step_index,
-                system_prompt=self._system_prompt(CONVERSATION_SYSTEM_PROMPT),
-            )
-            turn = self._turn_from_decision(decision)
+            raw_step = getattr(self.provider, "raw_step", None)
+            if callable(raw_step):
+                # The conversation contract (`speech`/`kind`/`action`) is not the
+                # System 2 planner contract (`next_intent`). Ask for the raw reply
+                # and parse it against the conversation schema, or the model's
+                # action is dropped and every turn becomes a bare observe.
+                raw = raw_step(
+                    task=self.task,
+                    observation=observation,
+                    history=[t.to_message() for t in self.history[:-1]],
+                    step_index=self.step_index,
+                    system_prompt=self._system_prompt(CONVERSATION_SYSTEM_PROMPT),
+                )
+                turn = self._turn_from_reply(raw)
+            else:
+                decision = self.provider.plan_step(
+                    task=self.task,
+                    observation=observation,
+                    history=[t.to_message() for t in self.history[:-1]],
+                    step_index=self.step_index,
+                    system_prompt=self._system_prompt(CONVERSATION_SYSTEM_PROMPT),
+                )
+                turn = self._turn_from_decision(decision)
         except Exception as exc:  # unreachable endpoint, bad key, timeout, ...
             turn = self._fallback(user_text, observation, reason=str(exc))
 
         self.record_assistant(turn.speech)
         return turn
+
+    def _turn_from_reply(self, raw: str) -> AssistantTurn:
+        """Parse a whole conversation reply (spoken text + optional action JSON)."""
+        text = (raw or "").strip()
+        spoken, action_obj = _split_stream_reply(text)
+        if action_obj is None:
+            obj = _extract_json_object(text)
+            if isinstance(obj, dict) and ("speech" in obj or "kind" in obj or "action" in obj):
+                action_obj = obj
+                spoken = str(obj.get("speech") or spoken).strip()
+        # A plain (non-JSON) reply is still a valid conversational answer.
+        if action_obj is None:
+            return AssistantTurn(
+                kind=TurnKind.REPLY,
+                speech=spoken or self._DEFAULT_SPEECH[TurnKind.REPLY],
+                source="llm",
+            )
+        speech = str(action_obj.get("speech") or spoken or "").strip()
+        return self._turn_from_stream(speech, action_obj)
 
     _DEFAULT_SPEECH = {
         TurnKind.REPLY: "Okay sir.",
@@ -399,7 +436,9 @@ class ConversationBrain:
         returns a valid turn.
         """
         self.record_user(user_text)
-        if user_text and not self.task:
+        if user_text:
+            # Same rule as the non-streaming path: a new spoken instruction
+            # replaces the task; an autonomous step ("" text) keeps it.
             self.task = user_text.strip()
         self.step_index += 1
         observation = observation or self.build_observation()
@@ -502,15 +541,22 @@ class ConversationBrain:
                 "finish": TurnKind.FINISH, "stop": TurnKind.STOP,
             }.get(raw_kind, TurnKind.REPLY)
             action = action_obj.get("action") or {}
-            op_name = str(action.get("op") or "").strip().lower()
+            # Models paraphrase the action keys even when the prompt names them
+            # ("op" vs "type"; "target_description" vs "target"). Accept the
+            # synonyms so a valid action is not silently downgraded to a reply.
+            op_name = str(
+                action.get("op") or action.get("type") or action.get("action") or ""
+            ).strip().lower()
             if kind == TurnKind.ACT and op_name:
                 try:
                     intent = ActionIntent.create(
                         step_index=self.step_index,
                         op=op_name,
-                        target_description=action.get("target_description"),
-                        text_input=action.get("text_input"),
-                        key_name=action.get("key_name"),
+                        target_description=(
+                            action.get("target_description") or action.get("target")
+                        ),
+                        text_input=action.get("text_input") or action.get("text"),
+                        key_name=action.get("key_name") or action.get("key"),
                         rationale=thought,
                     )
                 except Exception:

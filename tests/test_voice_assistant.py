@@ -281,6 +281,11 @@ def _assistant(**kwargs) -> Assistant:
     kwargs.setdefault("speaker", Speaker(engine=NullTtsEngine()))
     kwargs.setdefault("stt", NullEngine())
     kwargs.setdefault("perception", StaticPerception())
+    # These tests pin the assistant's own mechanics (gating, actuation, the
+    # autonomous loop), which must be deterministic. A live LLM makes the
+    # outcome depend on a network round-trip, so the default here is the offline
+    # rule brain. The live-brain path has its own tests.
+    kwargs.setdefault("brain", ConversationBrain(provider=_ExplodingProvider()))
     return Assistant(**kwargs)
 
 
