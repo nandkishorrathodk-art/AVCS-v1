@@ -73,7 +73,12 @@ def main() -> int:
     print(f"  mouth      : {caps.get('mouth')}")
     print(f"  ears       : {caps.get('ears')}")
     print(f"  can act    : {caps.get('can_act')} (grants: {gui.grants or 'none'})")
-    print(f"  actuation  : {caps.get('actuation')}")
+    print(f"  actuation  : {caps.get('actuation')}"
+          + (f" ({caps.get('hand')})" if caps.get("hand") else ""))
+    if args.live and caps.get("actuation") == "live-unavailable":
+        print("  WARNING    : --live was requested but no hand is available "
+              "(need xdotool + $DISPLAY on Linux, or Windows user32); "
+              "every actuation will be refused.")
     print(f"  http://{args.host}:{args.port}/")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

@@ -248,6 +248,40 @@ def test_assistant_is_virtual_by_default():
     assert gui.hand is None
 
 
+def test_live_without_a_hand_reports_unavailable_not_live(monkeypatch):
+    """`--live` must not read as "live" when the machine cannot actuate.
+
+    A page that shows "live" while every op is refused is the same class of
+    dishonesty as a checkpoint claiming accuracy it does not have.
+    """
+    import avcs.voice.actuators as actuators
+
+    monkeypatch.setattr(actuators, "default_hand", lambda: None)
+    gui = GuiApp(source="demo", mouth="silent", ears=False, live=True, grants=["click"])
+    caps = gui.capabilities()
+    assert gui.hand is None
+    assert caps["actuation"] == "live-unavailable"
+    assert caps["hand"] is None
+    # And a turn record must not claim real actuation either.
+    assert gui.assistant.actuation == "virtual"
+
+
+def test_live_with_a_hand_reports_live_and_names_it(monkeypatch):
+    import avcs.voice.actuators as actuators
+
+    class _Hand:
+        name = "xdotool"
+        def get_screen_size(self):
+            return 1280, 800
+
+    monkeypatch.setattr(actuators, "default_hand", lambda: _Hand())
+    gui = GuiApp(source="demo", mouth="silent", ears=False, live=True, grants=["click"])
+    caps = gui.capabilities()
+    assert caps["actuation"] == "live"
+    assert caps["hand"] == "xdotool"
+    assert gui.assistant.actuation == "live"
+
+
 def test_speech_endpoint_returns_204_with_no_body_when_idle():
     """A 204 must carry no body; a body makes uvicorn reject the response.
 

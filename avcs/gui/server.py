@@ -249,6 +249,9 @@ class GuiApp:
             perception=self.screen.perception,
             kernel=self.kernel,
             hand=self.hand,
+            # Say "live" only when a real hand exists, so a turn record does not
+            # claim real actuation on a machine that cannot actuate.
+            actuation="live" if self.hand is not None else "virtual",
         )
         self.transcript: List[Dict[str, Any]] = []
 
@@ -275,7 +278,17 @@ class GuiApp:
 
     def capabilities(self) -> Dict[str, Any]:
         caps = self.assistant.capabilities()
-        caps["actuation"] = "live" if self.live and self.grants else "virtual"
+        # Report what can *actually* actuate, not what was requested. `--live`
+        # with no hand (no xdotool/X11 on Linux, no user32 on Windows) must not
+        # read as "live": every op would be refused, and the page would be
+        # claiming a capability the machine does not have.
+        if self.hand is not None:
+            caps["actuation"] = "live"
+        elif self.live:
+            caps["actuation"] = "live-unavailable"
+        else:
+            caps["actuation"] = "virtual"
+        caps["hand"] = getattr(self.hand, "name", None)
         caps["mouth"] = self.speaker.engine_name
         caps["eyes"] = type(self.screen.perception).__name__
         caps["can_act"] = bool(self.grants)

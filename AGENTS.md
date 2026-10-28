@@ -1515,3 +1515,48 @@ autonomous loop passes an offline brain (`ConversationBrain(provider=...)`
 whose provider raises, so it falls back to `RuleBrain`). Verified live
 end-to-end: the page renders a Hinglish reply with `brain llm` and no click, and
 `/api/speech.wav` returns a real WAV (espeak-ng) for the mouth to play.
+
+### Real mouse and keyboard actuation (`avcs/voice/actuators.py`, `hands.py`)
+
+The hand is real, cross-platform, and **fail-closed**, and it is off unless asked
+for. `avcs/voice/hands.py::dispatch` is the single point where a gated op becomes
+a hand call: `click`/`double_click` -> `click(x, y)`, `type`/`type_text` ->
+`type_text(text)`, `press_key` -> `press_key(key)`, `scroll` -> `scroll(delta)`,
+anything else refuses. `XdotoolHand` (Linux/X11) drives the native cursor in
+**absolute pixels**, matching `HandMotor` (Windows `user32`); `default_hand()`
+picks the right one per platform and returns `None` when neither is usable.
+
+The gate still owns the decision: nothing actuates until
+`CapabilityKernel.authorize` returns `allowed=True` with a grounded coordinate.
+`--live` is required *and* a grant (`--grant click type press_key scroll`); with
+neither, `Assistant` holds a `VirtualHand` that records the coordinate and moves
+no cursor.
+
+Measured on this box (Xvfb `:99`, 1280x800, real Tk window at +80+80), a full
+`POST /api/turn` with `--live --grant click --eyes lexicon`:
+
+```
+cursor before : 500,300
+action        : click | gate: True (capability 'click' granted and grounding peak 0.691 >= 0.45)
+actuation     : live | performed: True | clicked: [81, 105]
+cursor after  : 81,105          # the real pointer moved
+window recv   : CLICK 1,25      # (81,105) - (80,80) -- the real window got it
+```
+
+Typing and keys were verified the same way: `dispatch(hand, 'type_text', ...)`
+delivered all 15 characters plus `Return` to the focused window, in order.
+
+**`--live` with no hand must not read as "live".** `GuiApp.capabilities()` now
+derives `actuation` from whether a hand is actually attached:
+`live` (hand present) / `live-unavailable` (`--live` requested, none usable) /
+`virtual` (default). It also reports `hand` by name. `run.py` prints a warning
+for the middle case. A page that showed "live" while every op was refused would
+be the same dishonesty as a checkpoint claiming accuracy it does not have.
+`test_live_without_a_hand_reports_unavailable_not_live` and
+`test_live_with_a_hand_reports_live_and_names_it` pin both halves.
+
+Note on Xvfb: the pointer position is only stable while a client stays
+connected. `xdotool getmouselocation` between two short-lived `xdotool`
+invocations reports the default centre because the server resets with no client;
+keep a window alive (as the test does) or chain the move and the read in one
+`xdotool` call.

@@ -129,6 +129,7 @@
   <span class="badge" id="bMouth">mouth …</span>
   <span class="badge" id="bEars">ears …</span>
   <span class="badge" id="bEyes">eyes …</span>
+  <span class="badge" id="bHand">hand: —</span>
   <span class="spacer"></span>
   <span class="badge" id="bFps">— fps</span>
   <span class="badge" id="bRead">— ms/frame</span>
@@ -187,6 +188,22 @@ async function loadCaps() {
 
     $("#bEyes").textContent = "eyes: " + (c.eyes || "?");
     $("#bEyes").className = "badge " + (c.eyes === "ScenePerception" ? "ok" : "warn");
+
+    // Actuation is reported as what the machine can actually do, not what was
+    // requested: "live" only when a real hand is attached.
+    const act = c.actuation || "virtual";
+    const hand = c.hand ? c.hand : null;
+    const bh = $("#bHand");
+    if (act === "live") {
+      bh.textContent = "hand: live" + (hand ? " (" + hand + ")" : "");
+      bh.className = "badge ok";
+    } else if (act === "live-unavailable") {
+      bh.textContent = "hand: live requested, none available";
+      bh.className = "badge deny";
+    } else {
+      bh.textContent = "hand: virtual (moves no cursor)";
+      bh.className = "badge warn";
+    }
   } catch (e) { /* cosmetic */ }
 }
 
