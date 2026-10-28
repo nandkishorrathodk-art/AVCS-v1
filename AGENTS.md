@@ -1308,7 +1308,63 @@ construction**. That is the honest scope: it shows the reader working on
 software this generator draws. It is not evidence about unseen applications, and
 the cross-generator caveats for the grounder apply in spirit here too.
 
-`tests/test_gui_model.py` (25 tests) runs the real reader, kernel, assistant and
+`tests/test_gui_model.py` (26 tests) runs the real reader, kernel, assistant and
 FastAPI app — no mocks, because the thing under test is whether the pieces agree
 with each other, and a mock would assert that they do.
+
+### The kernel floor is a per-perception choice, not a global constant
+
+Wiring the adapter in revealed a second, subtler reason the click step looked
+broken. With the candidate point finally reaching the kernel, the demo still
+denied:
+
+```
+gate: DENY (grounding peak 0.691 below capability floor 0.75 (target likely absent))
+```
+
+The point was real and the read was correct; the **floor was wrong**. 0.75 was
+calibrated for the goal grounder's `peak_probability`, which sits above 0.75 on a
+hit and below it on a wrong query (documented above). The lexicon's confidence is
+a different scale — a cosine margin against 61 prototypes — and a control it read
+correctly lands at 0.47-0.70. Reusing 0.75 refuses *every* real control, which
+would have looked exactly like "grounding is broken" rather than "the threshold
+belongs to the other model".
+
+`--lexicon-eyes` therefore defaults the floor to 0.45 (`--peak-floor` overrides;
+the goal-grounder path keeps 0.75). `test_lexicon_confidence_scale_differs_from_grounder`
+pins the fact that a correct lexicon read is below 0.75, so the day confidences
+rise above it the default is revisited rather than silently kept.
+
+With that, the demo closes the loop end to end:
+
+```
+you   : save karo
+avcs  : Okay sir, click on save.   (brain=rule_fallback)
+action: click target='save'
+gate  : ALLOW (capability 'click' granted and grounding peak 0.691 >= 0.45)
+hand  : virtual click at (57, 68)
+verify: no change (delta=0.0)
+```
+
+`verify: no change` is the honest reading: the synthetic desktop does not change
+when a virtual hand clicks it, so the delta is 0.0 and it says so instead of
+claiming success. Real actuation (`--live`) and a real screen are what produce a
+non-zero delta.
+
+### What the assistant still cannot do (unchanged, and not hidden)
+
+Run `python3 -m avcs.voice.demo ... --lexicon-eyes --desktop-eyes` and the header
+prints the truth:
+
+- `brain_has_key: False` — no LLM key is configured, so `brain=rule_fallback`.
+  The brain is a keyword matcher, not the conversational LLM. Setting
+  `AVCS_LLM_API_KEY` (and optionally `AVCS_LLM_ENDPOINT` / `AVCS_LLM_MODEL`) is
+  what turns it into the real brain.
+- `mouth: null`, `ears: null` — **no TTS engine and no STT backend are installed
+  on this box** (`espeak-ng` absent; `vosk`/`whisper`/`faster_whisper` all
+  missing, as are `sounddevice`/`pyaudio`/`mss`). So the run is text-in,
+  text-out with `--silent`. The `mouth_available`/`ears_available` flags report
+  whether the *code path* exists, not whether a binary is installed — do not read
+  `mouth_available: True` as "it can speak here".
+
 

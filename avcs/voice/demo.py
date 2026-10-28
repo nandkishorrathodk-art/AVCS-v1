@@ -119,7 +119,16 @@ def build_assistant(args) -> Assistant:
         try:
             from avcs.voice.lexicon_perception import LexiconPerception
 
-            perception = LexiconPerception(source="screen" if not args.synthetic_eyes else "synthetic")
+            if args.desktop_eyes:
+                # A synthetic desktop whose controls are real vocabulary words,
+                # so the reader has something to read without a display.
+                from avcs.gui.desktop import DesktopSource
+
+                perception = LexiconPerception(frame_source=DesktopSource())
+            else:
+                perception = LexiconPerception(
+                    source="screen" if not args.synthetic_eyes else "synthetic"
+                )
         except Exception as exc:
             print(f"warning: lexicon eyes unavailable ({exc}); running without perception.",
                   file=sys.stderr)
@@ -146,7 +155,16 @@ def build_assistant(args) -> Assistant:
                   file=sys.stderr)
             perception = None
 
-    kernel = CapabilityKernel(granted_ops=args.grant or ())
+    # The kernel's default floor of 0.75 is calibrated for the goal grounder's
+    # peak, which sits above 0.75 on a hit. The lexicon reader's confidence is a
+    # different scale (cosine margin against 61 prototypes), where a correct
+    # control reads 0.5-0.7, so 0.75 would refuse every real control. The floor
+    # is therefore a per-perception choice, not a global constant, and the
+    # default here is the lexicon's.
+    floor = args.peak_floor
+    if floor is None:
+        floor = 0.45 if args.lexicon_eyes else 0.75
+    kernel = CapabilityKernel(granted_ops=args.grant or (), min_peak_probability=floor)
     hand = None
     if args.live:
         # Real actuation: use the platform's real hand (Windows HandMotor, or
@@ -162,6 +180,14 @@ def build_assistant(args) -> Assistant:
                 "actions will be refused.",
                 file=sys.stderr,
             )
+    elif args.lexicon_eyes:
+        # A granted click with no hand attached is reported as allowed but not
+        # performed, which reads as a gap. A virtual hand records the coordinate
+        # the click resolved to and moves no cursor, so the loop is visibly
+        # complete without touching the machine.
+        from avcs.system1.loop import VirtualHand
+
+        hand = VirtualHand(width=900, height=520)
 
     return Assistant(
         brain=brain,
@@ -238,6 +264,8 @@ def main() -> None:
     ap.add_argument("--lexicon-eyes", action="store_true",
                     help="ground labelled controls via the AVC lexicon (authorizes clicks)")
     ap.add_argument("--synthetic-eyes", action="store_true", help="force the headless frame buffer")
+    ap.add_argument("--desktop-eyes", action="store_true",
+                    help="with --lexicon-eyes, read a synthetic desktop with real controls")
     ap.add_argument("--ground", action="store_true",
                     help="with --eyes, also run the trained grounder so the gate can pass")
     ap.add_argument("--llm-endpoint", type=str, default=None,
@@ -247,6 +275,8 @@ def main() -> None:
                     help="mouth voice; default hinglish since the user speaks it")
     ap.add_argument("--grant", nargs="*", default=["click"],
                     help="mutating ops allowed; pass no values for a fully fail-closed run")
+    ap.add_argument("--peak-floor", type=float, default=None,
+                    help="kernel grounding floor (default: 0.45 for --lexicon-eyes, else 0.75)")
     ap.add_argument("--live", action="store_true", help="authorize REAL mouse/keyboard actuation")
     ap.add_argument("--silent", action="store_true", help="never touch the audio device")
     ap.add_argument("--no-audio", action="store_true", help="alias for --silent")

@@ -298,3 +298,19 @@ def test_gui_is_virtual_by_default(tmp_path):
     gui = GuiApp(source="desktop")
     assert gui.live is False
     assert gui.capabilities()["actuation"] == "virtual"
+
+
+def test_lexicon_confidence_scale_differs_from_grounder(perception):
+    """A correct lexicon read sits below the goal grounder's 0.75 floor.
+
+    This is why the kernel floor is a per-perception choice: the grounder's
+    `peak_probability` is calibrated above 0.75 on a hit, while the lexicon's
+    confidence is a cosine margin against 61 prototypes and reads lower for a
+    control it got right. Reusing 0.75 here would refuse every real control, so
+    the demo selects 0.45 for `--lexicon-eyes`. If this test starts failing
+    because confidences rose above 0.75, the floor default can be revisited.
+    """
+    perception.grab()
+    ev = perception.grounding_evidence("save")
+    assert ev is not None
+    assert 0.0 < ev.peak_probability < 0.75
