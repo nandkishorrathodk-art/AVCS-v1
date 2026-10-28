@@ -1738,3 +1738,102 @@ it. The system prompt already forbids it; the trajectory log is where that
 failure becomes measurable.
 
 Full suite after these changes: **271 passed, 2 skipped**.
+
+## Proactive awareness: the assistant speaks first (`avcs/gui/awareness.py`)
+
+Everything above describes an assistant that *answers*. That is a command line
+with a voice: nothing is said unless the user types or talks first. The gap
+between "answers well" and "an assistant in the room" is that a person notices
+things and mentions them, unprompted.
+
+`AwarenessLoop` is that half. It is a daemon thread that watches the cheap pixel
+reflex the page already runs, and lets the brain speak when something is worth
+interrupting for. It is **opt-in** (`--proactive`) because an assistant that
+talks unprompted must be asked for.
+
+### When it is allowed to speak
+
+The reflex already computes the signals, so no model runs per frame. A *reason*
+is raised only when a signal crosses a threshold, in priority order:
+
+| reason | signal | default |
+|---|---|---|
+| `overlay` | something small and high-contrast appeared over the scene | `change_fraction >= 0.004` |
+| `scene_change` | the whole screen changed at once | `change_fraction >= 0.30` |
+| `appear` | something new and prominent appeared | `novelty >= 0.45 and change >= 0.55` |
+| `stuck` | local motion repeating in one spot, no scene change, for a while | `peak_motion >= 0.12` for `45 s` |
+
+Everything else is ignored on purpose. **Narrating a moving mouse is noise, and a
+noisy assistant is worse than a silent one.** Two more gates follow: a
+**cooldown** (never speak twice within 20 s) and a **dedup window** (the same
+reason is not repeated for 120 s, even past the cooldown).
+
+Measured live on the scripted demo, one minute of watching with the real LLM
+brain:
+
+```
+remark_count: 2
+  scene_change  "Lagta hai aapne poora naya screen ya app khol liya hai."
+  overlay       "Ek chhota sa dialog ya overlay screen par aa gaya hai, ek nazar daal lena."
+skipped: {cooldown: 26, repeat:scene_change: 20, silent:scene_change: 1}
+```
+
+Two remarks in ~60 s of change, 46 ticks suppressed by cooldown/dedup, and one
+tick where **the model chose silence** (`silent:scene_change`). The restraint is
+the feature; the skipped counters are how it is measured rather than claimed.
+
+### What it cannot do
+
+**It has no hand.** There is no path from this module to an actuation, and a
+test asserts the source imports no `VirtualHand`/`HandMotor`/`XdotoolHand` and
+never mentions the kernel. A watcher that could also click is the clicker this
+product explicitly is not. The brain is even told `can_click: False` in the
+proactive observation, so it cannot announce an action it will never take.
+
+It also stays quiet while a user turn is in flight (`GuiApp._turn_in_flight`),
+so a remark can never talk over the conversation it exists to support.
+
+### A separate prompt, because the role is different
+
+`PROACTIVE_SYSTEM_PROMPT` is not the conversation prompt. Here the model is a
+colleague looking over your shoulder and **silence is the correct answer most of
+the time**. The prompt lists when to stay silent (a mouse move, a mid-task user,
+a repeat, uncertainty) and asks for an empty `speech` when in doubt. Offline, the
+rule fallback speaks only for an overlay or a whole-screen change -- the two
+things a keyword matcher can be sure of.
+
+`ConversationBrain.comment()` returns ``None`` for "nothing worth saying", so a
+caller cannot accidentally speak an empty string. It never raises: an
+unreachable model degrades to the conservative rule remark.
+
+### Hands-free listening: no button
+
+The mic was push-to-talk (hold to speak). A person does not press a button to be
+heard, so the page now records short windows on a loop and submits any that
+contain speech, dropping silent windows rather than printing "no speech" every
+few seconds. Two guards matter:
+
+- It pauses while the assistant's own mouth is playing (`mouthPlaying`), so the
+  TTS output is not transcribed back as the user's words -- the feedback loop
+  that would make the assistant answer itself forever.
+- It is off until the first click **anywhere** on the page. That click is the
+  browser's mandatory microphone-permission gesture, not a "start listening"
+  button; after it, nothing needs pressing.
+
+The header reports `listening: off/on` from the real state, and a blocked mic
+shows `mic blocked` rather than a silent failure.
+
+### Honest limits
+
+The signals are coarse pixel statistics, not understanding. `overlay` is a
+bright small region, not "an error dialog about your file" -- the brain turns the
+observation into words, and with the offline rule brain it will be a generic
+sentence. Thresholds are defaults tuned on the synthetic demo on this box, not
+calibrated across real applications; `AwarenessConfig` exists so a caller
+retunes rather than trusting the constants. The whole thing was verified on a
+headless container: remarks were produced and rendered, but the browser-side
+microphone path could not be exercised here (no sound card), so hands-free
+listening is code-verified, not end-to-end audio-verified.
+
+Tests: `tests/test_proactive_awareness.py` (20 tests) drives the real loop, the
+real brain and the real FastAPI app. Full suite: **291 passed, 2 skipped**.

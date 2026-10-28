@@ -27,7 +27,7 @@ import dataclasses
 import json
 import re
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from avcs.reasoning.contracts import ActionIntent, ActionOp, System2Decision
 from avcs.voice.tts import split_sentences as _split_sentences
@@ -160,6 +160,47 @@ _LANGUAGE_INSTRUCTIONS = {
         "Hindi/Hinglish, answer in Hinglish; otherwise answer in English."
     ),
 }
+
+
+# The prompt for a *spontaneous* remark: the assistant is watching the screen and
+# speaks because something changed, not because it was asked. Kept separate from
+# the conversation prompt because the role is different -- here the model is a
+# colleague looking over your shoulder, and the correct answer is often silence.
+PROACTIVE_SYSTEM_PROMPT = """You are AVCS, a real-time desktop assistant that is watching the user's screen.
+
+Nobody asked you anything. The local visual cortex noticed a change on screen and
+handed you a short factual description of it. Your job is to decide whether it is
+worth saying something out loud.
+
+Say something ONLY when a person sitting next to the user would:
+- a dialog or overlay appeared that wants an answer,
+- the screen changed to a clearly different view or app,
+- something new and prominent appeared that the user may want to know about,
+- the user looks stuck (the same view for a long time, or repeated motion in one
+  place with no progress).
+
+Stay SILENT (empty speech) when:
+- it is just the mouse moving or a caret blinking,
+- the user is plainly mid-task and a comment would be noise,
+- you would be describing the same thing you already said,
+- you are not sure -- a wrong remark is worse than silence.
+
+Hard rules:
+1. NEVER output screen coordinates or pixel positions. You name things in plain
+   words ("a dialog box appeared").
+2. Base what you say ONLY on the description you are given. Do not invent
+   controls, text or applications that the description does not support.
+3. ONE short sentence, spoken aloud, so no markdown, no lists, no emoji.
+4. You cannot click or type here. Do not announce an action. If something needs
+   doing, mention it and let the user decide.
+
+Reply with ONE JSON object and nothing else:
+{
+  "speech": "one short spoken sentence, or an empty string to stay silent",
+  "thought": "one line of private reasoning",
+  "worth_saying": true | false
+}
+"""
 
 
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -390,6 +431,115 @@ class ConversationBrain:
         if self.memory is None:
             return False
         return self.memory.remember(key, value) is not None
+
+    # ------------------------------------------------------------------ #
+    # Spontaneous remark (the assistant speaks first)
+    # ------------------------------------------------------------------ #
+    def comment(
+        self,
+        observation: Dict[str, Any],
+        reason: str = "",
+        on_speech: Optional[Callable[[str], None]] = None,
+    ) -> Optional[AssistantTurn]:
+        """Decide whether to say something unprompted, and say it.
+
+        This is the other half of being an assistant rather than a command line:
+        a person sitting next to you notices things and mentions them. The model
+        is given the same coordinate-free description it always gets plus *why*
+        the watcher flagged this moment, and may answer with an empty speech to
+        stay silent.
+
+        Returns ``None`` when the brain has nothing worth saying, so the caller
+        cannot accidentally speak an empty string. Never raises: an unreachable
+        model falls back to the deterministic rule brain, which is conservative
+        on purpose (it only speaks for an overlay or a whole-screen change).
+        """
+        observation = dict(observation or {})
+        if reason:
+            observation["why_now"] = reason
+        observation.setdefault("task", self.task)
+
+        if self._offline():
+            return self._rule_comment(observation, reason)
+
+        try:
+            raw_step = getattr(self.provider, "raw_step", None)
+            if callable(raw_step):
+                raw = raw_step(
+                    task=self.task,
+                    observation=observation,
+                    history=[t.to_message() for t in self.history[-4:]],
+                    step_index=self.step_index,
+                    system_prompt=self._system_prompt(PROACTIVE_SYSTEM_PROMPT),
+                )
+            else:
+                decision = self.provider.plan_step(
+                    task=self.task,
+                    observation=observation,
+                    history=[t.to_message() for t in self.history[-4:]],
+                    step_index=self.step_index,
+                    system_prompt=self._system_prompt(PROACTIVE_SYSTEM_PROMPT),
+                )
+                raw = decision.clarification_prompt or decision.thought or ""
+        except Exception:
+            return self._rule_comment(observation, reason)
+
+        turn = self._turn_from_comment(raw)
+        if turn is None:
+            return None
+        if on_speech is not None and turn.speech:
+            on_speech(turn.speech)
+        self.record_assistant(turn.speech)
+        return turn
+
+    def _turn_from_comment(self, raw: str) -> Optional[AssistantTurn]:
+        """Parse a proactive reply. ``None`` means "stay silent"."""
+        obj = _extract_json_object(raw or "")
+        speech = ""
+        thought = ""
+        worth = True
+        if isinstance(obj, dict):
+            speech = str(obj.get("speech") or "").strip()
+            thought = str(obj.get("thought") or "").strip()
+            worth = obj.get("worth_saying", True) is not False
+        else:
+            # A bare sentence (no JSON) is still a usable remark; an empty reply
+            # is not.
+            speech = (raw or "").strip()
+        # The sentinel must never be spoken, even if the model echoed it.
+        if STREAM_SENTINEL in speech:
+            speech = speech.split(STREAM_SENTINEL)[0].strip()
+        if not worth or not speech:
+            return None
+        return AssistantTurn(
+            kind=TurnKind.REPLY, speech=speech, thought=thought, source="llm",
+        )
+
+    def _rule_comment(self, observation: Dict[str, Any], reason: str) -> Optional[AssistantTurn]:
+        """Offline remarks: only the two changes a keyword matcher can be sure of.
+
+        Conservative by construction. A deterministic watcher that narrates every
+        mouse move is worse than one that says nothing, so this speaks only for a
+        whole-screen change or an overlay -- the same two signals the rule brain
+        can read without a model.
+        """
+        text = str(observation.get("screen") or observation.get("screen_description") or "")
+        low = text.lower()
+        if observation.get("has_modal_dialog") or observation.get("has_modal") or "overlay" in low:
+            return AssistantTurn(
+                kind=TurnKind.REPLY,
+                speech="Sir, screen par ek dialog box khul gaya hai.",
+                thought="Offline remark: overlay detected.",
+                source="rule_fallback",
+            )
+        if "scene changed" in low or "whole screen changed" in low:
+            return AssistantTurn(
+                kind=TurnKind.REPLY,
+                speech="Sir, screen badal gaya — naya view dikh raha hai.",
+                thought="Offline remark: whole-screen change.",
+                source="rule_fallback",
+            )
+        return None
 
     # ------------------------------------------------------------------ #
     # History

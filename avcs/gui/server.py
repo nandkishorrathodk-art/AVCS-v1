@@ -226,6 +226,7 @@ class GuiApp:
         trajectory_path: Optional[str] = None,
         path_roots: Optional[List[str]] = None,
         allowed_apps: Optional[List[str]] = None,
+        proactive: bool = False,
     ) -> None:
         self.eyes = eyes
         self.screen = ScreenModel(
@@ -262,6 +263,9 @@ class GuiApp:
         self.stt = default_stt_engine() if ears else None
         self.hand = None
         self.live = bool(live)
+        # Set while a user turn is being handled, so the proactive watcher stays
+        # quiet and does not talk over the conversation it is supposed to support.
+        self._turn_in_flight = False
         if self.live and self.grants:
             from avcs.voice.actuators import default_hand
 
@@ -295,6 +299,67 @@ class GuiApp:
             trajectory=self.trajectory,
         )
         self.transcript: List[Dict[str, Any]] = []
+
+        # Proactive awareness: the assistant watches the screen and speaks first
+        # when something is worth mentioning. Opt-in, because an assistant that
+        # talks unprompted must be asked for -- and it has no hand, so it can
+        # never actuate from this path.
+        self.awareness = None
+        self.proactive = bool(proactive)
+        if self.proactive:
+            from avcs.gui.awareness import AwarenessLoop
+
+            self.awareness = AwarenessLoop(
+                snapshot=self.screen.snapshot,
+                brain=self.brain,
+                speak=self._speak_remark,
+                on_remark=self._record_remark,
+                is_busy=self._busy,
+                capabilities=self.capabilities,
+            )
+            self.awareness.start()
+
+    # ------------------------------------------------------------------ #
+    # Proactive awareness
+    # ------------------------------------------------------------------ #
+    def _busy(self) -> bool:
+        """True while a user turn is in flight, so remarks do not interrupt it."""
+        return bool(self._turn_in_flight)
+
+    def _speak_remark(self, text: str) -> None:
+        """Say a spontaneous remark through the same mouth as a normal reply."""
+        self.speaker.speak_async(text)
+
+    def _record_remark(self, remark) -> None:
+        entry = {
+            "turn": len(self.transcript) + 1,
+            "heard": "",
+            "said": remark.text,
+            "kind": "remark",
+            "source": remark.source,
+            "proactive": True,
+            "reason": remark.reason,
+            "detail": remark.detail,
+            "total_ms": 0.0,
+            "mutating": False,
+            "action": None,
+            "gate_allowed": None,
+        }
+        self.transcript.append(entry)
+
+    def awareness_summary(self) -> Dict[str, Any]:
+        loop = self.awareness
+        if loop is None:
+            return {"enabled": False, "running": False, "remark_count": 0, "recent": []}
+        summary = loop.summary()
+        summary["enabled"] = True
+        return summary
+
+    def stop(self) -> None:
+        """Stop the background watcher, if any. Safe to call twice."""
+        loop = self.awareness
+        if loop is not None:
+            loop.stop()
 
     @staticmethod
     def _build_mouth(mouth: str):
@@ -356,6 +421,7 @@ class GuiApp:
         caps["trajectory"] = bool(self.trajectory)
         caps["path_roots"] = self.path_roots
         caps["allowed_apps"] = self.allowed_apps
+        caps["proactive"] = bool(self.awareness is not None and self.awareness.running)
         return caps
 
     def _entry(self, record, total_ms: float) -> Dict[str, Any]:
@@ -373,7 +439,11 @@ class GuiApp:
         """Run one conversational turn and record it honestly."""
         self.screen.snapshot()
         t0 = time.perf_counter()
-        record = self.assistant.step(text, on_speech=on_speech)
+        self._turn_in_flight = True
+        try:
+            record = self.assistant.step(text, on_speech=on_speech)
+        finally:
+            self._turn_in_flight = False
         total_ms = (time.perf_counter() - t0) * 1000.0
 
         entry = self._entry(record, total_ms)
@@ -406,8 +476,12 @@ class GuiApp:
             if on_step is not None:
                 on_step(entry)
 
-        self.assistant.run_task(text, max_steps=max_steps, on_record=_on_record,
-                                on_speech=on_speech)
+        self._turn_in_flight = True
+        try:
+            self.assistant.run_task(text, max_steps=max_steps, on_record=_on_record,
+                                    on_speech=on_speech)
+        finally:
+            self._turn_in_flight = False
         return records
 
     def hear(self, req: AudioRequest) -> Dict[str, Any]:
@@ -445,12 +519,13 @@ def build_app(
     trajectory_path: Optional[str] = None,
     path_roots: Optional[List[str]] = None,
     allowed_apps: Optional[List[str]] = None,
+    proactive: bool = False,
 ) -> FastAPI:
     gui = GuiApp(
         source=source, category=category, grants=grants, checkpoint=checkpoint,
         live=live, mouth=mouth, ears=ears, eyes=eyes, brain=brain,
         memory_path=memory_path, trajectory_path=trajectory_path,
-        path_roots=path_roots, allowed_apps=allowed_apps,
+        path_roots=path_roots, allowed_apps=allowed_apps, proactive=proactive,
     )
     app = FastAPI(title="AVCS assistant")
     app.state.gui = gui
@@ -510,6 +585,16 @@ def build_app(
         if st.frame_png is None:
             return JSONResponse({"error": "no frame"}, status_code=503)
         return StreamingResponse(io.BytesIO(st.frame_png), media_type="image/png")
+
+    @app.get("/api/awareness")
+    def awareness() -> JSONResponse:
+        """What the assistant has noticed and said on its own.
+
+        Returns the remarks it chose to make plus the reasons it stayed quiet, so
+        "it watches the screen" is a measurement and not a claim. ``enabled`` is
+        false unless the server was started with proactive awareness.
+        """
+        return JSONResponse(gui.awareness_summary())
 
     @app.post("/api/turn")
     def turn(req: TurnRequest) -> JSONResponse:

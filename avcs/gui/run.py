@@ -57,6 +57,10 @@ def main() -> int:
                     help="roots the file ops may read (needed for read_file/list_dir)")
     ap.add_argument("--allowed-apps", nargs="*", default=None,
                     help="app binaries launch_app may start (needed for launch_app)")
+    ap.add_argument("--proactive", action="store_true",
+                    help="watch the screen and speak first when something is worth "
+                         "mentioning (a dialog, a view switch, a stuck user). The "
+                         "watcher has no hand, so it can never actuate.")
     args = ap.parse_args()
 
     try:
@@ -80,6 +84,7 @@ def main() -> int:
         trajectory_path=None if args.no_trajectory else args.trajectory,
         path_roots=args.path_roots,
         allowed_apps=args.allowed_apps,
+        proactive=args.proactive,
     )
     gui = app.state.gui
     caps = gui.capabilities()
@@ -96,6 +101,7 @@ def main() -> int:
         print("  WARNING    : --live was requested but no hand is available "
               "(need xdotool + $DISPLAY on Linux, or Windows user32); "
               "every actuation will be refused.")
+    print(f"  proactive  : {caps.get('proactive')}")
     print(f"  http://{args.host}:{args.port}/")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

@@ -131,6 +131,8 @@
   <span class="badge" id="bEyes">eyes …</span>
   <span class="badge" id="bHand">hand: —</span>
   <span class="badge" id="bMemory">memory: —</span>
+  <span class="badge" id="bWatch">watch: —</span>
+  <span class="badge" id="bListen">listening: off</span>
   <span class="spacer"></span>
   <span class="badge" id="bFps">— fps</span>
   <span class="badge" id="bRead">— ms/frame</span>
@@ -213,6 +215,15 @@ async function loadCaps() {
       const on = c.memory === true;
       bm.textContent = "memory: " + (on ? "on" : "off");
       bm.className = "badge " + (on ? "ok" : "warn");
+    }
+
+    // Proactive awareness: whether the assistant watches the screen and can
+    // speak first. Reported from the real loop, never a cosmetic "on".
+    const bw = $("#bWatch");
+    if (bw) {
+      const on = c.proactive === true;
+      bw.textContent = "watch: " + (on ? "on" : "off");
+      bw.className = "badge " + (on ? "ok" : "warn");
     }
   } catch (e) { /* cosmetic */ }
 }
@@ -395,6 +406,9 @@ $("#ask").addEventListener("submit", async (ev) => {
 let speechSeq = 0, audioCtx = null;
 const speechQueue = [];
 let playingSpeech = false;
+/* True while the mouth is actually producing sound. Hands-free listening checks
+   this so the assistant does not transcribe its own voice as the user's words. */
+let mouthPlaying = false;
 
 function ensureAudioCtx() {
   if (!audioCtx) {
@@ -410,6 +424,7 @@ async function playNextSpeech() {
   const ctx = ensureAudioCtx();
   if (!ctx) { speechQueue.length = 0; return; }
   playingSpeech = true;
+  mouthPlaying = true;
   const buf = speechQueue.shift();
   try {
     const audioBuf = await ctx.decodeAudioData(buf);
@@ -422,6 +437,7 @@ async function playNextSpeech() {
     });
   } catch (e) { /* an undecodable clip must not stall the queue */ }
   playingSpeech = false;
+  mouthPlaying = false;
   playNextSpeech();
 }
 
@@ -481,8 +497,9 @@ function b64FromBytes(bytes) {
   return btoa(bin);
 }
 
-async function sendRecording(blob) {
-  const pending = addMsg("ai", "… sun raha hoon");
+async function sendRecording(blob, opts) {
+  const quiet = !!(opts && opts.quiet);
+  const pending = quiet ? null : addMsg("ai", "… sun raha hoon");
   try {
     const buf = await blob.arrayBuffer();
     const ctx = ensureAudioCtx();
@@ -510,16 +527,18 @@ async function sendRecording(blob) {
       body: JSON.stringify(payload),
     });
     const r = await res.json();
-    pending.remove();
+    if (pending) pending.remove();
     if (r.text) {
       addMsg("me", r.text);
       await sendTurn(r.text);
-    } else {
+    } else if (!quiet) {
       addMsg("sys", "kuch sunai nahi diya (" + (r.error || "no speech") + ")");
     }
+    // In hands-free mode a silent window is dropped on purpose: it is not a
+    // turn, and printing "no speech" every 4 seconds would drown the chat.
   } catch (e) {
-    pending.remove();
-    addMsg("sys", "hearing failed: " + e);
+    if (pending) pending.remove();
+    if (!quiet) addMsg("sys", "hearing failed: " + e);
   }
 }
 
@@ -529,6 +548,66 @@ mic.addEventListener("mouseup", stopRecording);
 mic.addEventListener("mouseleave", () => { if (recording) stopRecording(); });
 mic.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
 mic.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
+
+/* ---------------------------------------------------------------- */
+/* Hands-free listening: no button. Talk and it answers.             */
+/* ---------------------------------------------------------------- */
+/* A person does not press a button to be heard. This records short
+   windows on a loop and submits any window that contains speech, so the
+   assistant just listens. Two things it deliberately does NOT do:
+     - it stops while the assistant is speaking, so the mouth is not fed
+       back into the ears as the user's words (the barge-in problem);
+     - a window with no speech is dropped silently, so silence is not a
+       turn and the conversation does not fill up with "(no speech)".
+   It is OFF until the page is clicked once, because browsers refuse mic
+   access before a user gesture. That click is a permission grant, not a
+   "start listening" button. */
+let handsFree = false, listening = false, speakingNow = false;
+
+async function handsFreeTick() {
+  if (!handsFree) return;
+  // Stay quiet while the assistant itself is speaking (mouthPlaying) so its own
+  // voice is not transcribed back as the user's words, and while a turn is being
+  // handled.
+  if (listening || speakingNow || recording || mouthPlaying) {
+    setTimeout(handsFreeTick, 300); return;
+  }
+  listening = true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    const rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const done = new Promise((resolve) => { rec.onstop = resolve; });
+    rec.start();
+    await new Promise((r) => setTimeout(r, 3500));
+    rec.stop();
+    await done;
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(chunks, { type: "audio/webm" });
+    if (blob.size > 2000) {
+      // Only a window with real audio is worth a round-trip; the server still
+      // decides whether it contained speech.
+      speakingNow = true;
+      await sendRecording(blob, { quiet: true });
+      speakingNow = false;
+    }
+  } catch (e) {
+    handsFree = false;
+    const b = $("#bWatch");
+    if (b) { b.textContent = "watch: mic blocked"; b.className = "badge deny"; }
+  }
+  listening = false;
+  setTimeout(handsFreeTick, 400);
+}
+
+function startHandsFree() {
+  if (handsFree) return;
+  handsFree = true;
+  const b = $("#bListen");
+  if (b) { b.textContent = "listening"; b.className = "badge ok"; }
+  handsFreeTick();
+}
 
 /* ---------------------------------------------------------------- */
 /* Scene switcher: only for the scripted demo screen.                */
@@ -556,12 +635,48 @@ async function loadScenes() {
   });
 }
 
+/* ---------------------------------------------------------------- */
+/* Proactive remarks: what the assistant said on its own.            */
+/* ---------------------------------------------------------------- */
+let seenRemarks = 0;
+async function pollAwareness() {
+  try {
+    const res = await fetch("/api/awareness", { cache: "no-store" });
+    if (res.ok) {
+      const a = await res.json();
+      const recent = a.recent || [];
+      // `recent` is a bounded tail, so a count that only grows would mis-fire
+      // after the list is trimmed. Compare the newest timestamp instead.
+      const newest = recent.length ? recent[recent.length - 1].at : 0;
+      if (newest > seenRemarks) {
+        // Only the remarks newer than the last one we drew, oldest first, so a
+        // burst arrives in the order it was spoken.
+        recent.filter((r) => r.at > seenRemarks).forEach((r) => {
+          addMsg("ai", r.text,
+            `<span class="badge warn">NOTICED</span> ${r.reason} · brain <code>${r.source}</code>`);
+        });
+        seenRemarks = newest;
+      }
+    }
+  } catch (e) { /* transient */ }
+  setTimeout(pollAwareness, 1500);
+}
+
 loadCaps();
 loadScenes();
 connect();
 pollSpeech();
+pollAwareness();
 addMsg("sys", "AVCS assistant ready — boliye ya type kijiye.");
 $("#q").focus();
+
+/* Hands-free listening begins on the first real interaction anywhere on the
+   page. Browsers refuse microphone access before a user gesture, so one click
+   is unavoidable; after it, no button is needed to be heard. */
+document.addEventListener("click", function once() {
+  document.removeEventListener("click", once);
+  if (!recording) startHandsFree();
+}, { once: true });
 </script>
 </body>
 </html>
