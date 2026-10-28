@@ -11,6 +11,12 @@ Examples::
     # Full voice loop: listen on the mic, answer out loud, act through the gate
     python3 -m avcs.voice.demo --listen --turns 5 --grant click
 
+    # Same loop from recorded WAV files, on a machine with no microphone
+    python3 -m avcs.voice.demo --audio turn1.wav,turn2.wav --turns 2 --grant click
+
+    # Does the cloud brain actually work? Exit 0 only if the key/endpoint do
+    python3 -m avcs.voice.demo --check-llm
+
     # The same clarify-then-act flow with no microphone: scripted utterances
     python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
 
@@ -40,6 +46,42 @@ def _voice_profile(args) -> VoiceProfile:
     return VoiceProfile.hinglish()
 
 
+def _wav_turn_reader(spec: str):
+    """Return a ``record_audio`` callable that yields one WAV file per turn.
+
+    ``spec`` is a comma-separated list of WAV paths, or a single directory
+    (consumed in sorted order). Each call returns the next clip, so a multi-turn
+    session replays a real audio conversation without a microphone. Running out
+    of clips returns silence, which the assistant reports honestly as "no speech
+    detected" rather than looping on the last utterance forever.
+    """
+    import os
+
+    import numpy as np
+
+    from avcs.voice.stt import AudioClip
+
+    if os.path.isdir(spec):
+        paths = sorted(
+            os.path.join(spec, n) for n in os.listdir(spec) if n.lower().endswith(".wav")
+        )
+    else:
+        paths = [p.strip() for p in spec.split(",") if p.strip()]
+    if not paths:
+        raise SystemExit(f"--audio found no WAV files at {spec!r}")
+
+    state = {"i": 0}
+
+    def read_next(_seconds: float) -> AudioClip:
+        i = state["i"]
+        state["i"] = i + 1
+        if i >= len(paths):
+            return AudioClip(samples=np.zeros(0, dtype="float32"), sample_rate=16000)
+        return AudioClip.read_wav(paths[i])
+
+    return read_next
+
+
 def build_assistant(args) -> Assistant:
     from avcs.reasoning.provider import LLMReasoningProvider
 
@@ -47,7 +89,10 @@ def build_assistant(args) -> Assistant:
         endpoint=args.llm_endpoint or None,
         model=args.llm_model or None,
     )
-    brain = ConversationBrain(provider=provider)
+    brain = ConversationBrain(
+        provider=provider,
+        language=getattr(args, "voice_language", "hinglish"),
+    )
 
     if args.silent:
         speaker = Speaker(engine=NullTtsEngine(), profile=_voice_profile(args))
@@ -58,9 +103,13 @@ def build_assistant(args) -> Assistant:
 
     stt = (
         default_stt_engine(model_path=args.vosk_model, language=args.stt_language)
-        if (args.listen or args.loop)
+        if (args.listen or args.loop or args.audio)
         else NullEngine()
     )
+
+    record_audio = None
+    if args.audio:
+        record_audio = _wav_turn_reader(args.audio)
 
     perception = None
     if args.eyes:
@@ -110,10 +159,41 @@ def build_assistant(args) -> Assistant:
         kernel=kernel,
         hand=hand,
         listen_seconds=args.seconds,
+        record_audio=record_audio,
         actuation="live" if args.live else "virtual",
         stream=not args.no_stream,
         max_task_steps=args.max_steps,
     )
+
+
+def _check_llm(assistant, args) -> None:
+    """Probe the LLM endpoint once and report honestly. Exit 0 only on success.
+
+    Mirrors the ``--check`` honesty rule in ``avcs_sdk``: an unconfigured or
+    unreachable endpoint must exit non-zero, so a caller cannot mistake
+    "the process ran" for "the brain works".
+    """
+    provider = assistant.brain.provider
+    if not getattr(provider, "api_key", ""):
+        print("[LLM CHECK] no API key configured.")
+        print("  set AVCS_LLM_API_KEY (and optionally AVCS_LLM_ENDPOINT / AVCS_LLM_MODEL),")
+        print("  or pass --llm-endpoint / --llm-model. Without a key the brain falls back")
+        print("  to the local RuleBrain and cannot hold a real conversation.")
+        raise SystemExit(2)
+    if not hasattr(provider, "verify_live_connection"):
+        print(f"[LLM CHECK] provider {type(provider).__name__} cannot be probed.")
+        raise SystemExit(2)
+    print(f"[LLM CHECK] endpoint={provider.endpoint} model={provider.model} "
+          f"key={provider.masked_api_key}")
+    try:
+        report = provider.verify_live_connection()
+    except Exception as exc:
+        print(f"[LLM CHECK] FAILED: {exc}")
+        raise SystemExit(2) from exc
+    print(f"[LLM CHECK] OK  status={report['status']}  latency={report['latency_ms']} ms")
+    print(f"  probe_output: {report['probe_output'][:200]}")
+    if report.get("last_usage"):
+        print(f"  usage: {report['last_usage']}")
 
 
 def main() -> None:
@@ -126,6 +206,10 @@ def main() -> None:
                          '(e.g. --script "mujhe X kaam karna hai" "Save button daba do")')
     ap.add_argument("--say", type=str, default=None, help="speak this phrase and exit")
     ap.add_argument("--listen", action="store_true", help="record from the microphone each turn")
+    ap.add_argument("--audio", type=str, default=None,
+                    help="read the user turn from a WAV file instead of a microphone "
+                         "(one file per turn, in order; lets the full ears->brain->mouth "
+                         "loop run on a machine with no sound card)")
     ap.add_argument("--loop", action="store_true",
                     help="continuous real-time session: listen -> think -> speak -> act, until "
                          "a stop phrase ('stop'/'band karo') or Ctrl-C")
@@ -153,9 +237,16 @@ def main() -> None:
     ap.add_argument("--silent", action="store_true", help="never touch the audio device")
     ap.add_argument("--no-audio", action="store_true", help="alias for --silent")
     ap.add_argument("--json", action="store_true", help="emit the turn records as JSON")
+    ap.add_argument("--check-llm", action="store_true",
+                    help="probe the configured LLM endpoint with one minimal request and "
+                         "report honestly whether the key, endpoint and model work, then exit")
     args = ap.parse_args()
 
     assistant = build_assistant(args)
+
+    if args.check_llm:
+        _check_llm(assistant, args)
+        return
 
     if args.say:
         result = assistant.speaker.speak(args.say)
@@ -187,8 +278,10 @@ def main() -> None:
             print(f"\n[summary] steps={len(records)} actions={acted} verified={verified}")
         return
 
-    if args.loop:
+    if args.loop or args.audio:
         # Continuous real-time session. --turns 0 means run until stopped.
+        # --audio drives the same loop from WAV files, so the ears path is
+        # exercised even where no microphone exists.
         report = assistant.loop(
             max_turns=args.turns if args.turns else 0,
             on_record=lambda rec: _print_record(rec, args.json),

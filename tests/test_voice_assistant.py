@@ -160,12 +160,36 @@ def test_rule_brain_reports_target_absent_from_perception():
     assert "can't see" in turn.speech.lower()
 
 
+def test_rule_brain_extracts_object_verb_hinglish_target():
+    # Hinglish puts the object before the verb. Following the verb here would
+    # leave only the tail of "dabao" and produce a one-letter target.
+    turn = RuleBrain().respond("save button dabao")
+    assert turn.kind == TurnKind.ACT
+    assert turn.intent is not None
+    assert turn.intent.target_description == "save button"
+
+
+def test_rule_brain_keeps_a_verb_like_noun_inside_the_target():
+    # "click" and "save" are also ordinary nouns; a mid-sentence "save" belongs
+    # to the target name, not to the action.
+    turn = RuleBrain().respond("click the Save button")
+    assert turn.intent is not None
+    assert "save" in turn.intent.target_description.lower()
+
+
+def test_rule_brain_strips_trailing_hinglish_auxiliary():
+    # "click karo" is verb + light verb; the action verb is still "click".
+    turn = RuleBrain().respond("save button click karo")
+    assert turn.intent is not None
+    assert turn.intent.target_description == "save button"
+
+
 class _ExplodingProvider:
     """A provider that fails the way an unreachable endpoint does."""
 
     api_key = ""
 
-    def plan_step(self, task, observation, history, step_index=1):
+    def plan_step(self, task, observation, history, step_index=1, system_prompt=None):
         raise RuntimeError("connection refused")
 
     def reset(self):
@@ -186,8 +210,10 @@ class _ScriptedProvider:
 
     def __init__(self, decision):
         self._decision = decision
+        self.system_prompt_seen = None
 
-    def plan_step(self, task, observation, history, step_index=1):
+    def plan_step(self, task, observation, history, step_index=1, system_prompt=None):
+        self.system_prompt_seen = system_prompt
         return self._decision
 
     def reset(self):
@@ -465,7 +491,7 @@ class _StreamingProvider:
         for frag in self._fragments:
             yield frag
 
-    def plan_step(self, task, observation, history, step_index=1):
+    def plan_step(self, task, observation, history, step_index=1, system_prompt=None):
         raise AssertionError("plan_step must not be used on the streaming path")
 
 
@@ -524,6 +550,54 @@ def test_brain_stream_speaks_before_the_action_and_parses_it():
     assert turn.intent.target_description == "Save button"
     assert "<<<ACTION>>>" not in turn.speech
     assert provider.system_prompt_seen  # the streaming prompt was used
+
+
+# --------------------------------------------------------------------------- #
+# Language policy: the brain must actually be told to speak Hinglish
+# --------------------------------------------------------------------------- #
+def test_default_brain_language_is_hinglish():
+    brain = ConversationBrain(provider=_StreamingProvider(["ji."]))
+    assert brain.language == "hinglish"
+
+
+def test_hinglish_language_reaches_the_stream_prompt():
+    provider = _StreamingProvider(["Ji sir. "])
+    brain = ConversationBrain(provider=provider, language="hinglish")
+    brain.respond_stream("hello")
+    prompt = provider.system_prompt_seen
+    assert "ALWAYS answer in Hinglish" in prompt
+    # The streaming role instructions must still be there, not replaced.
+    assert "live voice call" in prompt
+
+
+def test_language_reaches_the_non_streaming_conversation_prompt():
+    """The non-streaming path must use the conversation prompt, not the planner one.
+
+    This was a real bug: ``plan_step`` had no ``system_prompt`` parameter, so
+    ``CONVERSATION_SYSTEM_PROMPT`` was dead code and a voice turn was answered
+    with the silent System-2 planner instructions.
+    """
+    from avcs.reasoning.contracts import ActionOp
+
+    provider = _ScriptedProvider(_decision(ActionOp.ASK_USER, None))
+    brain = ConversationBrain(provider=provider, language="hinglish")
+    brain.respond("hello")
+    prompt = provider.system_prompt_seen
+    assert "ALWAYS answer in Hinglish" in prompt
+    assert "real-time desktop assistant" in prompt      # the conversation prompt
+    assert "AVCS System 2" not in prompt                 # never the planner prompt
+
+
+def test_auto_language_mirrors_the_user():
+    provider = _StreamingProvider(["ok. "])
+    brain = ConversationBrain(provider=provider, language="auto")
+    brain.respond_stream("hello")
+    assert "mirror the user's language" in provider.system_prompt_seen
+
+
+def test_unknown_language_is_rejected_loudly():
+    with pytest.raises(ValueError):
+        ConversationBrain(provider=_StreamingProvider(["ji."]), language="klingon")
 
 
 def test_brain_stream_asks_when_the_request_is_not_actionable():
@@ -1066,7 +1140,7 @@ class _SequenceProvider:
         self._decisions = list(decisions)
         self._i = 0
 
-    def plan_step(self, task, observation, history, step_index=1):
+    def plan_step(self, task, observation, history, step_index=1, system_prompt=None):
         d = self._decisions[min(self._i, len(self._decisions) - 1)]
         self._i += 1
         return d
@@ -1143,7 +1217,7 @@ def test_run_task_feeds_the_last_outcome_back_to_the_brain():
     seen = []
 
     class _ObservingProvider(_SequenceProvider):
-        def plan_step(self, task, observation, history, step_index=1):
+        def plan_step(self, task, observation, history, step_index=1, system_prompt=None):
             seen.append(dict(observation))
             return super().plan_step(task, observation, history, step_index)
 
@@ -1284,6 +1358,57 @@ def test_loop_records_per_stage_timing():
     assert rec.brain_ms > 0.0
     assert rec.listen_ms >= 0.0
     assert seen and seen[0] is rec
+
+
+# --------------------------------------------------------------------------- #
+# File-driven ears (--audio): the loop without a sound card
+# --------------------------------------------------------------------------- #
+def test_wav_turn_reader_yields_one_clip_per_turn_then_silence(tmp_path):
+    from avcs.voice.demo import _wav_turn_reader
+
+    clip = PcmClip(samples=(np.sin(np.linspace(0, 40, 8000)) * 9000).astype(np.int16), sample_rate=16000)
+    (tmp_path / "a.wav").write_bytes(clip.to_wav_bytes())
+    (tmp_path / "b.wav").write_bytes(clip.to_wav_bytes())
+
+    read = _wav_turn_reader(str(tmp_path))
+    first, second, third = read(1.0), read(1.0), read(1.0)
+    assert first.samples.size > 0 and second.samples.size > 0
+    # Exhausted: silence, not the last clip repeated forever.
+    assert third.samples.size == 0
+
+
+def test_wav_turn_reader_rejects_an_empty_directory(tmp_path):
+    from avcs.voice.demo import _wav_turn_reader
+
+    with pytest.raises(SystemExit):
+        _wav_turn_reader(str(tmp_path))
+
+
+def test_assistant_transcribes_audio_from_the_injected_reader():
+    """The ears path runs end-to-end from a clip, with no microphone."""
+    from avcs.voice.stt import SttEngine
+
+    class _FixedStt(SttEngine):
+        name = "fixed"
+
+        def available(self) -> bool:
+            return True
+
+        def transcribe(self, audio: AudioClip) -> Transcript:
+            assert audio.samples.size > 0, "reader gave the recognizer an empty clip"
+            return Transcript(text="save button dabao", engine="fixed")
+
+    clip = AudioClip(
+        samples=(np.sin(np.linspace(0, 40, 8000)) * 0.3).astype(np.float32),
+        sample_rate=16000,
+    )
+    assistant = _assistant()
+    assistant.stt = _FixedStt()
+    assistant._record_audio = lambda _seconds: clip
+
+    transcript = assistant._listen()
+    assert transcript.text == "save button dabao"
+    assert transcript.error is None
 
 
 def test_xdotool_hand_is_fail_closed_without_a_display():

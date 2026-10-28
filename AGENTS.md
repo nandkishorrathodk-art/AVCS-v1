@@ -901,9 +901,38 @@ python3 -m avcs.voice.demo --text "mujhe X kaam karna hai"                 # one
 python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba do"
 python3 -m avcs.voice.demo --listen --turns 5 --eyes --ground --grant click
 python3 -m avcs.voice.demo --say "Ji sir, kya kaam karna hai?"             # mouth only
+python3 -m avcs.voice.demo --audio a.wav,b.wav --turns 2                   # ears, no mic
+python3 -m avcs.voice.demo --check-llm                                     # exit 0 only if the brain works
 ```
 
 Facts to keep straight:
+
+- **Hinglish is enforced, not merely permitted.** `ConversationBrain(language=)`
+  takes `hinglish` (default) / `english` / `auto`, and the policy is appended to
+  whichever system prompt is in use, so the two prompts stay one source of
+  truth. An unknown value raises. `--voice-language` drives the brain *and* the
+  mouth; it used to change only the espeak voice, which meant the flag looked
+  like it worked while the model was never told anything.
+- **`CONVERSATION_SYSTEM_PROMPT` used to be dead code.** `plan_step` had no
+  `system_prompt` parameter (only `stream_step` did), so the *non-streaming*
+  voice path silently answered with the silent System-2 planner prompt — a
+  different role, and a prompt that forbids conversation. `plan_step` now takes
+  `system_prompt` on the ABC, `MockReasoningProvider` and
+  `LLMReasoningProvider`; the brain passes the conversation prompt. When adding
+  a provider override, match the signature or the prompt is dropped on the floor.
+- **`--audio` is how you exercise the ears without a sound card.** It feeds one
+  WAV per turn into the same `record_audio` hook the microphone uses. This is
+  the only way to test the full ears -> brain -> mouth loop in a container, and
+  it is what makes the loop testable at all. Exhausting the list returns
+  silence, not a loop on the last utterance.
+- **`--check-llm` follows the `avcs_sdk --check` honesty rule**: exit 0 only on a
+  successful probe, exit 2 with no key or an unreachable endpoint. The cloud path
+  is verified end-to-end against a real OpenAI-protocol HTTP server (in
+  `tests/test_cloud_llm_path.py`, including wire-level assertions that the
+  language instruction reaches the actual request body), but **a real vendor key
+  has never been used here** — none exists in this environment, and the platform
+  managed proxy (`OH_LLM_API_KEY_REFRESH_URL`) returns 401. Do not claim a live
+  vendor call was made.
 
 - **The brain is an LLM, spoken to in Hinglish.** `ConversationBrain` wraps a
   `ReasoningProvider`; the default `LLMReasoningProvider` reads its endpoint

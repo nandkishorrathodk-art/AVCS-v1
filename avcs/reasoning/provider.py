@@ -41,8 +41,14 @@ class ReasoningProvider(ABC):
         observation: Dict[str, Any],
         history: List[Dict[str, Any]],
         step_index: int = 1,
+        system_prompt: Optional[str] = None,
     ) -> System2Decision:
-        """Evaluates current observation and history to propose the next machine-readable intent."""
+        """Evaluates current observation and history to propose the next machine-readable intent.
+
+        ``system_prompt`` lets a caller swap the role instructions (a live
+        conversation wants a different voice than a silent planner). ``None``
+        keeps the provider's default.
+        """
         raise NotImplementedError
 
     def stream_step(
@@ -51,6 +57,7 @@ class ReasoningProvider(ABC):
         observation: Dict[str, Any],
         history: List[Dict[str, Any]],
         step_index: int = 1,
+        system_prompt: Optional[str] = None,
     ):
         """Yield the raw reply in fragments as the model produces it.
 
@@ -58,7 +65,7 @@ class ReasoningProvider(ABC):
         yields the whole reply as one fragment. Providers that speak SSE override
         this so the assistant can start talking before the reply is finished.
         """
-        decision = self.plan_step(task, observation, history, step_index)
+        decision = self.plan_step(task, observation, history, step_index, system_prompt)
         yield (decision.clarification_prompt or decision.thought or "")
 
     def reset(self) -> None:
@@ -101,6 +108,7 @@ class MockReasoningProvider(ReasoningProvider):
         observation: Dict[str, Any],
         history: List[Dict[str, Any]],
         step_index: int = 1,
+        system_prompt: Optional[str] = None,
     ) -> System2Decision:
         if self.simulated_latency_ms > 0:
             time.sleep(self.simulated_latency_ms / 1000.0)
@@ -425,8 +433,9 @@ CRITICAL RULES:
         observation: Dict[str, Any],
         history: List[Dict[str, Any]],
         step_index: int = 1,
+        system_prompt: Optional[str] = None,
     ) -> System2Decision:
-        payload = self._build_payload(task, observation, history, step_index)
+        payload = self._build_payload(task, observation, history, step_index, system_prompt)
 
         t0 = time.perf_counter()
         raw_response = self._post_request(payload)

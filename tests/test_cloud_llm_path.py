@@ -195,6 +195,96 @@ def test_brain_streams_hinglish_reply_and_recovers_action(openai_server):
 
 
 # --------------------------------------------------------------------------- #
+# Language policy on the wire
+# --------------------------------------------------------------------------- #
+def _system_message() -> str:
+    msgs = _MockOpenAIHandler.last_body["messages"]
+    return next(m["content"] for m in msgs if m["role"] == "system")
+
+
+def test_streamed_request_carries_the_hinglish_instruction(openai_server):
+    """The language policy must reach the real HTTP body, not just the local object."""
+    _MockOpenAIHandler.stream_chunks = ["Ji sir. "]
+    provider = _make_provider(openai_server)
+    brain = ConversationBrain(provider=provider)          # default: hinglish
+
+    turn = brain.respond_stream("hello")
+
+    system = _system_message()
+    assert "ALWAYS answer in Hinglish" in system
+    assert "live voice call" in system                     # streaming role kept
+    assert turn.source == "llm"
+
+
+def test_non_streamed_request_carries_the_conversation_prompt(openai_server):
+    """A voice turn must not be answered with the silent planner prompt."""
+    _MockOpenAIHandler.reply_text = json.dumps(_DECISION)
+    provider = _make_provider(openai_server)
+    brain = ConversationBrain(provider=provider, language="english")
+
+    brain.respond("click save")
+
+    system = _system_message()
+    assert "ALWAYS answer in clear spoken English" in system
+    assert "real-time desktop assistant" in system
+    assert "AVCS System 2" not in system
+
+
+def test_streaming_brain_uses_the_real_provider_stream_not_the_base_hook(openai_server):
+    """Guard the dispatch: a real provider streams, it does not fall back whole."""
+    _MockOpenAIHandler.stream_chunks = ["A. ", "B. "]
+    provider = _make_provider(openai_server)
+    brain = ConversationBrain(provider=provider)
+    spoken: List[str] = []
+
+    turn = brain.respond_stream("hello", on_speech=spoken.append)
+
+    assert _MockOpenAIHandler.last_body["stream"] is True
+    assert turn.source == "llm"
+
+
+# --------------------------------------------------------------------------- #
+# --check-llm honesty gate
+# --------------------------------------------------------------------------- #
+class _FakeAssistant:
+    def __init__(self, provider):
+        self.brain = type("B", (), {"provider": provider})()
+
+
+def test_check_llm_exits_zero_on_a_working_endpoint(openai_server, capsys):
+    from avcs.voice.demo import _check_llm
+
+    _MockOpenAIHandler.reply_text = json.dumps({"status": "verified"})
+    _check_llm(_FakeAssistant(_make_provider(openai_server)), None)
+
+    out = capsys.readouterr().out
+    assert "[LLM CHECK] OK" in out
+    assert "status=connected" in out
+
+
+def test_check_llm_exits_two_without_a_key(capsys):
+    from avcs.voice.demo import _check_llm
+
+    provider = LLMReasoningProvider(endpoint="http://127.0.0.1:9/v1", api_key="")
+    with pytest.raises(SystemExit) as exc:
+        _check_llm(_FakeAssistant(provider), None)
+
+    assert exc.value.code == 2
+    assert "no API key configured" in capsys.readouterr().out
+
+
+def test_check_llm_exits_two_when_the_endpoint_is_unreachable(capsys):
+    from avcs.voice.demo import _check_llm
+
+    provider = _make_provider("http://127.0.0.1:9/v1")   # nothing listening
+    with pytest.raises(SystemExit) as exc:
+        _check_llm(_FakeAssistant(provider), None)
+
+    assert exc.value.code == 2
+    assert "FAILED" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
 # Retry / backoff
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])

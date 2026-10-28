@@ -127,6 +127,22 @@ Reply with ONE JSON object and nothing else:
 """
 
 
+# Appended to whichever system prompt is in use, so the language policy lives in
+# one place and the two prompts stay consistent.
+_LANGUAGE_INSTRUCTIONS = {
+    "hinglish": (
+        "\n\nLanguage: ALWAYS answer in Hinglish (Roman-script Hindi mixed with "
+        "English words), the way a friendly Indian assistant speaks. Every spoken "
+        "sentence must be Hinglish, even if the user writes in English."
+    ),
+    "english": "\n\nLanguage: ALWAYS answer in clear spoken English.",
+    "auto": (
+        "\n\nLanguage: mirror the user's language. If the user speaks "
+        "Hindi/Hinglish, answer in Hinglish; otherwise answer in English."
+    ),
+}
+
+
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Pull the first JSON object out of a model reply, tolerating fences."""
     if not text:
@@ -212,6 +228,13 @@ class ConversationBrain:
         Any object exposing ``plan_step(task, observation, history, step_index)``
         and returning a ``System2Decision``. Defaults to ``LLMReasoningProvider``
         which reads its endpoint/key from the environment.
+    language:
+        ``"hinglish"`` (default) instructs the model to always answer in
+        Hinglish, which is what the user speaks. ``"auto"`` keeps the old
+        permissive behaviour (mirror whatever the user used) and ``"english"``
+        forces English. The preference is applied as an extra instruction line
+        rather than by editing the shared prompts, so the prompts stay one
+        source of truth.
     """
 
     def __init__(
@@ -219,6 +242,7 @@ class ConversationBrain:
         provider: Any = None,
         task: str = "",
         history_limit: int = 12,
+        language: str = "hinglish",
     ) -> None:
         if provider is None:
             from avcs.reasoning.provider import LLMReasoningProvider
@@ -230,6 +254,14 @@ class ConversationBrain:
         self.history: List[ConversationTurn] = []
         self.step_index = 0
         self._rule: Optional[RuleBrain] = None
+        self.language = (language or "hinglish").lower()
+        if self.language not in _LANGUAGE_INSTRUCTIONS:
+            raise ValueError(
+                f"language must be one of {sorted(_LANGUAGE_INSTRUCTIONS)}, got {language!r}"
+            )
+
+    def _system_prompt(self, base: str) -> str:
+        return base + _LANGUAGE_INSTRUCTIONS[self.language]
 
     # ------------------------------------------------------------------ #
     # History
@@ -330,6 +362,7 @@ class ConversationBrain:
                 observation=observation,
                 history=[t.to_message() for t in self.history[:-1]],
                 step_index=self.step_index,
+                system_prompt=self._system_prompt(CONVERSATION_SYSTEM_PROMPT),
             )
             turn = self._turn_from_decision(decision)
         except Exception as exc:  # unreachable endpoint, bad key, timeout, ...
@@ -417,7 +450,7 @@ class ConversationBrain:
                 observation=observation,
                 history=[t.to_message() for t in self.history[:-1]],
                 step_index=self.step_index,
-                system_prompt=STREAM_SYSTEM_PROMPT,
+                system_prompt=self._system_prompt(STREAM_SYSTEM_PROMPT),
             ):
                 if not chunk:
                     continue
@@ -638,7 +671,8 @@ class RuleBrain:
     # user speaks Hinglish; a target named by the user survives these.
     _STOPWORDS = frozenset({
         "the", "a", "an", "this", "that", "please", "and", "on", "to", "for",
-        "mujhe", "mere", "mera", "ko", "karo", "kar", "karna", "karna", "hai",
+        "into", "in", "me", "mein", "se", "par",
+        "mujhe", "mere", "mera", "ko", "karo", "kar", "karna", "hai",
         "do", "dena", "chahiye", "kaam", "kuch", "bhi", "ye", "yeh", "wo",
     })
 
@@ -681,28 +715,58 @@ class RuleBrain:
             return None, None
         return None, None
 
+    # Verbs that are also ordinary nouns ("save", "search", "scroll"). They only
+    # act as the action verb in verb position (first or last token), never in the
+    # middle of a target name, or "save button" would lose its own head word.
+    _ACTION_VERBS = frozenset(
+        w for words in _ACTION_WORDS.values() for w in words
+    )
+
+    # Hinglish auxiliary/light verbs that trail the real verb ("click karo",
+    # "dabao kar do"). Stripped before locating the action verb, otherwise the
+    # sentence looks verb-final and the verb itself is read as the target.
+    _AUX_TAIL = frozenset({
+        "karo", "kar", "kro", "karna", "kijiye", "kijiyega", "do", "dena", "de",
+    })
+
+    @classmethod
+    def _clean_span(cls, words: list[str]) -> Optional[str]:
+        kept = [w for w in words if w.lower() not in cls._STOPWORDS]
+        return " ".join(kept[:4]) if kept else None
+
     @classmethod
     def _extract_target(cls, text: str) -> Optional[str]:
-        """Find a likely target phrase, preferring a quoted string or a known noun."""
+        """Find the target phrase, in either word order the user actually speaks.
+
+        English is verb-object ("click the Save button" -> take what follows).
+        Hinglish is object-verb ("save button dabao" -> take what precedes), so
+        following the verb there leaves only the sentence tail and produces a
+        one-letter target. Trailing auxiliaries are dropped first so the real
+        action verb is the one left in verb position.
+        """
         quoted = re.search(r"['\"]([^'\"]{1,40})['\"]", text)
         if quoted:
             return quoted.group(1).strip()
 
-        low = text.lower()
-        # Prefer text that follows an action verb ("click the Save button").
-        for words in _ACTION_WORDS.values():
-            for w in words:
-                idx = low.find(w)
-                if idx != -1:
-                    tail = text[idx + len(w):].strip(" .!?,")
-                    tail_words = [t for t in re.findall(r"[A-Za-z0-9_-]+", tail)
-                                  if t.lower() not in cls._STOPWORDS]
-                    if tail_words:
-                        return " ".join(tail_words[:4])
+        tokens = re.findall(r"[A-Za-z0-9_-]+", text)
+        while len(tokens) > 1 and tokens[-1].lower() in cls._AUX_TAIL:
+            tokens.pop()
+        if not tokens:
+            return None
+        low = [t.lower() for t in tokens]
 
-        # Otherwise take the remaining content tokens (drops "mujhe"/"kaam"/"karna").
-        tokens = [t for t in re.findall(r"[A-Za-z0-9_-]+", text)
-                  if t.lower() not in cls._STOPWORDS]
-        if tokens:
-            return " ".join(tokens[:3])
-        return None
+        # Hinglish object-verb: the action verb closes the sentence.
+        if len(low) > 1 and low[-1] in cls._ACTION_VERBS:
+            before = cls._clean_span(tokens[:-1])
+            if before:
+                return before
+
+        # English verb-object: the sentence opens with the action verb.
+        if low[0] in cls._ACTION_VERBS:
+            rest = low[1:]
+            stop = next((i for i, t in enumerate(rest) if t in cls._ACTION_VERBS), len(rest))
+            after = cls._clean_span(tokens[1:1 + stop])
+            if after:
+                return after
+
+        return cls._clean_span(tokens)
