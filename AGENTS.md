@@ -1169,6 +1169,76 @@ Also: a machine with no capture device makes ALSA dump pages of `confmisc`
 noise; `record_microphone*` now raise `EngineNotAvailable` with one readable line
 ("found no input device") via `_capture_error`.
 
+### Carrying a task through: the loop had three bugs, all measured live
+
+An assistant that answers but never *finishes* anything is a chat bot. Three
+separate defects made every task end after one glance; each is fixed and pinned.
+
+1. **Keyboard ops were gated on a grounded point.** `CapabilityKernel.authorize`
+   required a candidate point for *every* mutating op, but `type` / `type_text` /
+   `press_key` / `scroll` have no coordinate — they act on the focused widget or
+   globally. The natural "type the path, press Enter" route was therefore refused
+   with "grounder produced no candidate point" for an op that never had one.
+   `POINT_OPS` (click / double_click only) now names the ops that must be
+   grounded; the rest need only their grant.
+
+2. **The autonomous loop broke on `not performed`, which is what an observing
+   step reports.** `observe_target` actuates nothing, so `performed=False` — that
+   is success, not failure. Breaking there ended the task the moment the brain
+   looked at the screen. The loop now breaks only on a *refused mutating* step
+   (continuing would repeat a failing action) or a pure conversational turn (no
+   action to carry forward).
+
+3. **The brain was never told what it could do.** The observation carried the
+   screen but not the capabilities, so the model could not tell a held click
+   grant from none and stalled on `wait`. `to_brain_dict(capabilities)` now
+   includes `can_click` / `can_type` / `can_press_key` / `can_scroll` /
+   `can_see_targets`, derived from **hand presence AND grant** — a grant with no
+   hand still refuses every click, so reporting `can_click=True` there would be a
+   lie the model would act on.
+
+**The GUI and the voice demo share one loop.** `avcs/gui/server.py::task`
+delegates to `Assistant.run_task`; a second copy of the loop in the GUI is how
+the two drift apart. The GUI's own copy had already lost the
+`if not record.action: break` guard, so a greeting streamed eight identical
+replies before this was caught (measured live, then fixed).
+
+**A repeated dead action now stops the loop.** When the screen never changes
+(e.g. a click with no visible effect), nothing in the model's input says "give
+up", so it repeats to the step budget. Two identical no-effect steps is the
+limit; the third stops the loop with `kind="stop"` and a `detail` naming the
+action and the repeat count, so "gave up" is distinguishable from "finished".
+The stop record deliberately carries **no** `action`: a record with an action
+means an action was attempted, and a caller can count attempts without
+subtracting the stop.
+
+Measured live (LLM brain, `--live --grant click type press_key scroll
+--eyes lexicon`):
+
+```
+you   : save button daba do
+avcs  : Ji sir, save button daba raha hoon.        -> click, performed, no change
+avcs  : Save pe click kiya par kuch change nahi, ab Ctrl+S try karta hoon.
+        -> stopped: click repeated 2 times with no change
+```
+
+```
+you   : file manager kholo
+avcs  : Theek hai sir, keyboard shortcut se try kar raha hoon.   -> press_key x2
+avcs  : Sir, shortcut se file manager nahi khul raha, screen par sirf
+        close, ok, save jaise buttons dikh rahe hain. Aap bataiye ...?  -> ask
+```
+
+Both are honest: it tried, reported that nothing changed, and asked instead of
+repeating or claiming success. A greeting is one turn, not eight.
+
+**Test trap fixed here:** `test_loop_continues_autonomously_after_a_spoken_task`
+defined a `_ScriptedBrain` and then never passed it to `Assistant`, so the test
+ran the *default* brain — which resolves a real `LLMReasoningProvider`. It passed
+only because a keyless provider falls back to `RuleBrain`, and it took 8 s
+because of the connection attempt. It now uses `RuleBrain` directly and is
+deterministic (1.5 s). Do not let a test's scripted double go unwired.
+
 ## AVC Lexicon (`avc/lexicon/`) — reading control labels without OCR
 
 The third stream in `avc/`. Dorsal answers *where* something is interactive,

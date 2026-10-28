@@ -300,8 +300,19 @@ function describeTurn(r) {
 async function sendTurn(text) {
   const pending = addMsg("ai", "…");
   let streamed = "";
-  const streamedEl = document.createElement("div");
-  streamedEl.className = "msg ai streaming";
+  let streamedEl = null;
+  let stepEl = null;
+
+  const showStream = () => {
+    if (!streamedEl) {
+      pending.remove();
+      streamedEl = document.createElement("div");
+      streamedEl.className = "msg ai streaming";
+      $("#chat").appendChild(streamedEl);
+    }
+    streamedEl.textContent = streamed;
+    $("#chat").scrollTop = $("#chat").scrollHeight;
+  };
 
   try {
     const res = await fetch("/api/turn.stream", {
@@ -326,17 +337,24 @@ async function sendTurn(text) {
         let evt;
         try { evt = JSON.parse(frame.slice(6)); } catch (e) { continue; }
         if (evt.type === "speech") {
-          if (!streamedEl.parentNode) { pending.remove(); $("#chat").appendChild(streamedEl); }
           streamed += (streamed ? " " : "") + evt.text;
-          streamedEl.textContent = streamed;
-          $("#chat").scrollTop = $("#chat").scrollHeight;
+          showStream();
+        } else if (evt.type === "step") {
+          // A completed step of a multi-step task. Show the work as it happens,
+          // so the assistant narrates and acts instead of freezing on one reply.
+          const r = evt.record;
+          if (stepEl) stepEl.remove();
+          pending.remove();
+          stepEl = addMsg("ai", r.said || "(step)", describeTurn(r));
         } else if (evt.type === "turn") {
           pending.remove();
-          if (streamedEl.parentNode) streamedEl.remove();
+          if (streamedEl) streamedEl.remove();
+          if (stepEl) stepEl.remove();
           addMsg("ai", evt.record.said || "(no reply)", describeTurn(evt.record));
         } else if (evt.type === "error") {
           pending.remove();
-          if (streamedEl.parentNode) streamedEl.remove();
+          if (streamedEl) streamedEl.remove();
+          if (stepEl) stepEl.remove();
           addMsg("sys", "error: " + evt.error);
         }
       }
@@ -344,7 +362,8 @@ async function sendTurn(text) {
     pending.remove();
   } catch (e) {
     pending.remove();
-    if (streamedEl.parentNode) streamedEl.remove();
+    if (streamedEl) streamedEl.remove();
+    if (stepEl) stepEl.remove();
     addMsg("sys", "error: " + e);
   }
 }

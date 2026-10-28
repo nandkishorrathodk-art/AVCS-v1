@@ -38,6 +38,15 @@ import numpy as np
 # no capability grant.
 MUTATING_OPS = frozenset({"click", "double_click", "type", "type_text", "press_key", "scroll"})
 
+# Mutating ops that need a *grounded point*: they aim at a specific place on
+# screen, so a candidate point and a peak above the floor are the evidence that
+# the target is really there. The keyboard ops below act on the focused widget
+# or globally -- they have no coordinate at all -- so demanding a point for them
+# made the natural "type the path, press Enter" route unreachable: the kernel
+# refused with "grounder produced no candidate point" for an op that never had
+# one. They still need an explicit grant; they just are not grounded.
+POINT_OPS = frozenset({"click", "double_click"})
+
 
 @dataclass(frozen=True)
 class GroundingEvidence:
@@ -168,6 +177,18 @@ class CapabilityKernel:
             return CapabilityDecision(
                 allowed=False,
                 reason=f"no capability grant for mutating op '{clean_op}'",
+                op=clean_op,
+                query=query,
+            )
+
+        if clean_op not in POINT_OPS:
+            # A keyboard op (type/type_text/press_key/scroll) has no coordinate:
+            # it acts on the focused widget or globally. The grant above is the
+            # whole decision. Requiring a grounded point here refused the natural
+            # "type the path, press Enter" route for a reason that does not apply.
+            return CapabilityDecision(
+                allowed=True,
+                reason=f"capability '{clean_op}' granted (no grounded point needed)",
                 op=clean_op,
                 query=query,
             )

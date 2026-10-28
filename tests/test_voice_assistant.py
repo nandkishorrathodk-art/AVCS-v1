@@ -1583,15 +1583,20 @@ def test_loop_continues_autonomously_after_a_spoken_task():
             )
 
     class _ScriptedBrain:
-        """First turn acts; the next autonomous step acts; then it finishes."""
+        """First turn acts; the next autonomous step acts; then it finishes.
+
+        Deterministic and offline: it must not reach the network, or this test
+        would assert on whichever reply a live model happened to give. It uses
+        the repo's own ``RuleBrain`` (the documented offline brain) rather than
+        constructing a ``ConversationBrain`` that would resolve a real provider.
+        """
         def __init__(self):
+            from avcs.voice.brain import RuleBrain
+            self._rule = RuleBrain()
             self.calls = 0
         def respond(self, user_text, observation, **kw):
-            from avcs.voice.brain import ConversationBrain
             self.calls += 1
-            return ConversationBrain().respond(user_text, observation)
-        def respond_stream(self, *a, **k):
-            raise AssertionError("not used")
+            return self._rule.respond(user_text, observation)
 
     hand = VirtualHand(1920, 1080)
     assistant = Assistant(
@@ -1604,6 +1609,7 @@ def test_loop_continues_autonomously_after_a_spoken_task():
         hand=hand,
         step_delay_s=0.0,
         max_task_steps=3,
+        brain=_ScriptedBrain(),
     )
     # Two mic turns: the task, then "stop". The middle steps come from autonomy.
     script = [
@@ -1729,3 +1735,200 @@ def test_keyless_brain_skips_the_llm_and_answers_fast():
     assert turn.kind is TurnKind.ACT
     assert turn.source == "rule_fallback"
     assert elapsed_ms < 500, f"keyless turn took {elapsed_ms:.0f} ms"
+
+
+# --------------------------------------------------------------------------- #
+# An assistant that carries the task through, and stops when it is stuck
+# --------------------------------------------------------------------------- #
+class _ActingPerception:
+    """Grounds every query at a fixed point and never reports a change."""
+
+    def observe(self, query=None):
+        return ScreenObservation(description="form", target_present=True, hotspot_count=2)
+
+    def frame(self):
+        return np.zeros((8, 8, 3), dtype=np.uint8)
+
+    def grounding_evidence(self, query):
+        from avcs.control.capability import GroundingEvidence
+        return GroundingEvidence(
+            candidate_point_norm=(0.3, 0.4), peak_probability=0.9,
+            target_present=True, authorized=False, active_query=query,
+        )
+
+
+def _always_click_brain():
+    """A brain that proposes a click on every step and never says finish.
+
+    This is the worst case the loop has to survive: the action succeeds (the
+    hand performs it) but the screen never changes, so nothing in the model's
+    input tells it to stop.
+    """
+    from avcs.voice.brain import AssistantTurn, TurnKind
+    from avcs.reasoning.contracts import ActionIntent, ActionOp
+
+    class _Brain:
+        def respond(self, user_text, observation=None, **kw):
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech="clicking",
+                intent=ActionIntent.create(step_index=1, op=ActionOp.CLICK,
+                                           target_description="Save"),
+            )
+    return _Brain()
+
+
+def test_run_task_stops_when_the_same_action_repeats_with_no_change():
+    """Three identical no-effect steps is the limit, then the loop stops and says so.
+
+    Without this guard the assistant loops the whole step budget clicking the
+    same dead point, which is neither useful nor human. The stop record is
+    `kind="stop"` and carries the reason, so a caller can tell "gave up" from
+    "finished".
+    """
+    from avcs.system1.loop import VirtualHand
+
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=_always_click_brain(),
+        perception=_ActingPerception(),
+        kernel=CapabilityKernel(
+            granted_ops=["click"], allow_degenerate_frames=True, min_peak_probability=0.5
+        ),
+        hand=hand,
+        step_delay_s=0.0,
+        max_task_steps=8,
+    )
+    records = assistant.run_task("save karo")
+    clicks = [r for r in records if r.action == "click"]
+    assert len(clicks) == 3, f"expected the loop to stop after 3 identical steps, got {len(clicks)}"
+    assert records[-1].kind == "stop"
+    assert "repeated" in records[-1].detail or "no change" in records[-1].detail
+
+
+def test_run_task_stops_after_a_conversational_turn():
+    """A greeting must not be looped eight times.
+
+    A reply with no action has nothing to carry forward; running the model again
+    would burn the whole step budget answering "how are you" repeatedly.
+    """
+    from avcs.voice.brain import AssistantTurn, TurnKind
+
+    class _Chatter:
+        def __init__(self):
+            self.calls = 0
+        def respond(self, user_text, observation=None, **kw):
+            self.calls += 1
+            return AssistantTurn(kind=TurnKind.REPLY, speech="badhiya hoon bhai")
+
+    brain = _Chatter()
+    assistant = _assistant(brain=brain, max_task_steps=8)
+    records = assistant.run_task("kaise ho bhai")
+    assert len(records) == 1
+    assert records[0].action is None
+    assert brain.calls == 1, "a conversational turn must not be re-run"
+
+
+def test_run_task_continues_after_an_observing_step():
+    """An observing step (`performed=False`) is progress, not failure.
+
+    The old loop broke on `not performed`, so a task ended the moment the brain
+    asked to look at the screen -- which is why the assistant could never finish
+    anything. Only a *refused mutating* step ends the loop now.
+    """
+    from avcs.voice.brain import AssistantTurn, TurnKind
+    from avcs.reasoning.contracts import ActionIntent, ActionOp
+    from avcs.system1.loop import VirtualHand
+
+    class _LookThenAct:
+        def __init__(self):
+            self.calls = 0
+        def respond(self, user_text, observation=None, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantTurn(
+                    kind=TurnKind.ACT, speech="let me look",
+                    intent=ActionIntent.create(step_index=1, op=ActionOp.OBSERVE_TARGET,
+                                               target_description="screen"),
+                )
+            return AssistantTurn(
+                kind=TurnKind.ACT, speech="clicking",
+                intent=ActionIntent.create(step_index=1, op=ActionOp.CLICK,
+                                           target_description="Save"),
+            )
+
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=_LookThenAct(),
+        perception=_ActingPerception(),
+        kernel=CapabilityKernel(
+            granted_ops=["click"], allow_degenerate_frames=True, min_peak_probability=0.5
+        ),
+        hand=hand,
+        step_delay_s=0.0,
+        max_task_steps=3,
+    )
+    records = assistant.run_task("save karo")
+    assert records[0].action == "observe_target"
+    assert records[0].performed is False
+    assert len(records) >= 2, "the loop must continue past an observing step"
+    assert any(r.action == "click" for r in records)
+
+
+def test_brain_is_told_what_it_can_actually_do():
+    """The observation must carry the real capabilities, not just a task.
+
+    Without them the model cannot tell whether it holds a click grant, so it
+    stalls on `wait` instead of acting -- measured live before this was wired.
+    """
+    from avcs.system1.loop import VirtualHand
+    from avcs.voice.brain import AssistantTurn, TurnKind
+
+    seen = {}
+
+    class _Capturing:
+        def respond(self, user_text, observation=None, **kw):
+            seen.update(observation or {})
+            return AssistantTurn(kind=TurnKind.REPLY, speech="ok")
+
+    hand = VirtualHand(1920, 1080)
+    assistant = _assistant(
+        brain=_Capturing(),
+        perception=_ActingPerception(),
+        kernel=CapabilityKernel(granted_ops=["click", "type_text"]),
+        hand=hand,
+        stream=False,
+    )
+    assistant.step("hi")
+
+    caps = seen.get("capabilities")
+    assert caps is not None, "the observation must include capabilities"
+    assert caps["can_click"] is True
+    assert caps["can_type"] is True
+    assert caps["can_press_key"] is False       # not granted
+    assert caps["can_see_targets"] is True      # this perception can ground
+
+
+def test_capabilities_reflect_the_hand_not_only_the_grant():
+    """A grant with no hand must report can_click False.
+
+    A grant alone refuses every click (there is nothing to click with), so
+    telling the model it can click would be a lie it would then act on.
+    """
+    from avcs.voice.brain import AssistantTurn, TurnKind
+
+    seen = {}
+
+    class _Capturing:
+        def respond(self, user_text, observation=None, **kw):
+            seen.update(observation or {})
+            return AssistantTurn(kind=TurnKind.REPLY, speech="ok")
+
+    assistant = _assistant(
+        brain=_Capturing(),
+        kernel=CapabilityKernel(granted_ops=["click"]),
+        hand=None,
+        stream=False,
+    )
+    assistant.step("hi")
+    assert seen["capabilities"]["can_click"] is False

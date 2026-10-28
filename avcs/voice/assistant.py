@@ -48,10 +48,17 @@ class ScreenObservation:
     hotspot_count: int = 0
     last_action: str = ""
 
-    def to_brain_dict(self) -> Dict[str, Any]:
+    def to_brain_dict(self, capabilities: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         extra: Dict[str, Any] = {"interactive_elements": self.hotspot_count}
         if self.last_action:
             extra["last_action"] = self.last_action
+        if capabilities:
+            # What the assistant can actually *do* right now. Without this the
+            # model does not know whether it holds a click/type grant, so it
+            # cannot choose between acting and asking -- it stalls on `wait`.
+            # This is not screen data, so it does not cross the System 1 -> 2
+            # image boundary; it is the same category as `stability`.
+            extra["capabilities"] = capabilities
         return ConversationBrain.build_observation(
             screen_description=self.description,
             target_present=self.target_present,
@@ -317,31 +324,90 @@ class Assistant:
         return record
 
     def run_task(self, user_text: str, max_steps: Optional[int] = None,
-                 on_record: Optional[Callable[[AssistantTurnRecord], None]] = None) -> List[AssistantTurnRecord]:
+                 on_record: Optional[Callable[[AssistantTurnRecord], None]] = None,
+                 on_speech: Optional[Callable[[str], None]] = None) -> List[AssistantTurnRecord]:
         """Autonomously execute a whole task, not just one action.
 
         A single conversational turn produces at most one action. A real
         assistant keeps going: act, look at the result, decide the next step,
         repeat, until the brain says ``finish``/``stop`` or the budget runs out.
 
-        The loop stops early — and says so — when an action is refused by the
+        The loop stops early -- and says so -- when an action is refused by the
         gate or does not reach the hand, because continuing would just repeat the
         same failing step. Speech is streamed on every step, so the assistant
         narrates the work while it does it.
         """
         budget = int(max_steps if max_steps is not None else self.max_task_steps)
         records: List[AssistantTurnRecord] = []
+        # Signatures of the last two steps. A person tries a thing, sees it did
+        # not work, and changes approach; repeating the identical action at the
+        # identical point forever is not progress, and without this guard the
+        # model does exactly that when the screen never changes (e.g. a click
+        # that has no visible effect). Two repeats is the limit: the third
+        # identical step is refused and reported as stuck.
+        recent: List[str] = []
 
         for i in range(1, budget + 1):
-            record = self._run_one(user_text, i)
+            record = self._run_one(user_text, i, on_speech=on_speech)
             records.append(record)
             if on_record:
                 on_record(record)
 
             if record.kind in ("finish", "stop"):
                 break
-            if record.action and not record.performed:
+            # A pure conversational turn (a reply or a clarifying question) has
+            # no action to carry forward: stop here rather than looping the model
+            # over a greeting. Only a proposed action starts autonomous work.
+            if not record.action:
                 break
+            # Stop on a *refused* mutating step, not on an observing one. A
+            # perception step ("look at the screen", "observe_target") sets
+            # `performed=False` because it actuates nothing -- that is success,
+            # not failure. Breaking on it made every task end after one glance,
+            # which is why the GUI could never carry a task through.
+            if record.action in MUTATING_OPS and not record.performed:
+                break
+
+            signature = f"{record.action}:{record.clicked}:{record.verified}"
+            recent.append(signature)
+            repeats = 1
+            for prev in reversed(recent[:-1]):
+                if prev == signature:
+                    repeats += 1
+                else:
+                    break
+            if repeats >= 3:
+                # A stop record, not an action record: it carries no `action`,
+                # because no action was attempted on this step. Keeping the
+                # invariant "a record with an action means an action was tried"
+                # lets a caller count attempts without subtracting the stop.
+                stuck = AssistantTurnRecord(
+                    turn=record.turn + 1,
+                    heard="",
+                    said=(
+                        f"Sir, main {record.action} baar-baar kar raha hoon par screen "
+                        "nahi badal rahi. Main yahin ruk raha hoon -- aap bataiye aage kya karna hai."
+                    ),
+                    kind="stop",
+                    source="loop",
+                    target=record.target,
+                    detail=(
+                        f"stopped: {record.action} repeated {repeats} times with no change"
+                    ),
+                )
+                records.append(stuck)
+                if on_record:
+                    on_record(stuck)
+                break
+            # Tell the next step how many times in a row this exact action has now
+            # produced no change, so the model can decide to stop rather than
+            # repeat a third time. Without the count it cannot tell "first try"
+            # from "third identical try".
+            if repeats > 1:
+                self._last_outcome = (
+                    f"{self._last_outcome} (attempt {repeats}, no change from this action yet)"
+                )
+
             # From here the screen is the speaker: the next decision is driven by
             # what changed, not by the user, so the user text is not repeated.
             user_text = ""
@@ -370,6 +436,17 @@ class Assistant:
         on_speech: Optional[Callable[[str], None]] = None,
     ) -> tuple[AssistantTurn, bool, Optional[str]]:
         """Send one turn to the brain and return (turn, spoken, speak_error)."""
+        # Tell the brain what it can actually do, so it can choose between acting
+        # and asking instead of stalling. `can_click` reflects the real hand, not
+        # just a grant: a grant with no hand still refuses every click.
+        capabilities = {
+            "can_click": bool(self.hand is not None and self.kernel.is_granted("click")),
+            "can_type": bool(self.hand is not None and self.kernel.is_granted("type_text")),
+            "can_press_key": bool(self.hand is not None and self.kernel.is_granted("press_key")),
+            "can_scroll": bool(self.hand is not None and self.kernel.is_granted("scroll")),
+            "can_see_targets": callable(getattr(self.perception, "grounding_evidence", None)),
+        }
+        brain_obs = obs.to_brain_dict(capabilities)
         if use_stream and hasattr(self.brain, "respond_stream"):
             # The mouth runs on a background thread, so the first sentence is
             # already audible while the rest of the reply is still being written.
@@ -380,14 +457,12 @@ class Assistant:
                     on_speech(sentence)
                 queue.say(sentence)
 
-            turn_result = self.brain.respond_stream(
-                user_text, obs.to_brain_dict(), on_speech=_say
-            )
+            turn_result = self.brain.respond_stream(user_text, brain_obs, on_speech=_say)
             results = queue.drain()
             spoken = any(r.spoken for r in results)
             speak_error = next((r.error for r in results if r.error), None)
         else:
-            turn_result = self.brain.respond(user_text, obs.to_brain_dict())
+            turn_result = self.brain.respond(user_text, brain_obs)
             if on_speech is not None and turn_result.speech:
                 on_speech(turn_result.speech)
             result = self._speak(turn_result.speech)

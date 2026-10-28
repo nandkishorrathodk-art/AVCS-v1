@@ -175,6 +175,9 @@ def _png(frame: np.ndarray) -> bytes:
 
 class TurnRequest(BaseModel):
     text: str
+    # Run the whole task, not just the first step. Defaults to True so a spoken
+    # instruction is carried through instead of stopping after one glance.
+    multi_step: bool = True
 
 
 class SceneRequest(BaseModel):
@@ -294,13 +297,8 @@ class GuiApp:
         caps["can_act"] = bool(self.grants)
         return caps
 
-    def turn(self, text: str, on_speech=None) -> Dict[str, Any]:
-        """Run one conversational turn and record it honestly."""
-        self.screen.snapshot()
-        t0 = time.perf_counter()
-        record = self.assistant.step(text, on_speech=on_speech)
-        total_ms = (time.perf_counter() - t0) * 1000.0
-
+    def _entry(self, record, total_ms: float) -> Dict[str, Any]:
+        """One turn record as the page consumes it, with honest provenance."""
         entry = record.to_dict()
         entry["total_ms"] = round(total_ms, 2)
         entry["brain_source"] = record.source
@@ -308,8 +306,48 @@ class GuiApp:
         # asking to look at the screen) is not a gated click, and the page must
         # not draw it as one.
         entry["mutating"] = bool(record.action and record.action in MUTATING_OPS)
+        return entry
+
+    def turn(self, text: str, on_speech=None) -> Dict[str, Any]:
+        """Run one conversational turn and record it honestly."""
+        self.screen.snapshot()
+        t0 = time.perf_counter()
+        record = self.assistant.step(text, on_speech=on_speech)
+        total_ms = (time.perf_counter() - t0) * 1000.0
+
+        entry = self._entry(record, total_ms)
         self.transcript.append(entry)
         return entry
+
+    def task(self, text: str, on_speech=None, on_step=None, max_steps: Optional[int] = None):
+        """Run a whole task, not just the first step.
+
+        One turn produces at most one action, which is why the assistant could
+        answer but never *finish* anything: it looked once and stopped. This
+        delegates to the assistant's own ``run_task`` -- the loop lives in one
+        place, so the GUI and the voice demo cannot drift apart -- and converts
+        each record to the page's shape as it completes.
+
+        A pure conversational turn (no action proposed) stops after the first
+        step: there is nothing to carry forward, and looping the model over a
+        greeting would burn eight round-trips to say hello.
+        """
+        self.screen.snapshot()
+        records: List[Dict[str, Any]] = []
+
+        def _on_record(record) -> None:
+            # `run_task` already timed the turn; recover it from the record's
+            # own stage timings rather than re-timing around the callback.
+            total_ms = record.listen_ms + record.brain_ms + record.act_ms
+            entry = self._entry(record, total_ms)
+            records.append(entry)
+            self.transcript.append(entry)
+            if on_step is not None:
+                on_step(entry)
+
+        self.assistant.run_task(text, max_steps=max_steps, on_record=_on_record,
+                                on_speech=on_speech)
+        return records
 
     def hear(self, req: AudioRequest) -> Dict[str, Any]:
         """Transcribe a browser recording with the same ears the voice loop uses."""
@@ -386,11 +424,16 @@ def build_app(
 
     @app.post("/api/turn.stream")
     async def turn_stream(req: TurnRequest):
-        """Run one turn and stream speech sentences + the final record as SSE.
+        """Run one turn and stream speech sentences + every step as SSE.
 
         This is the real-time path the page uses. The browser hears each sentence
-        the moment the brain produces it (``speech`` events), and gets the final
-        record (``turn``) when the turn is complete.
+        the moment the brain produces it (``speech`` events), sees each step of a
+        multi-step task as it completes (``step`` events), and gets the final
+        record (``turn``) when the task is done.
+
+        ``multi_step`` defaults to True: an assistant that answers but never
+        finishes the job is not an assistant. Pass false to run exactly one turn
+        (the page uses that for a plain conversational exchange).
         """
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[dict]]" = asyncio.Queue()
@@ -400,8 +443,14 @@ def build_app(
 
         def _run() -> None:
             try:
-                record = gui.turn(req.text, on_speech=lambda s: _emit({"type": "speech", "text": s}))
-                _emit({"type": "turn", "record": record})
+                speak = lambda s: _emit({"type": "speech", "text": s})  # noqa: E731
+                if req.multi_step:
+                    records = gui.task(req.text, on_speech=speak,
+                                       on_step=lambda e: _emit({"type": "step", "record": e}))
+                    _emit({"type": "turn", "record": records[-1] if records else {}})
+                else:
+                    record = gui.turn(req.text, on_speech=speak)
+                    _emit({"type": "turn", "record": record})
             except Exception as exc:  # a turn must never kill the stream
                 _emit({"type": "error", "error": str(exc)})
             finally:
