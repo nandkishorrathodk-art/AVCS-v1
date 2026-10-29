@@ -50,6 +50,14 @@ class TrajectoryStep:
     detail: str = ""
     verified: Optional[bool] = None
     visual_delta: Optional[float] = None
+    # The human-behaviour half of a turn. `hesitated_s` is the pause the hand
+    # took before committing; `corrections` is how many times a miss was
+    # re-grounded and retried, and `corrected` whether the last retry verified.
+    # Recorded separately so a first-try success is never confused with a
+    # recovery, and so the correction rate is measurable across turns.
+    hesitated_s: Optional[float] = None
+    corrections: int = 0
+    corrected: bool = False
     capabilities: Optional[Dict[str, Any]] = None
     at: float = field(default_factory=time.time)
 

@@ -319,6 +319,18 @@ class EyeStream(StreamingVisualCortexV2):
         w = max(640, self.geometry.virtual_width // 2)
         return np.full((h, w, 3), 128, dtype=np.uint8)
 
+    @property
+    def capture_is_live(self) -> bool:
+        """True only when frames come from a real screen, not the grey fallback.
+
+        ``grab_screen`` returns a flat 128-grey buffer whenever ``mss`` is
+        missing or the capture device fails. That buffer is indistinguishable
+        from a real grey screen, so a caller that reported "live screen" would be
+        claiming a capture it never made. This exposes the distinction so the
+        provenance can be shown instead of assumed.
+        """
+        return self._sct is not None and not getattr(self, "_use_synthetic", False)
+
     @torch.no_grad()
     def step(self) -> EyeFrame:
         """Captures frame and runs cortex forward pass in under 10ms total."""

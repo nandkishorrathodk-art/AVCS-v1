@@ -115,6 +115,17 @@ class ScreenModel:
     def demo_source(self):
         return self._demo
 
+    def _capture_is_live(self) -> bool:
+        """True only when frames come from the user's real screen."""
+        if self._demo is not None:
+            return False
+        flag = getattr(self.perception, "capture_is_live", None)
+        if flag is not None:
+            return bool(flag)
+        # A scene perception over the default "screen" source is live unless it
+        # says otherwise; the lexicon perception always answers.
+        return getattr(self, "_source_name", "screen") not in ("demo", "desktop", "synthetic-desktop")
+
     def snapshot(self) -> GuiState:
         t0 = time.perf_counter()
         obs = self.perception.observe()
@@ -207,6 +218,19 @@ def _decode_audio(req: AudioRequest):
     return AudioClip.from_pcm16_bytes(raw, int(req.sample_rate))
 
 
+def _hand_is_virtual(hand: Any) -> bool:
+    """True when a hand records actions but moves no real pointer.
+
+    ``VirtualHand`` is the obvious case. A ``ServoHand`` is the subtler one: it
+    plans a genuine neuromuscular trajectory, but when it wraps a simulated
+    cursor the pointer never moves. Reading either as "live" would be the same
+    overclaim as a fake hand.
+    """
+    if isinstance(hand, VirtualHand):
+        return True
+    return bool(getattr(hand, "virtual", False))
+
+
 class GuiApp:
     """Wires the screen, the brain, the mouth and the ears into one assistant."""
 
@@ -227,6 +251,7 @@ class GuiApp:
         path_roots: Optional[List[str]] = None,
         allowed_apps: Optional[List[str]] = None,
         proactive: bool = False,
+        servo: bool = False,
     ) -> None:
         self.eyes = eyes
         self.screen = ScreenModel(
@@ -270,6 +295,14 @@ class GuiApp:
             from avcs.voice.actuators import default_hand
 
             self.hand = default_hand()
+            # `--servo` replaces the teleport with a human neuromuscular path
+            # (minimum-jerk + Fitts' Law + micro-tremor). It is opt-in because a
+            # real cursor that takes ~0.3-0.9 s to arrive is a deliberate choice,
+            # not a silent default: some callers want the instant click.
+            if self.hand is not None and servo:
+                from avcs.voice.actuators import ServoHand
+
+                self.hand = ServoHand(self.hand, virtual=False)
         elif not self.live:
             # Virtual mode always has a hand, granted or not. Without one the
             # grant is unreachable: `_ask_brain` reports `can_click=False`, the
@@ -278,8 +311,25 @@ class GuiApp:
             # is the missing grant. The virtual hand records the coordinate a
             # granted action resolved to and moves no cursor: the gate is the
             # production kernel, only the side effect is inert.
-            width, height = self._frame_size()
-            self.hand = VirtualHand(width, height)
+            if servo:
+                # A servo over a *virtual* cursor, never over a real hand: this
+                # branch means `--live` was not passed, so actuating the machine
+                # here would be a capability the user never granted. The human
+                # trajectory is still planned and painted into an in-memory
+                # driver, so `--servo` is observable and testable with no display.
+                # `VirtualHand` is not wrapped because its click() takes
+                # normalized coordinates while `ServoHand` speaks pixels; mixing
+                # them would record a pixel as if it were normalized.
+                from avcs.voice.actuators import ServoHand
+                from forge.vision.cortex.motor.driver import VirtualCursorDriver
+
+                width, height = self._frame_size()
+                self.hand = ServoHand(
+                    VirtualCursorDriver(screen_size=(width, height)), virtual=True
+                )
+            else:
+                width, height = self._frame_size()
+                self.hand = VirtualHand(width, height)
         self.assistant = Assistant(
             brain=self.brain,
             speaker=self.speaker,
@@ -289,10 +339,12 @@ class GuiApp:
             # Say "live" only when a real hand exists, so a turn record does not
             # claim real actuation on a machine that cannot actuate. A virtual
             # hand is a granted capability with an inert side effect, so it is
-            # reported as "virtual".
+            # reported as "virtual". A `ServoHand` carries its own `virtual`
+            # flag, because a servo over a virtual cursor computes a real
+            # trajectory but moves no pointer -- neither "live" nor "none".
             actuation=(
                 "live"
-                if (self.hand is not None and not isinstance(self.hand, VirtualHand))
+                if (self.hand is not None and not _hand_is_virtual(self.hand))
                 else "virtual"
             ),
             memory=self.memory,
@@ -404,7 +456,7 @@ class GuiApp:
         # with no hand (no xdotool/X11 on Linux, no user32 on Windows) must not
         # read as "live": every op would be refused, and the page would be
         # claiming a capability the machine does not have.
-        if self.hand is not None and not isinstance(self.hand, VirtualHand):
+        if self.hand is not None and not _hand_is_virtual(self.hand):
             caps["actuation"] = "live"
         elif self.live:
             caps["actuation"] = "live-unavailable"
@@ -416,12 +468,20 @@ class GuiApp:
         caps["hand"] = getattr(self.hand, "name", None)
         caps["mouth"] = self.speaker.engine_name
         caps["eyes"] = type(self.screen.perception).__name__
+        # Whether the frame really came off a screen. A synthetic source (the demo
+        # desktop) and an EyeStream whose `mss` is missing both produce pixels
+        # that are not the user's screen; the page must say which, or it claims a
+        # live view it never captured.
+        caps["capture"] = "live" if self.screen._capture_is_live() else "synthetic"
         caps["can_act"] = bool(self.grants)
         caps["memory"] = bool(self.memory)
         caps["trajectory"] = bool(self.trajectory)
         caps["path_roots"] = self.path_roots
         caps["allowed_apps"] = self.allowed_apps
         caps["proactive"] = bool(self.awareness is not None and self.awareness.running)
+        # How the pointer travels, reported from the hand itself so a build
+        # without the neuromuscular servo says "teleport" rather than lying.
+        caps["motion"] = "neuromuscular" if getattr(self.hand, "name", "") == "servo-hand" else "teleport"
         return caps
 
     def _entry(self, record, total_ms: float) -> Dict[str, Any]:
@@ -520,12 +580,14 @@ def build_app(
     path_roots: Optional[List[str]] = None,
     allowed_apps: Optional[List[str]] = None,
     proactive: bool = False,
+    servo: bool = False,
 ) -> FastAPI:
     gui = GuiApp(
         source=source, category=category, grants=grants, checkpoint=checkpoint,
         live=live, mouth=mouth, ears=ears, eyes=eyes, brain=brain,
         memory_path=memory_path, trajectory_path=trajectory_path,
         path_roots=path_roots, allowed_apps=allowed_apps, proactive=proactive,
+        servo=servo,
     )
     app = FastAPI(title="AVCS assistant")
     app.state.gui = gui

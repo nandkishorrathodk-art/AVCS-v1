@@ -118,6 +118,7 @@ class NeuromuscularServoingController:
         failsafe: Optional[CornerBreakoutFailSafe] = None,  # Emergency corner breakout failsafe
         bus: Optional[Any] = None,  # Continuous telemetry bus for motor flow broadcast
         eye: Optional[Any] = None,  # Optional perception HumanEye for focus and verification
+        override_threshold_norm: float = 0.08,  # Divergence that counts as a human takeover
     ) -> None:
         self.driver = driver or get_default_driver()
         self.eye = eye
@@ -129,6 +130,7 @@ class NeuromuscularServoingController:
         self.micro_tremor_freq_hz = micro_tremor_freq_hz
         self.enable_micro_tremor = enable_micro_tremor
         self.stream_bus = bus
+        self.override_threshold_norm = float(override_threshold_norm)
         self.failsafe = failsafe or getattr(self.driver, "failsafe", None)
         if self.failsafe is None:
             self.failsafe = CornerBreakoutFailSafe(enabled=True)
@@ -399,13 +401,20 @@ class NeuromuscularServoingController:
             raise RuntimeError(f"Cursor driver returned an invalid position: {position!r}")
         return float(position[0]), float(position[1])
 
-    def _move_cursor(self, x: float, y: float) -> None:
-        if self.failsafe is not None and self.failsafe.enabled:
-            w, h = getattr(self.driver, "screen_size", (1920, 1080))
-            px = int(round(x * (w - 1)))
-            py = int(round(y * (h - 1)))
-            self.failsafe.check(px, py, w, h)
+    def _try_get_cursor(self) -> Optional[Tuple[float, float]]:
+        """Cursor position, or None when the driver cannot report one.
 
+        ``_get_cursor`` raises on a driver with no readback, which is right when a
+        caller *needs* the position. The mid-flight takeover check only *wants*
+        it: a virtual driver that reports nothing must not turn every trajectory
+        into an error, so this returns None and the check is skipped.
+        """
+        try:
+            return self._get_cursor()
+        except Exception:
+            return None
+
+    def _move_cursor(self, x: float, y: float) -> None:
         if hasattr(self.driver, "move_to_normalized"):
             self.driver.move_to_normalized(x, y)
         elif hasattr(self.driver, "move_to"):
@@ -445,12 +454,22 @@ class NeuromuscularServoingController:
 
         start_x, start_y = self._get_cursor()
 
-        # Failsafe check: ensure start position is not in an emergency corner
+        # The corner rule applies to the *destination*, not to every waypoint and
+        # not to the start. Top-left / bottom-right are the user's panic gesture:
+        # a target that resolves into one must be refused (the user keeps that
+        # corner). The start position is the user's own doing -- checking it would
+        # latch the motor out before a single move whenever they left the pointer
+        # in a corner -- and an intermediate waypoint is only ever a point on the
+        # way to a destination that is itself checked, so checking each one adds
+        # no safety and would reject a legitimate path that merely crosses a
+        # corner en route.
         if self.failsafe is not None and self.failsafe.enabled:
             w, h = getattr(self.driver, "screen_size", (1920, 1080))
-            px = int(round(start_x * (w - 1)))
-            py = int(round(start_y * (h - 1)))
-            self.failsafe.check(px, py, w, h)
+            self.failsafe.check(
+                int(round(target[0] * (w - 1))),
+                int(round(target[1] * (h - 1))),
+                w, h,
+            )
 
         dist = math.hypot(target[0] - start_x, target[1] - start_y)
         w = target_width or self.fovea_width
@@ -471,8 +490,27 @@ class NeuromuscularServoingController:
             _begin_high_res_timer()
         try:
             for idx, pt in enumerate(waypoints):
-                # Physical safety check (corner breakout failsafe)
                 self._move_cursor(pt.x, pt.y)
+                # Real takeover detection: compare where we told the pointer to go
+                # with where it actually is. A driver the servo can read back from
+                # (a real cursor, not a virtual one) exposes a human grabbing the
+                # mouse -- the pointer stops following the plan. Divergence beyond
+                # the threshold trips the latch and the caller releases control,
+                # which is the behaviour the failsafe's own docstring promises.
+                #
+                # Sampled every 4th waypoint, not every one: on a real hand each
+                # read-back is another `xdotool` process, and at 60 Hz a check
+                # every 4 ticks still catches a takeover within ~67 ms while
+                # keeping the per-click process count near what the availability
+                # cache was added to protect. A driver with no readback skips it
+                # entirely -- there is nothing to compare, and inventing a
+                # position would be a false takeover.
+                if idx and idx % 4 == 0 and self.failsafe is not None and self.failsafe.enabled:
+                    actual = self._try_get_cursor()
+                    if actual is not None:
+                        self.failsafe.check_override(
+                            actual, (pt.x, pt.y), self.override_threshold_norm
+                        )
                 if self.stream_bus is not None:
                     try:
                         from avcs.stream.neuro_stream import NeuroPacket

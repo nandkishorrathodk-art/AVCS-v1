@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
 
 import numpy as np
 
-from avcs.control.capability import CapabilityKernel, GroundingEvidence
+from avcs.control.capability import CapabilityKernel, GroundingEvidence, POINT_OPS
 from avcs.voice.brain import AssistantTurn, ConversationBrain, TurnKind
 from avcs.voice.hands import MUTATING_OPS, dispatch
 from avcs.voice.stt import AudioClip, SttEngine, Transcript, default_stt_engine
@@ -148,6 +148,13 @@ class AssistantTurnRecord:
     listen_ms: float = 0.0
     brain_ms: float = 0.0
     act_ms: float = 0.0
+    # How long the assistant visibly paused to look before committing a mutating
+    # action. 0.0 means no pause was taken (an observing op, or hesitation off).
+    hesitated_s: float = 0.0
+    # Self-correction: how many re-ground-and-retry attempts were made after the
+    # action visibly did nothing, and whether one of them worked.
+    corrections: int = 0
+    corrected: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -222,6 +229,9 @@ class Assistant:
         step_delay_s: float = 0.25,
         memory: Any = None,
         trajectory: Any = None,
+        think_pause_s: float = 0.45,
+        narrate_thinking: bool = True,
+        max_corrections: int = 2,
     ) -> None:
         self.brain = brain or ConversationBrain()
         self.speaker = speaker or Speaker()
@@ -235,6 +245,16 @@ class Assistant:
         self.max_task_steps = int(max_task_steps)
         self.delta_threshold = float(delta_threshold)
         self.step_delay_s = float(step_delay_s)
+        # A visible pause before a mutating action, so the hand does not move in
+        # the same frame the target is named. 0 disables it (scripted demos).
+        self.think_pause_s = float(think_pause_s)
+        self.narrate_thinking = bool(narrate_thinking)
+        # A near-miss click is retried, re-grounding from a fresh frame, at most
+        # this many times. 0 disables self-correction entirely.
+        self.max_corrections = int(max_corrections)
+        # The pre-action frame, kept so a retry is verified against the same
+        # "before" the first attempt used.
+        self._pre_frame: Any = None
         self._last_point: Optional[tuple[float, float]] = None
         self._last_outcome: str = ""
         self._last_confidence: Optional[float] = None
@@ -466,6 +486,9 @@ class Assistant:
                     detail=record.detail,
                     verified=record.verified,
                     visual_delta=record.visual_delta,
+                    hesitated_s=record.hesitated_s,
+                    corrections=record.corrections,
+                    corrected=record.corrected,
                     capabilities=self.capabilities(),
                 )
             )
@@ -645,13 +668,40 @@ class Assistant:
             results = queue.drain()
             spoken = any(r.spoken for r in results)
             speak_error = next((r.error for r in results if r.error), None)
+            # No separate hesitation line on the streaming path: the thought is
+            # parsed from the action JSON, which only arrives after the reply has
+            # already been spoken, so an aside here would land *after* the
+            # sentence it is supposed to precede. The model's own streamed words
+            # carry the hesitation instead, and `_deliberate` still takes the
+            # pause, so the visible thinking is the same on both paths.
         else:
             turn_result = self.brain.respond(user_text, brain_obs)
+            # The hesitation line is spoken *first*, before the reply that
+            # announces the action. Saying "click kar raha hoon" and only then
+            # "ruko, dekh leta hoon" contradicts a sentence the user already
+            # heard, which is the bot behaviour the pause exists to avoid.
+            spoken, speak_error = self._speak_hesitation(turn_result)
             if on_speech is not None and turn_result.speech:
                 on_speech(turn_result.speech)
             result = self._speak(turn_result.speech)
-            spoken, speak_error = result.spoken, result.error
+            spoken = spoken or result.spoken
+            speak_error = speak_error or result.error
         return turn_result, spoken, speak_error
+
+    def _speak_hesitation(self, turn_result: AssistantTurn) -> tuple[bool, Optional[str]]:
+        """Speak the private thought as a pre-action aside, if there is one.
+
+        Returns ``(spoken, error)``. A mouth that is unavailable is not an error
+        here: the pause still happens, and the turn record says it happened.
+        """
+        line = self._thinking_line(turn_result)
+        if not line or not self.speaker.available():
+            return False, None
+        try:
+            result = self.speaker.speak(line)
+            return bool(result.spoken), result.error
+        except Exception as exc:
+            return False, str(exc)
 
     def _execute(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
         """Ground the named target, then gate and run the action, then verify.
@@ -659,12 +709,20 @@ class Assistant:
         Verification uses a fresh post-action capture of the *same* screen. When
         there is no post-frame, ``verified`` stays ``None`` rather than being
         reported as success.
+
+        Before acting, a mutating op pauses for a beat and may say what it is
+        looking at. That is not decoration: a hand that moves the instant a
+        target is named looks like a macro, and a person visibly *checks* before
+        they commit. The pause is bounded and skippable so a scripted demo stays
+        fast.
         """
         intent = turn_result.intent
         # Ask perception to ground *that target* (not the raw utterance) before
         # gating the action.
         self._observe(intent.target_description)
+        self._deliberate(turn_result, record)
         pre_frame = self.perception.frame() if self.perception else None
+        self._pre_frame = pre_frame
         self._act(turn_result, record)
 
         if record.performed and self.perception is not None:
@@ -684,6 +742,174 @@ class Assistant:
                 )
                 record.visual_delta = round(delta, 4)
                 record.verified = delta >= self.delta_threshold
+        # A performed pointer action that changed nothing is a miss, not a
+        # verdict. Give it a bounded, re-grounded second look.
+        self._correct_miss(turn_result, record)
+
+    def _thinking_line(self, turn_result: AssistantTurn) -> Optional[str]:
+        """The one line the assistant says while it looks, or None.
+
+        Only a *mutating pointer* action earns it: pausing to narrate a glance
+        would be noise, and a keyboard op gains nothing from a spoken beat.
+        """
+        if not self.narrate_thinking or self.think_pause_s <= 0:
+            return None
+        intent = turn_result.intent
+        if intent is None or intent.op.value not in POINT_OPS:
+            return None
+        if intent.op.value not in MUTATING_OPS:
+            return None
+        thought = (getattr(turn_result, "thought", "") or "").strip()
+        if not thought:
+            return None
+        return thought if len(thought) <= 120 else thought[:117] + "..."
+
+    def _deliberate(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
+        """A visible pause before committing a mutating action.
+
+        ``record.hesitated_s`` reports how long the pause actually was, so "it
+        thinks before it clicks" is a number in the turn record, not a mood. The
+        spoken half of the hesitation happens in ``_ask_brain``, *before* the
+        main reply, because saying "ruko, dekh raha hoon" after "click kar raha
+        hoon" contradicts a sentence the user already heard.
+        """
+        if self.think_pause_s <= 0:
+            return
+        intent = turn_result.intent
+        if intent is None or intent.op.value not in MUTATING_OPS:
+            return
+        time.sleep(self.think_pause_s)
+        record.hesitated_s = round(self.think_pause_s, 3)
+
+    def _correct_miss(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
+        """Re-ground and retry a pointer action that visibly did nothing.
+
+        A person who clicks the wrong spot notices the screen did not change and
+        tries again. Without this, a near-miss is simply reported and the turn
+        ends. The retry is bounded (``max_corrections``) and only applies to a
+        *pointer* op that was performed and then verified ``False`` -- a refusal
+        is a different outcome with a different reason and is not retried.
+
+        The re-grounding is the honest part: the second attempt reads the screen
+        again, so if the target moved, the new point follows it. If the retry
+        still misses, ``verified`` stays ``False`` and the record says how many
+        attempts were made -- a failed correction is reported, not hidden.
+        """
+        if self.max_corrections <= 0:
+            return
+        if record.verified is not False or not record.performed:
+            return
+        intent = turn_result.intent
+        if intent is None or intent.op.value not in POINT_OPS:
+            return
+        if record.corrections >= self.max_corrections:
+            return
+
+        # The point the action was actually grounded on. For a click that equals
+        # `record.clicked`; for a drag it is the *source* (dispatch reports the
+        # destination), so comparing against `record.clicked` would always look
+        # different and retry forever. Ground it once here, on the unchanged
+        # frame, and compare each retry against that.
+        prev_point = self._grounded_point(intent.target_description)
+
+        while record.corrections < self.max_corrections:
+            # Re-observe the target so the next point comes from a fresh frame.
+            self._observe(intent.target_description)
+            # Ground *before* touching the hand. If the frame has not changed the
+            # new point is the same pixel, and clicking it again is not a
+            # correction -- it is the "stuck" behaviour this loop exists to
+            # avoid. Checking here means a no-op retry never reaches the hand.
+            new_point = self._grounded_point(intent.target_description)
+            if prev_point is not None and new_point is not None and new_point == prev_point:
+                record.detail = (
+                    f"{record.detail}; re-grounding gave the same point "
+                    f"{new_point}, nothing to correct"
+                ).strip("; ")
+                break
+            prev_point = new_point if new_point is not None else prev_point
+
+            retry = AssistantTurnRecord(
+                turn=record.turn,
+                heard="",
+                said="",
+                kind="act",
+                source="correction",
+                action=record.action,
+                target=record.target,
+            )
+            self._act(turn_result, retry)
+            if not retry.performed:
+                record.detail = (
+                    f"{record.detail}; correction not performed: "
+                    f"{retry.gate_reason or retry.detail}"
+                ).strip("; ")
+                break
+            record.corrections += 1
+            # Verify the retry against a fresh post-frame, the same way the first
+            # attempt was verified.
+            post = self.perception.frame() if self.perception is not None else None
+            if post is None or self._pre_frame is None:
+                break
+            from avcs.control.verifier import VisualRippleVerifier
+            from avcs.system1.loop import to_luma
+
+            shim = type("_Ripple", (), {"ripple_radius": 0.08})()
+            point = self._last_point or (0.5, 0.5)
+            delta = float(
+                VisualRippleVerifier.calculate_local_photometric_delta(
+                    shim, point, to_luma(self._pre_frame), to_luma(post)
+                )
+            )
+            record.visual_delta = round(delta, 4)
+            record.clicked = retry.clicked or record.clicked
+            record.corrected = delta >= self.delta_threshold
+            record.verified = record.corrected
+            if record.corrected:
+                record.detail = (
+                    f"{record.detail}; corrected on attempt {record.corrections}"
+                ).strip("; ")
+                break
+            record.detail = (
+                f"{record.detail}; correction {record.corrections} still no change"
+            ).strip("; ")
+
+    def _grounded_point(self, query: str) -> Optional[tuple[int, int]]:
+        """The pixel the perception would click for ``query``, or None.
+
+        Read-only: this asks for grounding evidence and maps the candidate point
+        to pixels the same way ``dispatch`` does, without touching the hand. The
+        self-correction loop uses it to tell "the target moved" from "the target
+        is exactly where it was", so a no-op retry never actuates.
+        """
+        producer = getattr(self.perception, "grounding_evidence", None)
+        if not callable(producer):
+            return None
+        try:
+            evidence = producer(query)
+        except Exception:
+            return None
+        point = getattr(evidence, "candidate_point_norm", None)
+        if point is None:
+            return None
+        hand = self.hand
+        if hand is None:
+            return None
+        size = getattr(hand, "get_screen_size", None)
+        if callable(size):
+            try:
+                w, h = size()
+                if w and h:
+                    return (int(round(point[0] * (w - 1))), int(round(point[1] * (h - 1))))
+            except Exception:
+                return None
+        w = getattr(hand, "width", None)
+        h = getattr(hand, "height", None)
+        if w and h:
+            return (int(round(point[0] * (w - 1))), int(round(point[1] * (h - 1))))
+        # Same fallback `dispatch` uses for a hand with no pixel space: the point
+        # is passed through as-is. Mirroring it here keeps the comparison valid
+        # for any hand, including one that speaks normalized coordinates.
+        return (float(point[0]), float(point[1]))
 
     def _act(self, turn_result: AssistantTurn, record: AssistantTurnRecord) -> None:
         intent = turn_result.intent

@@ -101,6 +101,22 @@ class LexiconPerception:
         """The most recent frame. Cached so a pre/post pair is comparable."""
         return self._last_frame
 
+    @property
+    def capture_is_live(self) -> bool:
+        """Whether frames come from a real screen, not a synthetic fallback.
+
+        A `frame_source` (a test fixture or the GUI's own buffer) is not a live
+        screen by definition. With an `EyeStream` the answer is the stream's own
+        flag, so a missing `mss` -- which makes the stream return a flat grey
+        buffer -- is reported rather than hidden behind "live screen".
+        """
+        if self._frame_source is not None:
+            return False
+        flag = getattr(self._eye, "capture_is_live", None)
+        if flag is not None:
+            return bool(flag)
+        return self._eye is not None
+
     def grab(self) -> Optional[np.ndarray]:
         """Pull a fresh frame from the source and re-read its labels."""
         frame = self._capture()

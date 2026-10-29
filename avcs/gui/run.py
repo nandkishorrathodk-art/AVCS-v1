@@ -57,6 +57,11 @@ def main() -> int:
                     help="roots the file ops may read (needed for read_file/list_dir)")
     ap.add_argument("--allowed-apps", nargs="*", default=None,
                     help="app binaries launch_app may start (needed for launch_app)")
+    ap.add_argument("--servo", action="store_true",
+                    help="move the pointer along a human neuromuscular trajectory "
+                         "(minimum-jerk + Fitts' Law + micro-tremor) instead of "
+                         "teleporting. Adds ~0.3-0.9 s of travel per click, which is "
+                         "the point: it looks like a hand, not a jump.")
     ap.add_argument("--proactive", action="store_true",
                     help="watch the screen and speak first when something is worth "
                          "mentioning (a dialog, a view switch, a stuck user). The "
@@ -85,6 +90,7 @@ def main() -> int:
         path_roots=args.path_roots,
         allowed_apps=args.allowed_apps,
         proactive=args.proactive,
+        servo=args.servo,
     )
     gui = app.state.gui
     caps = gui.capabilities()
@@ -102,6 +108,7 @@ def main() -> int:
               "(need xdotool + $DISPLAY on Linux, or Windows user32); "
               "every actuation will be refused.")
     print(f"  proactive  : {caps.get('proactive')}")
+    print(f"  motion     : {'neuromuscular (human)' if args.servo else 'teleport'}")
     print(f"  http://{args.host}:{args.port}/")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

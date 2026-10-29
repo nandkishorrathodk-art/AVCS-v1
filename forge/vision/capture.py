@@ -653,7 +653,8 @@ def list_monitors() -> list[dict]:
     except Exception:
         return []
     try:
-        with mss.mss() as sct:
+        _mss = getattr(mss, "MSS", None) or mss.mss
+        with _mss() as sct:
             monitors = list(sct.monitors)
     except Exception:
         return []
@@ -684,7 +685,8 @@ def virtual_screen() -> Optional[dict]:
     except Exception:
         return None
     try:
-        with mss.mss() as sct:
+        _mss = getattr(mss, "MSS", None) or mss.mss
+        with _mss() as sct:
             mon = sct.monitors[0]
     except Exception:
         return None

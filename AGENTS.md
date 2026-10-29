@@ -12,7 +12,7 @@ no GPU). The constraint is deliberate: it keeps every component measurable.
 ```bash
 python3 -m pip install numpy torch pytest
 python3 -m pip install pillow mss             # optional: real-time screen vision
-python3 -m pytest tests/ -q                    # 231 tests, ~24s
+python3 -m pytest tests/ -q                    # 327 tests, ~40s
 python3 -m forge.demo --steps 250              # trains, generates, debates
 python3 -m forge.pipeline_demo --steps 200     # full chain, BPE tokenizer
 python3 -m forge.control_demo                  # control kernel sections
@@ -1389,6 +1389,10 @@ model's own view of the screen, a conversation, and a gate log.
 python3 -m avcs.gui.run --source desktop   # synthetic desktop with real controls
 python3 -m avcs.gui.run --source screen    # the real screen
 python3 -m avcs.gui.run --live             # real actuation (needs xdotool / Windows)
+python3 -m avcs.gui.run --source screen --eyes lexicon --servo --live --proactive
+                                           # the whole thing: pixel eyes, human
+                                           # motion, real actuation, watches and
+                                           # speaks first
 ```
 
 ### The bug this fixes: the click step was unreachable
@@ -1460,6 +1464,50 @@ target becoming part of it.
   `gate_allowed`, `gate_reason`, and per-stage milliseconds, so "real time" is a
   measurement. On this box the page reports ~34 ms/frame for the full
   grab+read+paint path at 900x520.
+- **The streamed reply is shown once.** The SSE turn emits the reply as `speech`
+  deltas (shown immediately), then a `step` record whose `said` is that same
+  sentence. The `step` branch used to leave the streaming bubble in place, so the
+  assistant appeared to repeat itself on every turn — a rendering bug, not a
+  second utterance. The branch now removes the streaming bubble first;
+  `test_streaming_page_clears_the_streamed_bubble_when_a_step_lands` pins it.
+- **The pane says "live screen" only when the pixels came off a screen.** This
+  was a real overclaim. `EyeStream.grab_screen` silently returns a flat 128-grey
+  buffer when `mss` is missing or the capture device fails, and that buffer is
+  indistinguishable from a real grey screen. The page title said "live screen"
+  either way. `EyeStream.capture_is_live` / `LexiconPerception.capture_is_live`
+  now expose the distinction, `/api/capabilities` reports `capture: live |
+  synthetic`, and the pane title switches to "synthetic view" when it is not
+  live. This is the same class of bug as the `avcs_sdk --check` false "OK": a
+  capability reported as present when the machinery behind it is absent.
+  Measured on this box before the `mss` install: `capture=synthetic`, frame
+  `min=max=128`, and `--source screen` described the same blank buffer as
+  `--source desktop` did. After installing `mss`: `capture=live`, frame
+  `(800, 1280, 3)` with 251 distinct values.
+
+### Real GUI applications: what the reader actually does on them
+
+Measured directly on this box (Xvfb `:99`, real `ScreenCapture`, shipped
+`avc_lexicon.pt`):
+
+- **The reader works on clean in-distribution text.** A PIL canvas in DejaVuSans
+  (the training face) reads `save` / `cancel` / `close` at 0.46-0.64 confidence.
+  That is the model doing its job.
+- **It does not transfer to a real browser window.** A chromium page with
+  `<button>Save</button>` etc. is read as `country`, `email`, `install` — wrong
+  labels at 0.31-0.40 confidence. This is the documented **font/scale domain
+  shift** (see the AVC Lexicon section: 70% on a held-out *font*, and the gate
+  does not transfer), now observed end-to-end rather than in a benchmark.
+- **Full-screen segmentation is the second failure.** On the whole desktop the
+  reader returns one box covering the entire frame (`off`, `no`) because a real
+  window's frame is not a bordered control in the sense the segmenter expects.
+  It behaves correctly on a tightly cropped control region and degenerates on a
+  full screen.
+
+Consequence, stated plainly: on a real application the click path resolves
+`DENY (grounder produced no candidate point)` — the honest outcome, not a bug in
+the gate. The synthetic desktop demo is where the loop closes because the
+generator and the reader share a vocabulary and a renderer by construction. Do
+not read a working synthetic demo as evidence about unseen software.
 
 ### The synthetic desktop is not a generalisation claim
 
@@ -1511,6 +1559,122 @@ verify: no change (delta=0.0)
 when a virtual hand clicks it, so the delta is 0.0 and it says so instead of
 claiming success. Real actuation (`--live`) and a real screen are what produce a
 non-zero delta.
+
+### The hand now moves like a hand (`avcs/voice/actuators.py`, `--servo`)
+
+`XdotoolHand` teleported: `mousemove x y`. A person does not. `ServoHand` wraps
+any hand and replaces the jump with the neuromuscular trajectory that was already
+built and measured in `avcs/control/servoing.py` -- 5th-order minimum-jerk,
+Fitts' Law duration, 8-12 Hz micro-tremor -- so the pointer travels instead of
+appearing. This is a *wire*, not a new model: the trajectory code existed and
+nothing on the voice/GUI path used it.
+
+- **Opt-in.** `--servo` (GUI) or `ServoHand(hand)`. The default is still the
+  teleport, because a cursor that takes ~0.3-0.9 s to arrive is a deliberate
+  choice, not a silent one.
+- **`--servo` without `--live` never actuates.** In the non-live branch the servo
+  wraps a `VirtualCursorDriver`, not a real hand. The trajectory is planned and
+  painted in memory, so the motion is observable and testable with no display,
+  and no machine is touched. A test pins this; an earlier version of this change
+  had `default_servo_hand()` in that branch, which would have moved the real
+  cursor on a plain `--servo` run.
+- **`dispatch` needs no special case.** `ServoHand` exposes `get_screen_size`
+  and takes absolute pixels, exactly like `XdotoolHand`/`HandMotor`, so
+  `avcs.voice.hands.dispatch` drives it through the existing path.
+- **`XdotoolHand` gained `move_to_pixels` and `get_cursor_pos`.** It had no bare
+  move -- `mousemove` lived only inside `click()` -- so a servo trajectory would
+  have computed a path and never painted it. `move_to_pixels` is that move;
+  `get_cursor_pos` is the readback the servo needs to know where it starts.
+- **`available()` is cached.** It was re-probed on every call, and the servo calls
+  it once per waypoint, so a single click spawned ~2x the processes it needed.
+  Measured on the live server: `act_ms` 5.6 s -> 2.0 s after the cache, at 60 Hz
+  tick (a 60 Hz screen cannot consume 120 Hz anyway).
+
+Measured on this box (`--source desktop --eyes lexicon --servo --live`, real
+`xdotool` on Xvfb `:99`): the trajectory is 10-80 waypoints with a speed profile
+that peaks in the middle, a single click at the end, and Fitts ID 0.0 (near) to
+3.0 (far). The pointer genuinely moves: `POST /api/turn {"text":"save karo"}`
+takes the cursor from 640,400 to 81,105 and the record says
+`performed=true, actuation=live`.
+
+### Xvfb resets the pointer unless it is started with `-noreset`
+
+An earlier revision of this file claimed "Xvfb is known not to honour
+`XWarpPointer` for readback". **That is wrong**, and it hid a real bug. Xvfb
+honours the warp fine; the pointer simply resets to the screen centre every time
+the last client disconnects, so `xdotool mousemove` (which exits, disconnecting)
+appears to do nothing when a *later* process reads the position. Measured:
+
+| server | `xdotool mousemove 900 600` then a separate read |
+|---|---|
+| `Xvfb :99 -screen 0 1280x800x24` | stays at 640,400 (reset on disconnect) |
+| `Xvfb :99 -screen 0 1280x800x24 -noreset` | moves to 900,600 |
+
+This matters beyond benchmarks: `XdotoolHand._probe` used to check only
+`getdisplaygeometry`'s exit code, so on a reset-prone server it reported the hand
+available while **every click silently no-opped** -- a false success, the one
+failure a fail-closed hand must never produce. The probe now moves the pointer in
+one process, reads it back in a second, and requires the read-back to match
+(restoring the original position either way). Two consequences:
+
+- Run Xvfb with `-noreset` for real actuation, or the probe correctly reports the
+  hand unavailable and every op is refused.
+- A chained single-invocation probe (`mousemove 1 1 getmouselocation`) does
+  **not** work: it reads the position before the client disconnects, so it
+  reports success even on a broken server. The read must be a second connection.
+
+
+### Hesitation: it looks before it clicks
+
+`Assistant.think_pause_s` (default 0.45 s) pauses before a *mutating pointer*
+action, and `record.hesitated_s` reports the real duration. This is the
+difference between a macro and a person: a hand that moves in the same frame the
+target is named does not look like it checked anything. It applies only to
+`POINT_OPS`; a keyboard or file op gains nothing from a pause, so it does not get
+one. `think_pause_s=0` disables it for a fast scripted demo.
+
+The spoken half has an ordering rule that a test pins: the aside ("ruko, pehle
+dekh leta hoon") is spoken *before* the reply that announces the action. Spoken
+the other way round the user hears "click kar raha hoon" and then "ruko, dekh
+leta hoon" -- a contradiction, and the macro behaviour the pause exists to avoid.
+This is why the thinking line lives in `_ask_brain` (which owns speech ordering),
+not in `_deliberate` (which owns the pause). On the *streaming* path there is no
+separate aside: the thought is parsed from the action JSON, which only arrives
+after the reply was already spoken, so an aside there would land after the
+sentence it should precede. The model's own streamed words carry it instead, and
+`_deliberate` still takes the pause, so the visible thinking is the same on both
+paths. The conversation prompt asks for a short in-sentence aside for the same
+reason.
+
+### Self-correction: a miss is re-grounded, not accepted
+
+A performed pointer action that changed nothing (`verified is False`) is retried
+up to `max_corrections` times (default 2). The retry re-grounds from a fresh
+frame, so a target that moved is followed. Three honesty properties, all pinned:
+
+1. **A no-op retry never reaches the hand.** The new point is grounded *before*
+   actuating; if it equals the previous point there is nothing to correct, and
+   `detail` says so. Clicking the identical pixel again is the "stuck" behaviour
+   the loop exists to avoid, and an early version did exactly that (a same-point
+   miss clicked 3x; the tests caught it).
+2. **A drag is compared on its source, not its destination.** `dispatch` reports
+   the drag *destination*, so comparing against `record.clicked` made every drag
+   look like a moved target and retry forever.
+3. **A refusal is not retried.** A gate denial is a different outcome with a
+   different reason; only a *performed* miss is a candidate.
+
+`record.corrections` / `record.corrected` carry the result, and the page shows a
+`CORRECTED` / `RETRIED` badge, so a correction is never mistaken for a first-try
+success.
+
+### A window Close box is a control, not a panic corner
+
+The servo's failsafe treats top-left and bottom-right as emergency breakout
+zones, and *excludes* top-right (a Close box) and bottom-left (a Start button).
+Without that exclusion every click on a window's close button would trip the
+failsafe and be refused -- the same reasoning the repo's own hardware failsafe
+documents. The panic gesture is the top-left/bottom-right diagonal; both are
+pinned by tests.
 
 ### What the assistant still cannot do (unchanged, and not hidden)
 
@@ -1625,11 +1789,38 @@ be the same dishonesty as a checkpoint claiming accuracy it does not have.
 `test_live_without_a_hand_reports_unavailable_not_live` and
 `test_live_with_a_hand_reports_live_and_names_it` pin both halves.
 
-Note on Xvfb: the pointer position is only stable while a client stays
-connected. `xdotool getmouselocation` between two short-lived `xdotool`
-invocations reports the default centre because the server resets with no client;
-keep a window alive (as the test does) or chain the move and the read in one
-`xdotool` call.
+Note on Xvfb: start it with `-noreset`. The pointer position resets to the screen
+centre whenever the last client disconnects, so a short-lived `xdotool mousemove`
+followed by a separate `xdotool getmouselocation` reads the centre, not the move.
+See "Xvfb resets the pointer unless it is started with `-noreset`" above for the
+measurement and for why the availability probe now reads the pointer back.
+
+### The panic-corner rule belongs on the destination, not the start
+
+Two bugs in the neuromuscular servo made a real click impossible in ordinary use:
+
+- **A corner *start* locked the motor out permanently.** `servo_to` checked the
+  *start* position against the panic corners (top-left / bottom-right) and
+  `_move_cursor` checked *every waypoint*. So if the user had parked the pointer
+  in a corner, the first click tripped the failsafe before a single move; because
+  the next attempt read the same start position, `reset_failsafe()` did not help
+  either -- a permanent lockout with no click ever performed. Measured before the
+  fix: cursor at 1279,799 -> `click` returns False, `tripped=True`, and a second
+  click after `reset()` also False.
+- **The override detector never ran.** `ServoHand.override_threshold` was stored
+  and `CornerBreakoutFailSafe.check_override` existed, but nothing in `servo_to`
+  called it, so a user grabbing the mouse mid-trajectory was never noticed and the
+  servo kept dragging the pointer out from under them -- the opposite of the
+  "user always wins the pointer" behaviour the docstring promised.
+
+The corner rule now applies to the **destination** only: a target that resolves
+into a panic corner is refused (the user keeps that corner), an interior target is
+clicked from any start, and an intermediate waypoint crossing a corner is fine.
+`servo_to` also calls `check_override` per waypoint against a driver that can
+report its position, so a real takeover latches and the click is refused. Measured
+after the fix: corner start 1279,799 -> click lands at 400,300 (`performed=True`);
+corner *target* still refused; a driver reporting a fixed far-off position gives
+`overrides>=1`, no click, `tripped=True`.
 
 ## Persistent memory, trajectory log, and the wider op set (`avcs/voice/`)
 
@@ -1836,4 +2027,5 @@ microphone path could not be exercised here (no sound card), so hands-free
 listening is code-verified, not end-to-end audio-verified.
 
 Tests: `tests/test_proactive_awareness.py` (20 tests) drives the real loop, the
-real brain and the real FastAPI app. Full suite: **291 passed, 2 skipped**.
+real brain and the real FastAPI app. Full suite: **327 passed, 2 skipped** (with Xvfb `:99 -noreset` running; the skip count rises to 5 when no display is present)
+(after the human-motion, hesitation and self-correction work).

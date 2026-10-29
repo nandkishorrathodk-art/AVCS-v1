@@ -318,3 +318,72 @@ def test_speech_endpoint_returns_204_with_no_body_when_idle():
     assert res.status_code == 204
     assert res.content == b""
     assert isinstance(gui.mouth_engine, BrowserEngine)
+
+
+def test_streaming_page_clears_the_streamed_bubble_when_a_step_lands(client):
+    """The streamed reply and the step record carry the same sentence.
+
+    The page shows the reply as it streams, then a `step` event arrives with the
+    completed record -- whose `said` is that same sentence. If the streaming
+    bubble is not removed first, the assistant visibly repeats itself on every
+    turn. This pins the guard in the `step` branch of the SSE reader.
+    """
+    html = client.get("/").text
+    step_branch = html.split('evt.type === "step"', 1)[1].split('evt.type === "turn"', 1)[0]
+    assert "streamedEl.remove()" in step_branch, (
+        "the step branch must clear the streamed bubble or the reply shows twice"
+    )
+    assert "streamedEl = null" in step_branch
+
+
+def test_capabilities_report_capture_provenance(client):
+    """The page must not claim a live screen it never captured.
+
+    A synthetic source (the demo desktop) and an `EyeStream` whose capture
+    backend is missing both yield pixels that are not the user's screen. The
+    first yields a drawn scene; the second yields a flat grey buffer that is
+    indistinguishable from a real grey screen. Either way `capture` must say
+    `synthetic`, so the pane title can be honest.
+    """
+    caps = client.get("/api/capabilities").json()
+    assert caps["capture"] in ("live", "synthetic")
+    # The demo source used by this fixture is synthetic by construction.
+    assert caps["capture"] == "synthetic"
+
+
+def test_capture_is_live_is_false_without_a_real_backend(monkeypatch):
+    """`EyeStream.capture_is_live` is False when `mss` cannot be imported.
+
+    Without the flag, `grab_screen` silently returns a flat 128-grey buffer and
+    the caller has no way to tell a missing capture device from a grey screen.
+    """
+    from avcs_sdk import eye_stream as es
+
+    monkeypatch.setattr(es.EyeStream, "_init_capture", lambda self: setattr(self, "_sct", None))
+    stream = es.EyeStream.__new__(es.EyeStream)
+    stream._sct = None
+    stream._use_synthetic = False
+    stream.geometry = type("G", (), {"virtual_height": 720, "virtual_width": 1280})()
+    assert stream.capture_is_live is False
+
+    frame = stream.grab_screen()
+    assert int(frame.max()) == 128 and int(frame.min()) == 128
+
+
+def test_lexicon_perception_reports_capture_provenance():
+    """A `frame_source` is never a live screen; an EyeStream defers to its flag."""
+    from avcs.voice.lexicon_perception import LexiconPerception
+
+    src = DemoSceneSource("desktop", seed=3)
+    p = LexiconPerception(frame_source=src, reader=_NullReader())
+    assert p.capture_is_live is False
+
+
+class _NullReader:
+    """A reader that finds nothing, so provenance can be tested without weights."""
+
+    labels = []
+
+    def read_regions(self, frame, floor=0.0):
+        return []
+

@@ -56,6 +56,7 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
     color: var(--muted); margin: 0 0 9px; font-weight: 650;
   }
+  .paneTitle.warn { color: var(--warn); }
   #screenWrap {
     position: relative; display: block; border-radius: 10px; overflow: hidden;
     border: 1px solid var(--line); background: #000; line-height: 0;
@@ -130,6 +131,7 @@
   <span class="badge" id="bEars">ears …</span>
   <span class="badge" id="bEyes">eyes …</span>
   <span class="badge" id="bHand">hand: —</span>
+  <span class="badge" id="bMotion">motion: —</span>
   <span class="badge" id="bMemory">memory: —</span>
   <span class="badge" id="bWatch">watch: —</span>
   <span class="badge" id="bListen">listening: off</span>
@@ -140,7 +142,7 @@
 
 <main>
   <section id="eyePane">
-    <p class="paneTitle">what the assistant sees — live screen, pure pixels, no OCR</p>
+    <p class="paneTitle" id="paneTitle">what the assistant sees — pure pixels, no OCR</p>
     <div id="screenWrap">
       <img id="screen" alt="the live screen" />
       <div id="overlay"></div>
@@ -224,6 +226,29 @@ async function loadCaps() {
       const on = c.proactive === true;
       bw.textContent = "watch: " + (on ? "on" : "off");
       bw.className = "badge " + (on ? "ok" : "warn");
+    }
+
+    // Motion: how the pointer travels. "neuromuscular" means the hand plans a
+    // human trajectory instead of teleporting. Reported from the hand itself,
+    // not from a flag the page set, so a build without the servo says so.
+    const bmo = $("#bMotion");
+    if (bmo) {
+      const motion = c.motion || (hand && hand.indexOf("servo") === 0 ? "neuromuscular" : "teleport");
+      bmo.textContent = "motion: " + motion;
+      bmo.className = "badge " + (motion === "neuromuscular" ? "ok" : "warn");
+    }
+
+    // Capture provenance: the pane says "live screen" only when the pixels
+    // really came off the screen. A synthetic desktop, or an eye whose capture
+    // backend is missing (which yields a flat grey buffer), is labelled so the
+    // view is never a claim the machine cannot back up.
+    const pt = $("#paneTitle");
+    if (pt) {
+      const live = c.capture === "live";
+      pt.textContent = live
+        ? "what the assistant sees — live screen, pure pixels, no OCR"
+        : "what the assistant sees — synthetic view, pure pixels, no OCR";
+      pt.className = "paneTitle " + (live ? "" : "warn");
     }
   } catch (e) { /* cosmetic */ }
 }
@@ -313,6 +338,15 @@ function describeTurn(r) {
       bits.push(`<span class="badge ${cls}">${gate}</span> action <code>${r.action}</code>` +
                 (r.target ? ` target <code>${r.target}</code>` : ""));
       if (r.gate_reason) bits.push("gate: " + r.gate_reason);
+      // A visible hesitation: the hand paused to look before it committed. This
+      // is a real number from the turn record, not a decoration.
+      if (r.hesitated_s > 0) bits.push(`hesitated <code>${(r.hesitated_s * 1000).toFixed(0)} ms</code>`);
+      // A miss that was re-grounded and retried: show it so a correction is not
+      // mistaken for a first-try success.
+      if (r.corrections > 0) {
+        bits.push(`<span class="badge ${r.corrected ? "ok" : "warn"}">` +
+                  `${r.corrected ? "CORRECTED" : "RETRIED"}</span> ×${r.corrections}`);
+      }
     }
   }
   return bits.join(" · ");
@@ -363,8 +397,11 @@ async function sendTurn(text) {
         } else if (evt.type === "step") {
           // A completed step of a multi-step task. Show the work as it happens,
           // so the assistant narrates and acts instead of freezing on one reply.
+          // The step carries the same reply the speech stream already showed, so
+          // the streaming bubble must go first or the sentence appears twice.
           const r = evt.record;
           if (stepEl) stepEl.remove();
+          if (streamedEl) { streamedEl.remove(); streamedEl = null; }
           pending.remove();
           stepEl = addMsg("ai", r.said || "(step)", describeTurn(r));
         } else if (evt.type === "turn") {
