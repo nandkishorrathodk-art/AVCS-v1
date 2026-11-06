@@ -44,7 +44,7 @@ from avcs.system1.loop import VirtualHand
 from avcs.voice.assistant import Assistant
 from avcs.voice.brain import ConversationBrain
 from avcs.voice.scene_perception import ScenePerception
-from avcs.voice.stt import default_stt_engine
+from avcs.voice.stt import NullEngine as NullSttEngine, default_stt_engine
 from avcs.voice.tts import BrowserEngine, EspeakNgEngine, Speaker, VoiceProfile
 
 FRAME_POLL_S = 0.25
@@ -285,7 +285,11 @@ class GuiApp:
         self.brain = brain if brain is not None else ConversationBrain(memory=self.memory)
         self.mouth_engine = self._build_mouth(mouth)
         self.speaker = Speaker(engine=self.mouth_engine, profile=VoiceProfile.hinglish())
-        self.stt = default_stt_engine() if ears else None
+        self.ears_enabled = bool(ears)
+        # `Assistant` treats a missing STT engine as "auto-detect the best one".
+        # Pass an explicit null engine when the virtual GUI is text-only, or the
+        # browser would still request microphone access after --virtual.
+        self.stt = default_stt_engine() if self.ears_enabled else NullSttEngine()
         self.hand = None
         self.live = bool(live)
         # Set while a user turn is being handled, so the proactive watcher stays
@@ -546,7 +550,7 @@ class GuiApp:
 
     def hear(self, req: AudioRequest) -> Dict[str, Any]:
         """Transcribe a browser recording with the same ears the voice loop uses."""
-        if self.stt is None:
+        if not self.ears_enabled:
             return {"text": "", "error": "ears disabled", "engine": "none"}
         try:
             clip = _decode_audio(req)

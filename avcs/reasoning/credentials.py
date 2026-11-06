@@ -284,7 +284,7 @@ def resolve_llm_credentials(
     if key and not model:
         # Prefer a model the endpoint actually serves; fall back to a sane name.
         model = _pick_model(list_models(endpoint, key, timeout)) or (
-            "meta/llama-3.2-11b-vision-instruct"
+            "meta/llama-3.2-90b-vision-instruct"
             if "nvidia.com" in (endpoint or "")
             else "llama3.2"
         )

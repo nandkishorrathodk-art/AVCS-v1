@@ -26,7 +26,7 @@ from .hand_motor import HandMotor, RippleResult
 from .llm_bridge import LLMBridge, LLMCommand, describe_screen
 from .run_live_agent import run_agent, run_monitor
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AVCSBackend", "AVCSClient", "AVCSException", "BackendActionError",

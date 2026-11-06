@@ -1,6 +1,7 @@
-"""Launch the AVCS GUI assistant.
+"""Launch the AVCS virtual GUI assistant.
 
     python3 -m avcs.gui.run                        # assistant on a scripted screen
+    python3 -m avcs.gui.run --virtual              # text GUI, virtual hand, no audio
     python3 -m avcs.gui.run --source screen        # the real screen
     python3 -m avcs.gui.run --eyes lexicon --grant click   # opt in to control reading
 
@@ -36,6 +37,17 @@ def main() -> int:
                          "with --eyes lexicon")
     ap.add_argument("--live", action="store_true",
                     help="authorize REAL mouse/keyboard actuation (needs a grant)")
+    ap.add_argument("--virtual", action="store_true",
+                    help="run the GUI in virtual mode: no microphone, no server TTS, "
+                         "and no physical mouse/keyboard actuation")
+    ap.add_argument("--llm-endpoint", default=None,
+                    help="OpenAI-compatible LLM endpoint for the GUI bridge "
+                         "(or set AVCS_LLM_ENDPOINT)")
+    ap.add_argument("--llm-model", default=None,
+                    help="LLM model name for the GUI bridge "
+                         "(or set AVCS_LLM_MODEL)")
+    ap.add_argument("--language", choices=["hinglish", "english", "auto"],
+                    default="hinglish", help="assistant reply language")
     ap.add_argument("--checkpoint", default=None,
                     help="lexicon checkpoint for --eyes lexicon")
     ap.add_argument("--mouth", default="browser", choices=["browser", "local", "silent"],
@@ -68,6 +80,9 @@ def main() -> int:
                          "watcher has no hand, so it can never actuate.")
     args = ap.parse_args()
 
+    if args.virtual and args.live:
+        ap.error("--virtual cannot be combined with --live")
+
     try:
         import uvicorn
     except ImportError:
@@ -76,15 +91,30 @@ def main() -> int:
 
     from avcs.gui.server import build_app
 
+    brain = None
+    if args.llm_endpoint or args.llm_model or args.language != "hinglish":
+        from avcs.reasoning.provider import LLMReasoningProvider
+        from avcs.voice.brain import ConversationBrain
+
+        provider = LLMReasoningProvider(
+            endpoint=args.llm_endpoint,
+            model=args.llm_model,
+        )
+        brain = ConversationBrain(provider=provider, language=args.language)
+
+    mouth = "silent" if args.virtual else args.mouth
+    ears = False if args.virtual else not args.no_ears
+
     app = build_app(
         source=args.source,
         category=args.scene,
         grants=args.grant,
         checkpoint=args.checkpoint,
-        live=args.live,
-        mouth=args.mouth,
-        ears=not args.no_ears,
+        live=False if args.virtual else args.live,
+        mouth=mouth,
+        ears=ears,
         eyes=args.eyes,
+        brain=brain,
         memory_path=None if args.no_memory else args.memory,
         trajectory_path=None if args.no_trajectory else args.trajectory,
         path_roots=args.path_roots,
@@ -95,6 +125,7 @@ def main() -> int:
     gui = app.state.gui
     caps = gui.capabilities()
     print("AVCS assistant")
+    print(f"  mode       : {'virtual' if args.virtual or not args.live else 'live'}")
     print(f"  source     : {args.source}" + (f" ({args.scene})" if args.source == "demo" else ""))
     print(f"  eyes       : {caps.get('eyes')}")
     print(f"  brain      : {caps.get('brain')} (key present: {caps.get('brain_has_key')})")

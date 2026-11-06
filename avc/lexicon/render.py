@@ -28,14 +28,27 @@ from PIL import Image, ImageDraw, ImageFont
 from avc.lexicon.encoder import PATCH_H, PATCH_W
 from avc.lexicon.vocab import LABELS
 
-FONT_DIRS = ("/usr/share/fonts", "/usr/local/share/fonts")
+FONT_DIRS = (
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
+    os.path.expanduser("~\\AppData\\Local\\Microsoft\\Windows\\Fonts"),
+)
 
 
 def discover_fonts() -> List[str]:
     """Every readable TrueType font on the box, sorted for determinism."""
     found: List[str] = []
+    probe = ImageDraw.Draw(Image.new("L", (8, 8)))
     for root in FONT_DIRS:
-        found.extend(glob.glob(os.path.join(root, "**", "*.ttf"), recursive=True))
+        if os.path.isdir(root):
+            for p in glob.glob(os.path.join(root, "**", "*.ttf"), recursive=True):
+                try:
+                    font = ImageFont.truetype(p, 20)
+                    probe.textbbox((0, 0), "Test", font=font)
+                    found.append(p)
+                except Exception:
+                    pass
     return sorted(set(found))
 
 
@@ -54,9 +67,10 @@ def split_fonts(all_fonts: Optional[Sequence[str]] = None) -> Tuple[List[str], L
     if not fonts:
         return [], []
     train, held = [], []
+    held_keys = ("mono", "serif", "times", "georgia", "cambria", "garamond", "couri", "consola", "book", "antqua")
     for f in fonts:
         name = _family(f)
-        if "mono" in name or "serif" in name:
+        if any(k in name for k in held_keys):
             held.append(f)
         else:
             train.append(f)

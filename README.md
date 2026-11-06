@@ -414,7 +414,33 @@ sentinel or JSON, and actuation defaults to `VirtualHand` (moves no cursor).
 
 ---
 
-## 8. License & Ownership
+## 8. Virtual GUI Assistant (LLM bridge, no training)
+
+For a GUI-only assistant, use the browser interface in virtual mode. It shows
+the screen observation, chat, LLM source, capability decisions and virtual
+actions without requesting a microphone or touching the real mouse/keyboard:
+
+```powershell
+py -3 -m avcs.gui.run --virtual --port 12000 
+```
+
+Open `http://127.0.0.1:12000/` and type instructions in the chat panel. The
+assistant uses the existing OpenAI-compatible LLM bridge; configure the model
+through `AVCS_LLM_ENDPOINT`, `AVCS_LLM_API_KEY`, and `AVCS_LLM_MODEL`, or pass
+`--llm-endpoint` and `--llm-model`. No AVCS training or fine-tuning is needed.
+
+For a fully virtual demo with labelled controls and a virtual hand:
+
+```powershell
+py -3 -m avcs.gui.run --virtual --eyes lexicon --grant click --mouth silent
+```
+
+Use `--source screen` only when the assistant should observe the actual desktop;
+`--virtual` still prevents physical actuation.
+
+---
+
+## 9. License & Ownership
 
 All rights, architecture designs, trained candidate checkpoints, and code are the proprietary intellectual property of **Parth Labs**, directed by **Nandkishor Rathod** (Project Owner & Sole Rights Holder).
 Distributed under clean-room provenance and non-cheating verification rules.

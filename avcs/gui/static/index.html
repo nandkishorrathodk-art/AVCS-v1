@@ -171,6 +171,7 @@ const $ = (s) => document.querySelector(s);
 const img = $("#screen");
 const overlay = $("#overlay");
 let lastT = performance.now(), fps = 0;
+let earsEnabled = true;
 
 /* ---------------------------------------------------------------- */
 /* Header: capabilities, reported honestly.                          */
@@ -188,8 +189,11 @@ async function loadCaps() {
     $("#bMouth").className = "badge " + (mouth !== "off" ? "ok" : "warn");
 
     const ears = c.ears && c.ears !== "null" ? c.ears : "off";
+    earsEnabled = c.ears !== "null" && c.ears_available === true;
     $("#bEars").textContent = "ears: " + ears;
     $("#bEars").className = "badge " + (ears !== "off" ? "ok" : "warn");
+    $("#mic").disabled = !earsEnabled;
+    if (!earsEnabled) $("#bListen").textContent = "listening: off (text mode)";
 
     $("#bEyes").textContent = "eyes: " + (c.eyes || "?");
     $("#bEyes").className = "badge " + (c.eyes === "ScenePerception" ? "ok" : "warn");
@@ -498,7 +502,7 @@ async function pollSpeech() {
 let mediaRecorder = null, recordedChunks = [], recording = false;
 
 async function startRecording() {
-  if (recording) return;
+  if (recording || !earsEnabled) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recordedChunks = [];
@@ -639,7 +643,7 @@ async function handsFreeTick() {
 }
 
 function startHandsFree() {
-  if (handsFree) return;
+  if (handsFree || !earsEnabled) return;
   handsFree = true;
   const b = $("#bListen");
   if (b) { b.textContent = "listening"; b.className = "badge ok"; }
@@ -712,7 +716,7 @@ $("#q").focus();
    is unavoidable; after it, no button is needed to be heard. */
 document.addEventListener("click", function once() {
   document.removeEventListener("click", once);
-  if (!recording) startHandsFree();
+  if (!recording && earsEnabled) startHandsFree();
 }, { once: true });
 </script>
 </body>
