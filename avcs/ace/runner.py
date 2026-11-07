@@ -25,9 +25,11 @@ from avcs.ace.actions import Action, ActionKind
 from avcs.ace.agent import AceAgent
 from avcs.ace.client import CustomLLMClient
 from avcs.ace.computer import ExecutionSafetyFirewall, Observation, SafetyCheckResult, WindowsComputer
+from avcs.ace.planner import CognitivePlanner, ReflectionDiagnostic, SubGoal
 from avcs.ace.session import AceSession
 from avcs.ace.skills_vault.cache import SkillCache, SkillLookupResult, UIStateAnchor
 from avcs.ace.streamer import ScreenStreamer
+from avcs.cortex.gate import StabilityGateResult, VisualCortexGate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,8 +98,13 @@ class DualStageVerifier:
     Stage 2: Semantic Verification (Confirms intended OS window/process state emerged).
     """
 
-    def __init__(self, computer: Optional[WindowsComputer] = None) -> None:
+    def __init__(
+        self,
+        computer: Optional[WindowsComputer] = None,
+        cortex_gate: Optional[VisualCortexGate] = None,
+    ) -> None:
         self.computer = computer
+        self.cortex_gate = cortex_gate
         self.user32 = getattr(ctypes.windll, "user32", None) if sys.platform == "win32" else None
 
     def verify_physical(
@@ -107,6 +114,9 @@ class DualStageVerifier:
         action: Optional[Action] = None,
     ) -> Stage1Result:
         """Stage 1: Evaluates localized optical delta / click ripple in <2 ms."""
+        if self.cortex_gate is not None:
+            return self.cortex_gate.evaluate_ripple(pre_obs, post_obs, action=action)
+
         t0 = time.perf_counter()
         if pre_obs is None or post_obs is None:
             latency = (time.perf_counter() - t0) * 1000.0
@@ -370,14 +380,20 @@ class AceRunner:
         trajectory_logger: Optional[TrajectoryLogger] = None,
         skill_cache: Optional[SkillCache] = None,
         require_confirmation: bool = True,
+        planner: Optional[CognitivePlanner] = None,
+        cortex_gate: Optional[VisualCortexGate] = None,
     ) -> None:
         self.computer = computer or WindowsComputer()
         self.agent = agent or AceAgent()
         self.enable_voice = enable_voice
         self.firewall = firewall or ExecutionSafetyFirewall(require_confirmation=require_confirmation)
-        self.verifier = verifier or DualStageVerifier(computer=self.computer)
+        self.cortex_gate = cortex_gate
+        self.verifier = verifier or DualStageVerifier(computer=self.computer, cortex_gate=self.cortex_gate)
+        if self.cortex_gate is not None and getattr(self.verifier, "cortex_gate", None) is None:
+            self.verifier.cortex_gate = self.cortex_gate
         self.trajectory_logger = trajectory_logger or TrajectoryLogger()
         self.skill_cache = skill_cache or SkillCache()
+        self.planner = planner or CognitivePlanner()
         self.user32 = getattr(ctypes.windll, "user32", None) if sys.platform == "win32" else None
         self._last_actuation_coord: Optional[Tuple[int, int]] = None
 
@@ -448,12 +464,22 @@ class AceRunner:
         user_confirmed: bool = False,
         expected_window: Optional[str] = None,
         expected_process: Optional[str] = None,
+        subgoals: Optional[List[SubGoal]] = None,
     ) -> AceSession:
         """Executes the autonomous loop until completion or maximum steps."""
         session = AceSession()
         session.start(goal=goal, max_steps=max_steps, dry_run=dry_run)
 
-        # 0. Layer 2 Anchor-Verified Skill Cache lookup (0 ms deterministic execution)
+        # 1. Layer 1: Cognitive Intelligence & Sub-Goal Planner (0.5 - 1.0 Hz)
+        if subgoals is None:
+            subgoals = self.planner.decompose(goal)
+        session.subgoals = [s.to_dict() if hasattr(s, "to_dict") else s for s in subgoals]
+        logger.info(
+            f"Layer 1 Cognitive Planner decomposed goal into {len(subgoals)} atomic sub-goals: "
+            f"{[s.description for s in subgoals]}"
+        )
+
+        # 2. Layer 2 Anchor-Verified Skill Cache lookup for full composite goal (0 ms deterministic execution)
         lookup_anchor = current_anchor
         if lookup_anchor is None:
             # Auto-detect live desktop state anchor if none explicitly provided
@@ -496,6 +522,9 @@ class AceRunner:
                 if cached_act.kind == ActionKind.STOP:
                     break
 
+            for sg in subgoals:
+                if hasattr(sg, "mark_completed"):
+                    sg.mark_completed()
             session.finish("Skill cache execution completed successfully.")
             self.trajectory_logger.log_trajectory(session, verified_success=True)
             return session
@@ -519,13 +548,18 @@ class AceRunner:
 
         streamer = ScreenStreamer(computer=self.computer, target_fps=30.0, image_format=image_format)
         step_idx = 1
+        subgoal_idx = 0
         stuck_points: List[Dict[str, Any]] = []
         last_stage1_res: Optional[Stage1Result] = None
 
         try:
             streamer.start()
-            while not session.is_complete and step_idx <= max_steps:
-                logger.info(f"--- Step {step_idx}/{max_steps} ---")
+            while not session.is_complete and step_idx <= max_steps and subgoal_idx < len(subgoals):
+                active_subgoal = subgoals[subgoal_idx]
+                if hasattr(active_subgoal, "mark_in_progress"):
+                    active_subgoal.mark_in_progress()
+
+                logger.info(f"--- Sub-Goal {active_subgoal.index}/{len(subgoals)}: '{active_subgoal.description}' (Step {step_idx}/{max_steps}) ---")
 
                 # 1. Safety Breakout Check
                 self.check_safety_breakout()
@@ -534,12 +568,67 @@ class AceRunner:
                 obs = streamer.get_latest_observation() or self.computer.observe(format=image_format)
                 logger.info(f"Observed desktop: {obs.width}x{obs.height} ({obs.format}) in {obs.capture_time_ms:.1f}ms")
 
-                # 3. Direct Action Token Inference (~533ms baseline)
+                # 3. System 1 Sensory Stability Gate (Local Visual Cortex ConvGRU)
+                # Must verify screen is stable before querying Layer 3 or replaying cache
+                if self.cortex_gate is not None:
+                    stab_res = self.cortex_gate.check_stability(
+                        observation=obs,
+                        max_settle_wait=0.5,
+                        poll_interval=0.05,
+                        observation_provider=lambda: streamer.get_latest_observation() or self.computer.observe(format=image_format),
+                    )
+                    logger.info(
+                        f"Visual Cortex Stability Gate: is_stable={stab_res.is_stable} "
+                        f"(surprise={stab_res.surprise_score:.4f}, spinner={stab_res.spinner_active}) "
+                        f"in {stab_res.latency_ms:.1f}ms"
+                    )
+                    if not stab_res.is_stable:
+                        logger.warning(
+                            f"Cortex stability gate held: UI settling or loading spinner active ({stab_res.details}). Actuation gated."
+                        )
+                        wait_action = Action(kind=ActionKind.WAIT, duration=0.5, reason=f"Stability gate held: {stab_res.details}")
+                        session.record_step(wait_action, observation=obs, plan_latency_ms=0.0)
+                        step_idx += 1
+                        continue
+
+                # 4. Anchor-Verified Skill Cache Check for active Sub-Goal
+                sg_lookup = self.skill_cache.lookup(active_subgoal.description, current_anchor=lookup_anchor)
+                if sg_lookup.hit and sg_lookup.actions:
+                    logger.info(f"[SKILL CACHE HIT (SUB-GOAL)] {sg_lookup.reason}")
+                    replay_blocked = False
+                    for cached_act in sg_lookup.actions:
+                        native_target = None
+                        if cached_act.coordinate:
+                            native_target = self.computer._canonical_to_native(*cached_act.coordinate)
+                        elif cached_act.start_coordinate:
+                            native_target = self.computer._canonical_to_native(*cached_act.start_coordinate)
+                        self.check_safety_breakout(target_coord=native_target)
+
+                        firewall_res = self.firewall.evaluate(cached_act, user_confirmed=user_confirmed)
+                        if not firewall_res.allowed:
+                            logger.warning(f"[SKILL CACHE REPLAY BLOCKED] {firewall_res.reason}")
+                            session.record_step(Action(kind=ActionKind.WAIT, duration=0.5, reason=firewall_res.reason), plan_latency_ms=0.0)
+                            replay_blocked = True
+                            break
+
+                        session.record_step(cached_act, plan_latency_ms=0.0)
+                        self.computer.execute(cached_act, dry_run=dry_run)
+                        if cached_act.kind == ActionKind.STOP:
+                            break
+
+                    if not replay_blocked:
+                        if hasattr(active_subgoal, "mark_completed"):
+                            active_subgoal.mark_completed()
+                        subgoal_idx += 1
+                        step_idx += len(sg_lookup.actions)
+                        continue
+
+                # 5. Layer 3 Direct Action Token Inference (~533ms baseline)
                 history_summary = session.get_history_summary()
                 try:
                     action, plan_latency_ms = self.agent.step(
                         observation=obs,
-                        goal=goal,
+                        goal=active_subgoal.description,
                         history=history_summary,
                         step_index=step_idx,
                     )
@@ -548,7 +637,7 @@ class AceRunner:
                     action = Action(kind=ActionKind.WAIT, duration=1.0, reason=f"Planning error: {e}")
                     plan_latency_ms = 0.0
 
-                # Repetition & Stuck Detection / Jittering
+                # 6. Repetition & Stuck Detection / Jittering & Dynamic Replanning
                 repetition_count = session.get_repetition_count(new_action=action)
                 recent_matches = session.count_recent_matches(action, window=5)
                 effective_reps = max(repetition_count, recent_matches)
@@ -557,12 +646,12 @@ class AceRunner:
                         "step": step_idx,
                         "action": action.to_dict(),
                         "repetitions": effective_reps,
+                        "subgoal": active_subgoal.description,
                     })
                     if dry_run:
                         logger.warning(
                             f"[DRY-RUN] Repetition detected ({effective_reps + 1}x for {action.kind.value} {action.coordinate or ''}). "
-                            "Screen state remains static because hardware actuation is bypassed in dry-run mode. "
-                            "To allow the autopilot to actuate on your live Windows desktop, run without --dry-run."
+                            "Screen state remains static because hardware actuation is bypassed in dry-run mode."
                         )
                     if action.kind in (
                         ActionKind.LEFT_CLICK,
@@ -584,7 +673,30 @@ class AceRunner:
                             reason=f"Loop breakout: Jittering click position from {action.coordinate} to {new_coord}",
                         )
 
-                # Layer 4 Execution Safety Firewall evaluation
+                    diag = ReflectionDiagnostic(
+                        failed_subgoal=active_subgoal,
+                        failure_reason=f"Loop deadlock: action {action.kind.value} repeated {effective_reps} times without UI progress",
+                        stuck_repetitions=effective_reps,
+                        stuck_action=action.to_dict(),
+                    )
+                    replanned = self.planner.replan(
+                        goal=goal,
+                        failed_subgoal=active_subgoal,
+                        failure_reason=diag.failure_reason,
+                        diagnostic=diag,
+                        stuck_points=stuck_points,
+                    )
+                    if replanned:
+                        logger.warning(
+                            f"Layer 1 Dynamic Replanning: Synthesized {len(replanned)} alternative sub-goals: "
+                            f"{[r.description for r in replanned]}"
+                        )
+                        for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                            rsg.index = offset
+                        subgoals = subgoals[:subgoal_idx] + replanned
+                        active_subgoal = subgoals[subgoal_idx]
+
+                # 7. Layer 4 Execution Safety Firewall evaluation
                 cls_name = ""
                 if self.user32:
                     try:
@@ -599,24 +711,84 @@ class AceRunner:
                 firewall_res = self.firewall.evaluate(action, active_window_class=cls_name, user_confirmed=user_confirmed)
                 if not firewall_res.allowed:
                     logger.warning(firewall_res.reason)
-                    action = Action(
+                    blocked_act = Action(
                         kind=ActionKind.WAIT,
                         duration=0.5,
                         reason=firewall_res.reason,
                     )
+                    session.record_step(blocked_act, observation=obs, plan_latency_ms=plan_latency_ms)
+                    # Trigger dynamic replan if firewall blocks critical action
+                    if firewall_res.requires_confirmation and not user_confirmed:
+                        diag = ReflectionDiagnostic(
+                            failed_subgoal=active_subgoal,
+                            failure_reason=firewall_res.reason,
+                        )
+                        replanned = self.planner.replan(
+                            goal=goal,
+                            failed_subgoal=active_subgoal,
+                            failure_reason=firewall_res.reason,
+                            diagnostic=diag,
+                        )
+                        if replanned:
+                            for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                                rsg.index = offset
+                            subgoals = subgoals[:subgoal_idx] + replanned
+                    step_idx += 1
+                    continue
 
                 logger.info(f"Planned Action: {action.kind.value} {action.coordinate or ''} | Reason: {action.reason} | Latency: {plan_latency_ms:.1f}ms")
 
-                # 4. Record step in session (includes honest reflection feedback if firewall triggered)
-                session.record_step(action, observation=obs, plan_latency_ms=plan_latency_ms)
+                # 8. Record step in session
+                is_subgoal_stop = (action.kind == ActionKind.STOP and (subgoal_idx + 1 < len(subgoals)))
+                session.record_step(
+                    action,
+                    observation=obs,
+                    plan_latency_ms=plan_latency_ms,
+                    is_subgoal_stop=is_subgoal_stop,
+                )
 
-                # 5. Check Termination Condition
+                # 9. Check Termination Condition & Sub-Goal Advancement with Layer 5 Dual-Stage Verifier
                 if action.kind == ActionKind.STOP:
-                    logger.info(f"Goal completed: {action.reason}")
-                    speak_feedback(f"Task completed: {action.reason}", enabled=self.enable_voice)
-                    break
+                    stage2_res = self.verifier.verify_semantic(
+                        expected_window_title=expected_window,
+                        expected_process_name=expected_process,
+                        goal=active_subgoal.description,
+                    )
+                    if stage2_res.passed or dry_run:
+                        if hasattr(active_subgoal, "mark_completed"):
+                            active_subgoal.mark_completed()
+                        logger.info(f"Sub-goal {active_subgoal.index} completed: {active_subgoal.description} ({action.reason})")
+                        subgoal_idx += 1
+                        if subgoal_idx >= len(subgoals):
+                            logger.info(f"Goal completed: {action.reason}")
+                            speak_feedback(f"Task completed: {action.reason}", enabled=self.enable_voice)
+                            break
+                        else:
+                            logger.info(f"Advancing to next sub-goal {subgoal_idx + 1}/{len(subgoals)}: '{subgoals[subgoal_idx].description}'")
+                            step_idx += 1
+                            continue
+                    else:
+                        logger.warning(f"Sub-goal {active_subgoal.index} verification failed: {stage2_res.details}. Replanning...")
+                        if hasattr(active_subgoal, "mark_failed"):
+                            active_subgoal.mark_failed(stage2_res.details)
+                        diag = ReflectionDiagnostic(
+                            failed_subgoal=active_subgoal,
+                            failure_reason=stage2_res.details,
+                        )
+                        replanned = self.planner.replan(
+                            goal=goal,
+                            failed_subgoal=active_subgoal,
+                            failure_reason=stage2_res.details,
+                            diagnostic=diag,
+                        )
+                        if replanned:
+                            for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                                rsg.index = offset
+                            subgoals = subgoals[:subgoal_idx] + replanned
+                        step_idx += 1
+                        continue
 
-                # 6. Physical Win32 Hardware Execution (Minimum-Jerk)
+                # 10. Physical Win32 Hardware Execution (Minimum-Jerk)
                 native_target = None
                 if action.coordinate:
                     native_target = self.computer._canonical_to_native(*action.coordinate)
@@ -654,7 +826,7 @@ class AceRunner:
                             f"Visual closed-loop verification: No screen change detected after {action.kind.value} at {action.coordinate}."
                         )
 
-                # 7. Post-action settling delay
+                # Post-action settling delay
                 if action.kind == ActionKind.KEY and action.keys and "win" in action.keys:
                     time.sleep(0.20)
                 else:
@@ -670,9 +842,13 @@ class AceRunner:
             except Exception:
                 pass
 
-        if not session.is_complete and step_idx > max_steps:
+        if subgoal_idx >= len(subgoals) and not session.is_complete:
+            session.finish("All planned sub-goals completed successfully.")
+        elif not session.is_complete and step_idx > max_steps:
             session.finish(f"Maximum step limit ({max_steps}) reached.")
             speak_feedback("Autopilot reached maximum step limit.", enabled=self.enable_voice)
+
+        session.subgoals = [s.to_dict() if hasattr(s, "to_dict") else s for s in subgoals]
 
         # Layer 5 Stage 2 Semantic Verification & Trajectory Logging
         stage2_res = self.verifier.verify_semantic(
@@ -699,12 +875,17 @@ class AceRunner:
             details=stage2_res.details,
         )
 
+        metadata = {
+            "subgoals": [s.to_dict() if hasattr(s, "to_dict") else s for s in subgoals],
+        }
+
         self.trajectory_logger.log_trajectory(
             session=session,
             verified_success=verified_success,
             failure_reason=fail_reason,
             stuck_points=stuck_points,
             verification_result=last_verification,
+            metadata=metadata,
         )
 
         metrics = session.get_metrics()

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,12 @@ from avcs.ace.computer import (
     SafetyCheckResult,
     SafetyRiskLevel,
     WindowsComputer,
+)
+from avcs.ace.planner import (
+    CognitivePlanner,
+    ReflectionDiagnostic,
+    SubGoal,
+    _validate_no_coordinates,
 )
 from avcs.ace.runner import (
     AceRunner,
@@ -46,6 +53,7 @@ from avcs.ace.skills_vault.cache import (
     SkillLookupResult,
     UIStateAnchor,
 )
+from avcs.cortex.gate import StabilityGateResult, VisualCortexGate
 
 
 class TestActionSpace(unittest.TestCase):
@@ -2058,6 +2066,565 @@ class TestPhase1EdgeCases(unittest.TestCase):
         self.assertEqual(res_del.risk_level, SafetyRiskLevel.FILE_DELETION)
 
 
+class TestCognitivePlanner(unittest.TestCase):
+    """Verifies Layer 1 Cognitive Intelligence & Sub-Goal Planner (avcs/ace/planner.py)."""
+
+    def setUp(self):
+        self.planner = CognitivePlanner(rate_limit_hz=1.0)
+
+    def test_multilingual_decomposition_hinglish_start_notepad(self):
+        goal = "Start menu open karo aur Notepad search karo"
+        subgoals = self.planner.decompose(goal)
+        self.assertEqual(len(subgoals), 2)
+
+        self.assertEqual(subgoals[0].index, 1)
+        self.assertIn("Start Menu", subgoals[0].description)
+        self.assertIn("Start menu opened", subgoals[0].expected_ui_state)
+
+        self.assertEqual(subgoals[1].index, 2)
+        self.assertIn("Notepad", subgoals[1].description)
+        self.assertIn("Notepad application window", subgoals[1].expected_ui_state)
+
+    def test_multilingual_decomposition_hinglish_chrome_search(self):
+        goal = "Chrome kholo aur Google par OpenAI search karo"
+        subgoals = self.planner.decompose(goal)
+        self.assertEqual(len(subgoals), 2)
+
+        self.assertEqual(subgoals[0].index, 1)
+        self.assertIn("Google Chrome", subgoals[0].description)
+
+        self.assertEqual(subgoals[1].index, 2)
+        self.assertIn("OpenAI", subgoals[1].description)
+        self.assertIn("Google", subgoals[1].description)
+
+    def test_multilingual_decomposition_hindi_devanagari(self):
+        goal = "क्रोम खोलो और गूगल पर सर्च करो"
+        subgoals = self.planner.decompose(goal)
+        self.assertEqual(len(subgoals), 2)
+        self.assertEqual(subgoals[0].index, 1)
+        self.assertIn("Google Chrome", subgoals[0].description)
+        self.assertEqual(subgoals[1].index, 2)
+        self.assertIn("Google", subgoals[1].description)
+        for sg in subgoals:
+            self.assertIsInstance(sg.description, str)
+            self.assertIsInstance(sg.expected_ui_state, str)
+
+    def test_multilingual_decomposition_english_composite(self):
+        goal = "Open calculator and calculate 45 plus 55"
+        subgoals = self.planner.decompose(goal)
+        self.assertEqual(len(subgoals), 2)
+        self.assertIn("Calculator", subgoals[0].description)
+        self.assertIn("calculate", subgoals[1].description.lower())
+
+    def test_multilingual_decomposition_atomic_single_goal(self):
+        goal = "Launch notepad"
+        subgoals = self.planner.decompose(goal)
+        self.assertEqual(len(subgoals), 1)
+        self.assertEqual(subgoals[0].index, 1)
+        self.assertIn("Notepad", subgoals[0].description)
+
+    def test_strict_coordinate_invariant_subgoal_rejected(self):
+        # 1. Coordinate tuple (x, y) must raise ValueError
+        with self.assertRaises(ValueError) as ctx:
+            SubGoal(index=1, description="Click target at (250, 400)", expected_ui_state="Button active")
+        self.assertIn("Invariant violation", str(ctx.exception))
+
+        # 2. x=..., y=... must raise ValueError
+        with self.assertRaises(ValueError) as ctx2:
+            SubGoal(index=1, description="Press button", expected_ui_state="Window at x=100, y=200")
+        self.assertIn("Invariant violation", str(ctx2.exception))
+
+        # 3. ACT:CLICK token must raise ValueError
+        with self.assertRaises(ValueError) as ctx3:
+            SubGoal(index=1, description="ACT:CLICK 500 600", expected_ui_state="Done")
+        self.assertIn("Invariant violation", str(ctx3.exception))
+
+        # 4. _validate_no_coordinates helper directly
+        with self.assertRaises(ValueError):
+            _validate_no_coordinates("coordinate: [300, 400]")
+
+    def test_subgoal_state_transitions_and_serialization(self):
+        sg = SubGoal(index=1, description="Open Settings", expected_ui_state="Settings open")
+        self.assertFalse(sg.is_completed)
+        self.assertFalse(sg.is_failed)
+        self.assertEqual(sg.status, "pending")
+
+        sg.mark_in_progress()
+        self.assertTrue(sg.is_in_progress)
+
+        sg.mark_completed()
+        self.assertTrue(sg.is_completed)
+
+        d = sg.to_dict()
+        self.assertEqual(d["index"], 1)
+        self.assertEqual(d["status"], "completed")
+
+        reconstructed = SubGoal.from_dict(d)
+        self.assertEqual(reconstructed.description, "Open Settings")
+        self.assertTrue(reconstructed.is_completed)
+
+        sg2 = SubGoal(index=2, description="Save file", expected_ui_state="File saved")
+        sg2.mark_failed(reason="Disk full")
+        self.assertTrue(sg2.is_failed)
+        self.assertEqual(sg2.metadata.get("failure_reason"), "Disk full")
+
+    def test_operating_frequency_rate_limiter(self):
+        planner = CognitivePlanner(rate_limit_hz=2.0)
+        self.assertEqual(planner.min_interval_s, 0.5)
+
+        t0 = time.monotonic()
+        planner._apply_rate_limit()
+        t1 = time.monotonic()
+        self.assertGreaterEqual(planner.last_plan_time, t0)
+
+    def test_dynamic_replanning_start_menu_failure(self):
+        failed_sg = SubGoal(index=1, description="Open Windows Start Menu", expected_ui_state="Start menu opened")
+        replanned = self.planner.replan(
+            goal="Launch notepad",
+            failed_subgoal=failed_sg,
+            failure_reason="Start menu button click failed",
+        )
+        self.assertGreaterEqual(len(replanned), 1)
+        # Strategic alternative route uses Windows hotkey directly
+        self.assertTrue(any("Windows key" in s.description or "Win" in s.description for s in replanned))
+
+    def test_dynamic_replanning_app_launch_failure(self):
+        failed_sg = SubGoal(index=1, description="Launch Notepad application", expected_ui_state="Notepad window active")
+        replanned = self.planner.replan(
+            goal="Open notepad",
+            failed_subgoal=failed_sg,
+            failure_reason="Window did not emerge on desktop",
+        )
+        self.assertGreaterEqual(len(replanned), 1)
+        # Strategic alternative route uses Win+R shortcut
+        self.assertTrue(any("Win+R" in s.description or "Run" in s.description for s in replanned))
+
+    def test_dynamic_replanning_loop_deadlock(self):
+        failed_sg = SubGoal(index=2, description="Click submit button", expected_ui_state="Form submitted")
+        stuck_points = [{"step": 1}, {"step": 2}, {"step": 3}]
+        replanned = self.planner.replan(
+            goal="Submit form",
+            failed_subgoal=failed_sg,
+            failure_reason="Loop deadlock: 3 repeated identical clicks without UI change",
+            stuck_points=stuck_points,
+        )
+        self.assertGreaterEqual(len(replanned), 1)
+        # Strategic alternative route presses Escape to dismiss modal and retries
+        self.assertTrue(any("Escape" in s.description for s in replanned))
+
+    def test_dynamic_replanning_console_firewall_hazard(self):
+        failed_sg = SubGoal(index=1, description="Search for Notepad query", expected_ui_state="Search results")
+        replanned = self.planner.replan(
+            goal="Search query",
+            failed_subgoal=failed_sg,
+            failure_reason="Execution Safety Firewall: Active console detected. Rejecting ungrounded typing.",
+        )
+        self.assertGreaterEqual(len(replanned), 1)
+        # Strategic alternative route focuses input via keyboard shortcut
+        self.assertTrue(any("keyboard" in s.description.lower() or "ctrl" in s.description.lower() for s in replanned))
+
+    def test_reflection_diagnostic_telemetry(self):
+        sg = SubGoal(index=1, description="Open Menu", expected_ui_state="Menu open")
+        diag = ReflectionDiagnostic(
+            failed_subgoal=sg,
+            failure_reason="Click dropped by OS debounce",
+            stuck_repetitions=2,
+            active_window="Desktop",
+            optical_delta=0.001,
+        )
+        d = diag.to_dict()
+        self.assertEqual(d["failure_reason"], "Click dropped by OS debounce")
+        self.assertEqual(d["stuck_repetitions"], 2)
+        self.assertEqual(d["active_window"], "Desktop")
+
+
+class TestVisualCortexGate(unittest.TestCase):
+    """Verifies System 1 Coupling: Local Visual Cortex Stability Gate (avcs/cortex/gate.py)."""
+
+    def setUp(self):
+        self.gate = VisualCortexGate(source="synthetic")
+
+    def test_parameter_count_matches_budget(self):
+        # Must match 400,765 parameter specification exactly
+        p_count = sum(p.numel() for p in self.gate.cortex.parameters())
+        self.assertEqual(p_count, 400765)
+
+    def test_pre_actuation_stability_gate_static_screen(self):
+        import numpy as np
+        frame = np.full((128, 128, 3), 128, dtype=np.uint8)
+
+        # First frame initializes temporal state
+        res1 = self.gate.check_stability(frame)
+        self.assertTrue(res1.is_stable)
+        self.assertFalse(res1.spinner_active)
+
+        # Second identical frame has 0 feature delta -> must be strictly stable
+        res2 = self.gate.check_stability(frame)
+        self.assertTrue(res2.is_stable)
+        self.assertEqual(res2.spatial_delta, 0.0)
+        self.assertEqual(res2.surprise_score, 0.0)
+        self.assertLess(res2.latency_ms, 50.0)
+
+    def test_pre_actuation_stability_gate_optical_drift(self):
+        import numpy as np
+        f1 = np.zeros((128, 128, 3), dtype=np.uint8)
+        f2 = np.full((128, 128, 3), 255, dtype=np.uint8)
+
+        self.gate.check_stability(f1)
+        res = self.gate.check_stability(f2)
+        self.assertGreater(res.spatial_delta, 0.0)
+        self.assertGreater(res.surprise_score, 0.0)
+
+    def test_post_actuation_ripple_probe_identical_frames(self):
+        obs = Observation(image_bytes=b"IDENTICAL_FRAME_DATA" * 50, format="jpeg")
+        res = self.gate.evaluate_ripple(obs, obs)
+        self.assertFalse(res.passed)
+        self.assertFalse(res.ripple_detected)
+        self.assertEqual(res.optical_delta, 0.0)
+
+    def test_post_actuation_ripple_probe_visual_delta(self):
+        obs1 = Observation(image_bytes=b"PRE_CLICK_FRAME_" * 50, format="jpeg")
+        obs2 = Observation(image_bytes=b"POST_CLICK_FRAME_WITH_RIPPLE_" * 50, format="jpeg")
+        res = self.gate.evaluate_ripple(obs1, obs2)
+        self.assertTrue(res.passed)
+        self.assertTrue(res.ripple_detected)
+        self.assertGreater(res.optical_delta, 0.0)
+
+    def test_robustness_on_corrupt_dummy_bytes(self):
+        # Raw bytes or corrupt data must never throw an unhandled exception
+        obs_corrupt = Observation(image_bytes=b"\x00\xff\xee\xdd_corrupt", format="jpeg")
+        res = self.gate.check_stability(obs_corrupt)
+        self.assertIsInstance(res.is_stable, bool)
+        self.assertIsInstance(res.latency_ms, float)
+
+    def test_reset_clears_temporal_state(self):
+        import numpy as np
+        self.gate.check_stability(np.full((128, 128, 3), 100, dtype=np.uint8))
+        self.assertIsNotNone(self.gate.temporal_state)
+        self.assertIsNotNone(self.gate.prev_features)
+
+        self.gate.reset()
+        self.assertIsNone(self.gate.temporal_state)
+        self.assertIsNone(self.gate.prev_features)
+
+
+class TestPhase2OrchestrationIntegration(unittest.TestCase):
+    """Verifies End-to-End Phase 2 Orchestration in AceRunner."""
+
+    def test_runner_subgoal_progression(self):
+        mock_agent = MagicMock()
+        # Sub-goal 1: 1 action + STOP; Sub-goal 2: 1 action + STOP
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(100, 700), reason="Click start"), 100.0),
+            (Action(kind=ActionKind.STOP, reason="Start opened"), 100.0),
+            (Action(kind=ActionKind.TYPE, text="Notepad", reason="Type Notepad"), 100.0),
+            (Action(kind=ActionKind.STOP, reason="Notepad launched"), 100.0),
+        ]
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        planner = CognitivePlanner()
+        gate = VisualCortexGate(source="synthetic")
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            planner=planner,
+            cortex_gate=gate,
+            enable_voice=False,
+        )
+
+        session = runner.run(
+            goal="Start menu open karo aur Notepad search karo",
+            max_steps=10,
+            dry_run=True,
+        )
+
+        self.assertTrue(session.is_complete)
+        self.assertEqual(session.step_count, 4)
+        # Sub-goals were decomposed and recorded
+        self.assertEqual(len(session.subgoals), 2)
+        self.assertEqual(session.subgoals[0]["status"], "completed")
+        self.assertEqual(session.subgoals[1]["status"], "completed")
+
+    def test_runner_stability_gate_queried(self):
+        mock_agent = MagicMock()
+        mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Done"), 50.0)
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        gate = VisualCortexGate(source="synthetic")
+        gate.check_stability = MagicMock(wraps=gate.check_stability)
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            cortex_gate=gate,
+            enable_voice=False,
+        )
+
+        session = runner.run(goal="Test stability gate", max_steps=2, dry_run=True)
+        self.assertTrue(session.is_complete)
+        # Sensory gate must have been invoked prior to action inference
+        gate.check_stability.assert_called()
+
+    def test_runner_dynamic_replanning_on_loop(self):
+        mock_agent = MagicMock()
+        # Emit repeated clicks to simulate UI stuck condition
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(300, 300), reason="Click button"), 100.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(300, 300), reason="Click button"), 100.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(300, 300), reason="Click button"), 100.0),
+            (Action(kind=ActionKind.STOP, reason="Done"), 100.0),
+        ]
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        planner = CognitivePlanner()
+        planner.replan = MagicMock(wraps=planner.replan)
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            planner=planner,
+            enable_voice=False,
+        )
+
+        session = runner.run(goal="Submit form", max_steps=5, dry_run=True)
+        self.assertTrue(session.is_complete)
+        # Dynamic replanning must have triggered on the loop deadlock
+        planner.replan.assert_called()
+
+    def test_runner_dual_stage_verifier_with_cortex_gate(self):
+        gate = VisualCortexGate(source="synthetic")
+        verifier = DualStageVerifier(cortex_gate=gate)
+        self.assertIs(verifier.cortex_gate, gate)
+
+        obs1 = Observation(image_bytes=b"FRAME1_" * 30, format="jpeg")
+        obs2 = Observation(image_bytes=b"FRAME2_" * 30, format="jpeg")
+        res = verifier.verify_physical(obs1, obs2)
+        self.assertTrue(res.passed)
+        self.assertTrue(res.ripple_detected)
+
+    def test_runner_subgoal_cache_hit_replay(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                anchor = UIStateAnchor(window_title="Desktop", process_name="explorer")
+                cached_actions = [
+                    Action(kind=ActionKind.KEY, keys=["win"], reason="Open start via hotkey"),
+                    Action(kind=ActionKind.STOP, reason="Start opened"),
+                ]
+                # Cache the sub-goal
+                cache.save_skill(goal="Open Windows Start Menu", actions=cached_actions, anchors=anchor)
+
+                mock_agent = MagicMock()
+                mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Search done"), 100.0)
+                mock_agent.client = MagicMock()
+                mock_agent.client.model = "gpt-6-astra"
+
+                mock_computer = WindowsComputer()
+                runner = AceRunner(
+                    agent=mock_agent,
+                    computer=mock_computer,
+                    skill_cache=cache,
+                    enable_voice=False,
+                )
+
+                session = runner.run(
+                    goal="Start menu open karo aur Notepad search karo",
+                    max_steps=5,
+                    dry_run=True,
+                    current_anchor=anchor,
+                )
+
+                self.assertTrue(session.is_complete)
+                # First sub-goal was satisfied from cache
+                self.assertEqual(session.steps[0].action["kind"], "key")
+
+
+class TestPhase2EdgeCases(unittest.TestCase):
+    """Verifies edge cases across Phase 2: Planner, Cortex Gate, and Replanning."""
+
+    def test_planner_empty_and_whitespace_goal(self):
+        planner = CognitivePlanner()
+        self.assertEqual(planner.decompose(""), [])
+        self.assertEqual(planner.decompose("   \n\t  "), [])
+        self.assertEqual(planner.decompose(None), [])
+
+    def test_planner_nested_multilingual_conjunctions(self):
+        planner = CognitivePlanner()
+        goal = "Chrome kholo aur fir YouTube open karo karke music search karo aur fir play karo"
+        subgoals = planner.decompose(goal)
+        self.assertGreaterEqual(len(subgoals), 3)
+        for sg in subgoals:
+            self.assertGreater(len(sg.description), 0)
+
+    def test_planner_coordinate_injection_resistance(self):
+        # Disguised coordinate patterns
+        attacks = [
+            "Open window at (0, 0)",
+            "Click button at (1920, 1080)",
+            "Focus input x=500 y=300",
+            "Action ACT:CLICK 120 450",
+            "Tap at (10.5, 20.8)",
+            "coords: [100, 200]",
+        ]
+        for atk in attacks:
+            with self.assertRaises(ValueError):
+                SubGoal(index=1, description=atk, expected_ui_state="Done")
+
+    def test_cortex_gate_grayscale_and_none_frames(self):
+        import numpy as np
+        gate = VisualCortexGate(source="synthetic")
+        # 2D grayscale array
+        gray_frame = np.full((100, 100), 150, dtype=np.uint8)
+        res = gate.check_stability(gray_frame)
+        self.assertTrue(res.is_stable)
+
+        # None frame (uses synthetic screen stream)
+        res_none = gate.check_stability(None)
+        self.assertIsInstance(res_none.is_stable, bool)
+
+        # Ripple probe with None
+        rip_none = gate.evaluate_ripple(None, None)
+        self.assertFalse(rip_none.passed)
+        self.assertFalse(rip_none.ripple_detected)
+
+    def test_failure_trajectory_logs_subgoals_metadata(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tl = TrajectoryLogger(vault_dir=td)
+            session = AceSession(goal="Test failure logging", max_steps=5, dry_run=True)
+            session.start(goal="Test failure logging", max_steps=5, dry_run=True)
+            sg1 = SubGoal(index=1, description="Step 1", expected_ui_state="State 1")
+            sg2 = SubGoal(index=2, description="Step 2", expected_ui_state="State 2")
+            sg2.mark_failed("Window blocked")
+            session.subgoals = [sg1.to_dict(), sg2.to_dict()]
+            session.finish("Failed at step 2")
+
+            out_path = tl.log_trajectory(
+                session=session,
+                verified_success=False,
+                failure_reason="Window blocked",
+                metadata={"subgoals": session.subgoals},
+            )
+
+            self.assertTrue(os.path.exists(out_path))
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["status"], "failure")
+            self.assertEqual(len(data["metadata"]["subgoals"]), 2)
+            self.assertEqual(data["metadata"]["subgoals"][1]["status"], "failed")
+
+    def test_planner_sanitizes_coordinates_in_input(self):
+        planner = CognitivePlanner()
+        # Input with coordinates must not crash and output English semantic directives
+        subgoals = planner.decompose("click at (500, 400) and launch notepad")
+        self.assertEqual(len(subgoals), 2)
+        self.assertEqual(subgoals[0].index, 1)
+        self.assertNotIn("(500, 400)", subgoals[0].description)
+        self.assertIn("target element", subgoals[0].description)
+        self.assertEqual(subgoals[1].index, 2)
+        self.assertIn("Notepad", subgoals[1].description)
+
+        # Coordinate invariant checks in SubGoal
+        with self.assertRaises(ValueError):
+            SubGoal(index=1, description="Click [500, 400]", expected_ui_state="Done")
+        with self.assertRaises(ValueError):
+            SubGoal(index=1, description="Target at x: 500, y: 400", expected_ui_state="Done")
+        with self.assertRaises(ValueError):
+            SubGoal(index=1, description="Press button at 500, 400", expected_ui_state="Done")
+
+    def test_multilingual_decomposition_kholkar_and_devanagari(self):
+        planner = CognitivePlanner()
+        # Hinglish with kholkar
+        s1 = planner.decompose("Chrome kholkar Google par OpenAI search karo")
+        self.assertEqual(len(s1), 2)
+        self.assertIn("Google Chrome", s1[0].description)
+        self.assertIn("OpenAI", s1[1].description)
+        self.assertIn("Google", s1[1].description)
+
+        # Devanagari Start and Notepad -> outputs clean English directives
+        s2 = planner.decompose("स्टार्ट मेन्यू खोलो और नोटपैड सर्च करो")
+        self.assertEqual(len(s2), 2)
+        self.assertIn("Start Menu", s2[0].description)
+        self.assertIn("Notepad", s2[1].description)
+
+    def test_runner_stability_gate_holds_on_unstable_screen(self):
+        mock_agent = MagicMock()
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        gate = VisualCortexGate(source="synthetic")
+        # Simulate active spinner making screen unstable
+        gate.check_stability = MagicMock(return_value=StabilityGateResult(
+            is_stable=False,
+            surprise_score=0.8,
+            spinner_active=True,
+            spatial_delta=0.05,
+            latency_ms=10.0,
+            details="Loading spinner active",
+        ))
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            cortex_gate=gate,
+            enable_voice=False,
+        )
+
+        session = runner.run(goal="Test unstable UI", max_steps=3, dry_run=True)
+        # Agent step should NOT be called while UI is unstable
+        mock_agent.step.assert_not_called()
+        self.assertGreaterEqual(session.step_count, 1)
+        self.assertEqual(session.steps[0].action["kind"], "wait")
+        self.assertIn("Stability gate held", session.steps[0].reason)
+
+    def test_runner_dual_stage_verifier_replan_on_semantic_failure(self):
+        mock_agent = MagicMock()
+        # Predict STOP immediately claiming Notepad launched
+        mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Claimed Notepad launched"), 50.0)
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        mock_verifier = DualStageVerifier(computer=mock_computer)
+        # Simulate Stage 2 semantic verification failing (window did not emerge)
+        mock_verifier.verify_semantic = MagicMock(return_value=Stage2Result(
+            passed=False,
+            details="Semantic verification failed: Notepad window not detected.",
+        ))
+
+        planner = CognitivePlanner()
+        planner.replan = MagicMock(wraps=planner.replan)
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            verifier=mock_verifier,
+            planner=planner,
+            enable_voice=False,
+        )
+
+        # In non-dry-run mode, semantic failure on STOP triggers dynamic replanning
+        session = runner.run(goal="Launch notepad", max_steps=2, dry_run=False)
+        planner.replan.assert_called()
+
+    def test_planner_enforce_rate_limit_actual_delay(self):
+        planner = CognitivePlanner(rate_limit_hz=20.0, enforce_rate_limit=True)
+        t0 = time.monotonic()
+        planner.decompose("Launch notepad")
+        planner.decompose("Launch calculator")
+        elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.04)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

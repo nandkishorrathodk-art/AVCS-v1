@@ -44,6 +44,7 @@ class AceSession:
         self.start_time: float = time.time()
         self.end_time: Optional[float] = None
         self.steps: List[StepRecord] = []
+        self.subgoals: List[Any] = []
         self.last_observation: Optional[Observation] = None
 
     def start(self, goal: str, max_steps: Optional[int] = None, dry_run: bool = False) -> None:
@@ -59,6 +60,7 @@ class AceSession:
         self.start_time = time.time()
         self.end_time = None
         self.steps = []
+        self.subgoals = []
         self.last_observation = None
 
     def _match_action(self, step_action: Dict[str, Any], target_kind: str, target_coord: Any, target_keys: Any, target_text: Any) -> bool:
@@ -138,6 +140,7 @@ class AceSession:
         action: Action,
         observation: Optional[Observation] = None,
         plan_latency_ms: float = 0.0,
+        is_subgoal_stop: bool = False,
     ) -> StepRecord:
         """Records an executed action and updates session termination state."""
         self.step_count += 1
@@ -155,7 +158,7 @@ class AceSession:
         self.steps.append(record)
 
         # Check termination condition
-        if action.kind == ActionKind.STOP:
+        if action.kind == ActionKind.STOP and not is_subgoal_stop:
             self.finish(action.reason or "Goal completed successfully.")
         elif self.step_count >= self.max_steps:
             self.finish(f"Maximum step limit ({self.max_steps}) reached.")

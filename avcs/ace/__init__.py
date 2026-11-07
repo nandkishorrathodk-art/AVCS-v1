@@ -4,6 +4,7 @@ from avcs.ace.actions import Action, ActionKind
 from avcs.ace.agent import AceAgent
 from avcs.ace.client import AceClientError, CustomLLMClient
 from avcs.ace.computer import Observation, WindowsComputer
+from avcs.ace.planner import CognitivePlanner, ReflectionDiagnostic, SubGoal
 from avcs.ace.session import AceSession, StepRecord
 
 __all__ = [
@@ -18,6 +19,9 @@ __all__ = [
     "StepRecord",
     "AceRunner",
     "SafetyBreakoutError",
+    "CognitivePlanner",
+    "SubGoal",
+    "ReflectionDiagnostic",
 ]
 
 
