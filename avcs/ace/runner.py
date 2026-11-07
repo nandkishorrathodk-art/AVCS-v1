@@ -25,6 +25,7 @@ from avcs.ace.actions import Action, ActionKind
 from avcs.ace.agent import AceAgent
 from avcs.ace.client import CustomLLMClient
 from avcs.ace.computer import ExecutionSafetyFirewall, Observation, SafetyCheckResult, WindowsComputer
+from avcs.ace.local_model import LocalVAMClient
 from avcs.ace.planner import CognitivePlanner, ReflectionDiagnostic, SubGoal
 from avcs.ace.session import AceSession
 from avcs.ace.skills_vault.cache import SkillCache, SkillLookupResult, UIStateAnchor
@@ -924,18 +925,35 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=None, help="HTTP request timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Observe and plan without dispatching hardware mouse/keyboard events.")
     parser.add_argument("--no-voice", action="store_true", help="Disable natural voice speech feedback.")
+    parser.add_argument("--local-vam", action="store_true", help="Use local edge Vision-Action Model (vLLM / TensorRT-LLM) instead of cloud.")
+    parser.add_argument("--local-endpoint", type=str, default="http://127.0.0.1:8000/v1", help="Local VAM endpoint URL.")
+    parser.add_argument("--local-model", type=str, default="Qwen2.5-VL-3B-Instruct", help="Local VAM model identifier.")
+    parser.add_argument("--display-target", type=str, default="primary", help="Target display: 'primary', 'virtual', or monitor index 0, 1, ...")
 
     args = parser.parse_args()
 
-    client = CustomLLMClient(
-        endpoint=args.endpoint,
-        model=args.model,
-        api_key=args.api_key,
-        protocol=args.protocol,
-        timeout=args.timeout,
-    )
+    if args.local_vam:
+        client = LocalVAMClient(
+            endpoint=args.local_endpoint or args.endpoint,
+            model=args.local_model or args.model,
+            timeout=args.timeout or 5.0,
+            allow_offline_mock=args.dry_run,
+        )
+    else:
+        client = CustomLLMClient(
+            endpoint=args.endpoint,
+            model=args.model,
+            api_key=args.api_key,
+            protocol=args.protocol,
+            timeout=args.timeout,
+        )
+
+    disp_target: Union[str, int] = args.display_target
+    if isinstance(disp_target, str) and disp_target.isdigit():
+        disp_target = int(disp_target)
+
     agent = AceAgent(client=client)
-    computer = WindowsComputer()
+    computer = WindowsComputer(target_display=disp_target)
     runner = AceRunner(agent=agent, computer=computer, enable_voice=not args.no_voice)
 
     try:

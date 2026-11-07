@@ -16,7 +16,7 @@ from enum import Enum
 import re
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from PIL import Image
 
@@ -114,6 +114,37 @@ class BITMAPINFO(ctypes.Structure):
         ("bmiHeader", BITMAPINFOHEADER),
         ("bmiColors", ctypes.c_uint32 * 3),
     ]
+
+
+CCHDEVICENAME = 32
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("rcMonitor", ctypes.wintypes.RECT),
+        ("rcWork", ctypes.wintypes.RECT),
+        ("dwFlags", ctypes.c_ulong),
+        ("szDevice", ctypes.c_wchar * CCHDEVICENAME),
+    ]
+
+
+@dataclass
+class MonitorInfo:
+    """Hardware display monitor geometry and DPI calibration metrics."""
+    index: int
+    handle: int
+    is_primary: bool
+    left: int
+    top: int
+    right: int
+    bottom: int
+    width: int
+    height: int
+    device_name: str = ""
+    dpi_x: int = 96
+    dpi_y: int = 96
+    scale_factor: float = 1.0
 
 
 @dataclass
@@ -283,13 +314,19 @@ class WindowsComputer:
         raw_dur = 0.050 + 0.00014 * dist
         return min(self.FITTS_MAX_DURATION_S, max(self.FITTS_MIN_DURATION_S, raw_dur))
 
-    def __init__(self) -> None:
+    def __init__(self, target_display: Union[str, int] = "primary") -> None:
         if sys.platform != "win32":
             raise RuntimeError("WindowsComputer requires Windows OS.")
         
+        self.target_display = target_display
+        self.shcore = getattr(ctypes.windll, "shcore", None)
+
         # Enable Per-Monitor V2 DPI awareness for true physical pixel capture
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            if self.shcore and hasattr(self.shcore, "SetProcessDpiAwareness"):
+                self.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            else:
+                ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             try:
                 ctypes.windll.user32.SetProcessDPIAware()
@@ -315,6 +352,107 @@ class WindowsComputer:
         self.native_height = self.user32.GetSystemMetrics(1)
         if self.native_width <= 0 or self.native_height <= 0:
             self.native_width, self.native_height = 1280, 800
+
+    def get_monitors(self) -> List[MonitorInfo]:
+        """Enumerates connected display monitors with physical bounds and DPI scaling factors."""
+        monitors: List[MonitorInfo] = []
+
+        if not hasattr(self.user32, "EnumDisplayMonitors"):
+            # Mock or non-windows environment fallback
+            w = getattr(self, "native_width", 1280)
+            h = getattr(self, "native_height", 800)
+            return [MonitorInfo(index=0, handle=0, is_primary=True, left=0, top=0, right=w, bottom=h, width=w, height=h)]
+
+        def _enum_callback(hmonitor: Any, hdc: Any, lprect: Any, lparam: int) -> bool:
+            try:
+                mi = MONITORINFOEXW()
+                mi.cbSize = ctypes.sizeof(MONITORINFOEXW)
+                if self.user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi)):
+                    r = mi.rcMonitor
+                    is_primary = bool(mi.dwFlags & 1)
+                    w = r.right - r.left
+                    h = r.bottom - r.top
+                    dev_name = str(mi.szDevice)
+                    
+                    dpi_x_val, dpi_y_val = 96, 96
+                    if self.shcore and hasattr(self.shcore, "GetDpiForMonitor"):
+                        try:
+                            dx = ctypes.c_uint()
+                            dy = ctypes.c_uint()
+                            if self.shcore.GetDpiForMonitor(hmonitor, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+                                dpi_x_val, dpi_y_val = dx.value, dy.value
+                        except Exception:
+                            pass
+                    
+                    scale = round(dpi_x_val / 96.0, 2) if dpi_x_val > 0 else 1.0
+                    monitors.append(
+                        MonitorInfo(
+                            index=len(monitors),
+                            handle=int(hmonitor) if hmonitor else 0,
+                            is_primary=is_primary,
+                            left=r.left,
+                            top=r.top,
+                            right=r.right,
+                            bottom=r.bottom,
+                            width=w,
+                            height=h,
+                            device_name=dev_name,
+                            dpi_x=dpi_x_val,
+                            dpi_y=dpi_y_val,
+                            scale_factor=scale,
+                        )
+                    )
+            except Exception:
+                pass
+            return True
+
+        PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.RECT), ctypes.c_long)
+        cb = PROC(_enum_callback)
+        try:
+            self.user32.EnumDisplayMonitors(0, 0, cb, 0)
+        except Exception:
+            pass
+
+        if not monitors:
+            w = getattr(self, "native_width", 1280)
+            h = getattr(self, "native_height", 800)
+            monitors.append(
+                MonitorInfo(index=0, handle=0, is_primary=True, left=0, top=0, right=w, bottom=h, width=w, height=h)
+            )
+
+        return monitors
+
+    def set_display_target(self, target: Union[str, int]) -> None:
+        """Sets the active display target ('primary', 'virtual', or monitor index 0, 1, ...)."""
+        self.target_display = target
+
+    def get_active_bounds(self) -> Tuple[int, int, int, int, float]:
+        """Returns (left, top, width, height, scale_factor) for the active display target."""
+        target = self.target_display
+
+        # 1. Full Virtual Desktop spanning all monitors
+        if target == "virtual":
+            vx = self.user32.GetSystemMetrics(76) if self.user32 else 0
+            vy = self.user32.GetSystemMetrics(77) if self.user32 else 0
+            vw = self.user32.GetSystemMetrics(78) if self.user32 else 0
+            vh = self.user32.GetSystemMetrics(79) if self.user32 else 0
+            if vw > 0 and vh > 0:
+                return vx, vy, vw, vh, 1.0
+            return 0, 0, self.native_width, self.native_height, 1.0
+
+        # 2. Specific monitor by index
+        monitors = self.get_monitors()
+        if isinstance(target, int):
+            if 0 <= target < len(monitors):
+                m = monitors[target]
+                return m.left, m.top, m.width, m.height, m.scale_factor
+
+        # 3. Primary monitor (default)
+        primary = next((m for m in monitors if m.is_primary), monitors[0] if monitors else None)
+        if primary:
+            return primary.left, primary.top, primary.width, primary.height, primary.scale_factor
+
+        return 0, 0, self.native_width, self.native_height, 1.0
 
     def attach_desktop(self) -> None:
         """Binds thread to the active user desktop station (winsta0\\default)."""
@@ -374,19 +512,17 @@ class WindowsComputer:
         t0 = time.time()
         self.attach_desktop()
 
-        # Update dimensions in case resolution or display scaling dynamically changed
-        nw = self.user32.GetSystemMetrics(0)
-        nh = self.user32.GetSystemMetrics(1)
-        if nw > 0 and nh > 0:
-            self.native_width, self.native_height = nw, nh
+        # Update dimensions from active target display bounds
+        left, top, width, height, _ = self.get_active_bounds()
+        self.native_width, self.native_height = width, height
 
         hdc_screen = self.user32.GetDC(0)
         hdc_mem = self.gdi32.CreateCompatibleDC(hdc_screen)
         hbm = self.gdi32.CreateCompatibleBitmap(hdc_screen, self.native_width, self.native_height)
         self.gdi32.SelectObject(hdc_mem, hbm)
 
-        # BitBlt capture with layered window support (CAPTUREBLT)
-        self.gdi32.BitBlt(hdc_mem, 0, 0, self.native_width, self.native_height, hdc_screen, 0, 0, SRCCOPY | CAPTUREBLT)
+        # BitBlt capture with layered window support (CAPTUREBLT) from active display bounds
+        self.gdi32.BitBlt(hdc_mem, 0, 0, self.native_width, self.native_height, hdc_screen, left, top, SRCCOPY | CAPTUREBLT)
         self.gdi32.GdiFlush()
 
         # Extract bits
@@ -437,12 +573,22 @@ class WindowsComputer:
         )
 
     def _canonical_to_native(self, x: int, y: int) -> Tuple[int, int]:
-        """Maps coordinate from canonical 1280x800 to native hardware display pixels."""
-        nx = int((x / self.CANONICAL_WIDTH) * self.native_width)
-        ny = int((y / self.CANONICAL_HEIGHT) * self.native_height)
-        nx = max(0, min(self.native_width - 1, nx))
-        ny = max(0, min(self.native_height - 1, ny))
+        """Maps coordinate from canonical 1280x800 to native hardware display pixels on active display."""
+        left, top, width, height, _ = self.get_active_bounds()
+        nx = left + int((x / self.CANONICAL_WIDTH) * width)
+        ny = top + int((y / self.CANONICAL_HEIGHT) * height)
+        nx = max(left, min(left + width - 1, nx))
+        ny = max(top, min(top + height - 1, ny))
         return nx, ny
+
+    def _native_to_canonical(self, nx: int, ny: int) -> Tuple[int, int]:
+        """Maps coordinate from native hardware display pixels back to canonical 1280x800."""
+        left, top, width, height, _ = self.get_active_bounds()
+        cx = int(((nx - left) / max(1, width)) * self.CANONICAL_WIDTH)
+        cy = int(((ny - top) / max(1, height)) * self.CANONICAL_HEIGHT)
+        cx = max(0, min(self.CANONICAL_WIDTH, cx))
+        cy = max(0, min(self.CANONICAL_HEIGHT, cy))
+        return cx, cy
 
     def _move_minimum_jerk(self, target_x: int, target_y: int, duration_ms: Optional[float] = None) -> None:
         """Moves hardware cursor along 5th-order minimum-jerk trajectory with dual dispatch.

@@ -20,12 +20,14 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from avcs.ace.actions import Action, ActionAdapter, ActionKind
+from avcs.ace.actions import Action, ActionKind, ActionAdapter
 from avcs.ace.agent import AceAgent
 from avcs.ace.client import CustomLLMClient
+from avcs.ace.local_model import LocalVAMClient
 from avcs.ace.computer import (
     INPUT,
     ExecutionSafetyFirewall,
+    MonitorInfo,
     Observation,
     SafetyCheckResult,
     SafetyRiskLevel,
@@ -2780,6 +2782,228 @@ class TestPhase2EdgeCases(unittest.TestCase):
         import avcs.cortex.gate
         self.assertTrue(hasattr(avcs.eye_stream, "EyeStream"))
         self.assertTrue(hasattr(avcs.cortex.gate, "VisualCortexGate"))
+
+
+class TestMonitorDpiCalibration(unittest.TestCase):
+    """Verifies dynamic multi-monitor enumeration and DPI virtual coordinate calibration."""
+
+    def test_get_monitors_enumeration(self):
+        computer = WindowsComputer()
+        mons = computer.get_monitors()
+        self.assertGreaterEqual(len(mons), 1)
+        m0 = mons[0]
+        self.assertIsInstance(m0, MonitorInfo)
+        self.assertGreater(m0.width, 0)
+        self.assertGreater(m0.height, 0)
+        self.assertGreaterEqual(m0.scale_factor, 1.0)
+        self.assertTrue(any(m.is_primary for m in mons))
+
+    def test_canonical_to_native_and_reverse(self):
+        computer = WindowsComputer()
+        left, top, w, h, _ = computer.get_active_bounds()
+        
+        # Test center point (640, 400)
+        nx, ny = computer._canonical_to_native(640, 400)
+        expected_nx = left + int(0.5 * w)
+        expected_ny = top + int(0.5 * h)
+        self.assertEqual(nx, expected_nx)
+        self.assertEqual(ny, expected_ny)
+
+        # Roundtrip back to canonical
+        cx, cy = computer._native_to_canonical(nx, ny)
+        self.assertAlmostEqual(cx, 640, delta=2)
+        self.assertAlmostEqual(cy, 400, delta=2)
+
+    def test_virtual_desktop_targeting(self):
+        computer = WindowsComputer()
+        computer.set_display_target("virtual")
+        vx, vy, vw, vh, scale = computer.get_active_bounds()
+        self.assertGreater(vw, 0)
+        self.assertGreater(vh, 0)
+        self.assertEqual(scale, 1.0)
+
+        # Test boundary clamping
+        nx, ny = computer._canonical_to_native(0, 0)
+        self.assertEqual(nx, vx)
+        self.assertEqual(ny, vy)
+
+        nx_max, ny_max = computer._canonical_to_native(1280, 800)
+        self.assertEqual(nx_max, vx + vw - 1)
+        self.assertEqual(ny_max, vy + vh - 1)
+
+    def test_multi_monitor_offset_calibration(self):
+        computer = WindowsComputer()
+        # Mock dual monitor configuration: Primary 1920x1080 at (0,0), Secondary 1920x1080 at (1920,0)
+        mock_monitors = [
+            MonitorInfo(index=0, handle=1, is_primary=True, left=0, top=0, right=1920, bottom=1080, width=1920, height=1080, scale_factor=1.0),
+            MonitorInfo(index=1, handle=2, is_primary=False, left=1920, top=0, right=3840, bottom=1080, width=1920, height=1080, scale_factor=1.25),
+        ]
+        computer.get_monitors = MagicMock(return_value=mock_monitors)
+
+        # Target monitor 1
+        computer.set_display_target(1)
+        left, top, w, h, scale = computer.get_active_bounds()
+        self.assertEqual(left, 1920)
+        self.assertEqual(top, 0)
+        self.assertEqual(w, 1920)
+        self.assertEqual(h, 1080)
+        self.assertEqual(scale, 1.25)
+
+        # Canonical (640, 400) on monitor 1 should map to 1920 + 960 = 2880
+        nx, ny = computer._canonical_to_native(640, 400)
+        self.assertEqual(nx, 2880)
+        self.assertEqual(ny, int(400 / 800 * 1080))
+
+        # Reverse maps back to 640, 400
+        cx, cy = computer._native_to_canonical(2880, ny)
+        self.assertEqual(cx, 640)
+        self.assertEqual(cy, 400)
+
+
+class TestLocalVAMClient(unittest.TestCase):
+    """Verifies local edge Vision-Action Model engine client."""
+
+    def test_local_vam_initialization(self):
+        client = LocalVAMClient(endpoint="http://localhost:8000", model="Qwen2.5-VL-7B-Instruct")
+        self.assertEqual(client.endpoint, "http://localhost:8000/v1")
+        self.assertEqual(client.model, "Qwen2.5-VL-7B-Instruct")
+        self.assertEqual(client.max_tokens, 32)
+        self.assertEqual(client.temperature, 0.0)
+
+    def test_local_vam_check_health_offline(self):
+        client = LocalVAMClient(endpoint="http://127.0.0.1:59999/v1")
+        self.assertFalse(client.check_health())
+
+    def test_local_vam_offline_fallback(self):
+        client = LocalVAMClient(endpoint="http://127.0.0.1:59999/v1", allow_offline_mock=True)
+        img_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 30  # dummy jpeg
+        action, latency = client.predict_action(img_bytes, goal="Launch notepad", step_index=1)
+        self.assertEqual(action.kind, ActionKind.KEY)
+        self.assertEqual(action.keys, ["win"])
+
+    @patch("requests.post")
+    def test_local_vam_mock_server_direct_token_response(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "ACT:CLICK 300 450"}}]
+        }
+        mock_post.return_value = mock_resp
+
+        client = LocalVAMClient(endpoint="http://127.0.0.1:8000/v1")
+        img_bytes = b"dummy_img_bytes"
+        action, latency = client.predict_action(img_bytes, goal="Click start")
+
+        self.assertEqual(action.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(action.coordinate, (300, 450))
+        self.assertGreaterEqual(latency, 0.0)
+
+    @patch("requests.post")
+    def test_local_vam_mock_server_compact_json_response(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": '{"kind": "type", "text": "hello local"}'}}]
+        }
+        mock_post.return_value = mock_resp
+
+        client = LocalVAMClient(endpoint="http://127.0.0.1:8000/v1")
+        action, latency = client.predict_action(b"dummy", goal="Type greeting")
+
+        self.assertEqual(action.kind, ActionKind.TYPE)
+        self.assertEqual(action.text, "hello local")
+
+
+class TestShowdownBenchmark(unittest.TestCase):
+    """Verifies Showdown-Clicks benchmark runner, Wilson intervals, and evaluation logic."""
+
+    def test_wilson_score_interval_properties(self):
+        from benchmarks.run_showdown_benchmark import wilson_score_interval
+
+        # 0 successes out of 100
+        low_0, high_0 = wilson_score_interval(0, 100)
+        self.assertEqual(low_0, 0.0)
+        self.assertGreater(high_0, 0.0)
+        self.assertLess(high_0, 0.05)
+
+        # 100 successes out of 100
+        low_100, high_100 = wilson_score_interval(100, 100)
+        self.assertGreater(low_100, 0.95)
+        self.assertAlmostEqual(high_100, 1.0, places=5)
+
+        # 50 out of 100 (symmetric around 0.5)
+        low_50, high_50 = wilson_score_interval(50, 100)
+        self.assertAlmostEqual(low_50, 0.4038, delta=0.01)
+        self.assertAlmostEqual(high_50, 0.5962, delta=0.01)
+
+    def test_synthetic_showdown_suite_generation(self):
+        from benchmarks.run_showdown_benchmark import generate_synthetic_showdown_suite
+        samples = generate_synthetic_showdown_suite(count=15)
+        self.assertEqual(len(samples), 15)
+        for s in samples:
+            self.assertTrue(s.id.startswith("synth_"))
+            self.assertGreater(len(s.instruction), 0)
+            x1, y1, x2, y2 = s.target_bbox
+            self.assertLess(x1, x2)
+            self.assertLess(y1, y2)
+            self.assertIsNotNone(s.image_bytes)
+            self.assertGreater(len(s.image_bytes), 100)
+
+    def test_benchmark_sample_evaluation_hit_and_miss(self):
+        from benchmarks.run_showdown_benchmark import BenchmarkSample, evaluate_sample
+
+        sample = BenchmarkSample(
+            id="test_01",
+            instruction="Click Save Button",
+            target_bbox=(100, 200, 150, 240),
+            target_center=(125, 220),
+            image_bytes=b"dummy",
+        )
+
+        # Mock agent predicting exact hit
+        mock_hit_agent = MagicMock()
+        mock_hit_agent.step.return_value = (
+            Action(kind=ActionKind.LEFT_CLICK, coordinate=(125, 220), reason="Hit target"),
+            45.0,
+        )
+        res_hit = evaluate_sample(mock_hit_agent, sample)
+        self.assertTrue(res_hit.hit)
+        self.assertEqual(res_hit.distance_error, 0.0)
+
+        # Mock agent predicting miss
+        mock_miss_agent = MagicMock()
+        mock_miss_agent.step.return_value = (
+            Action(kind=ActionKind.LEFT_CLICK, coordinate=(900, 700), reason="Miss target"),
+            45.0,
+        )
+        res_miss = evaluate_sample(mock_miss_agent, sample)
+        self.assertFalse(res_miss.hit)
+        self.assertGreater(res_miss.distance_error, 500.0)
+
+    def test_run_benchmark_summary(self):
+        from benchmarks.run_showdown_benchmark import (
+            BenchmarkSample,
+            generate_synthetic_showdown_suite,
+            run_benchmark,
+        )
+
+        samples = generate_synthetic_showdown_suite(count=5)
+
+        # Mock agent that always targets sample's center
+        mock_agent = MagicMock()
+        def _mock_step(obs, goal):
+            # Find matching sample
+            s = next((sm for sm in samples if sm.instruction == goal), samples[0])
+            return Action(kind=ActionKind.LEFT_CLICK, coordinate=s.target_center), 50.0
+
+        mock_agent.step.side_effect = _mock_step
+
+        report = run_benchmark(mock_agent, samples, tolerance_px=15.0)
+        self.assertEqual(report["sample_count"], 5)
+        self.assertEqual(report["hits"], 5)
+        self.assertEqual(report["accuracy"], 100.0)
+        self.assertEqual(report["wilson_95_ci"][1], 100.0)
+        self.assertEqual(report["latency_p50_ms"], 50.0)
 
 
 if __name__ == "__main__":

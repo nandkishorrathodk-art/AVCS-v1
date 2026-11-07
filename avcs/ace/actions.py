@@ -601,6 +601,11 @@ class ActionAdapter:
         return None
 
     @classmethod
+    def from_response(cls, payload: Any) -> Action:
+        """Alias for adapt: normalizes model response content into an Action."""
+        return cls.adapt(payload)
+
+    @classmethod
     def adapt(cls, payload: Any) -> Action:
         """Master normalization method translating any model wire format into Action."""
         if isinstance(payload, Action):
