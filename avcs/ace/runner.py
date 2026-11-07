@@ -638,9 +638,20 @@ class AceRunner:
                     plan_latency_ms = 0.0
 
                 # 6. Repetition & Stuck Detection / Jittering & Dynamic Replanning
-                repetition_count = session.get_repetition_count(new_action=action)
-                recent_matches = session.count_recent_matches(action, window=5)
-                effective_reps = max(repetition_count, recent_matches)
+                if action.kind in (
+                    ActionKind.LEFT_CLICK,
+                    ActionKind.RIGHT_CLICK,
+                    ActionKind.DOUBLE_CLICK,
+                    ActionKind.TRIPLE_CLICK,
+                    ActionKind.KEY,
+                    ActionKind.TYPE,
+                    ActionKind.LEFT_CLICK_DRAG,
+                ):
+                    repetition_count = session.get_repetition_count(new_action=action)
+                    recent_matches = session.count_recent_matches(action, window=5)
+                    effective_reps = max(repetition_count, recent_matches)
+                else:
+                    effective_reps = 0
                 if effective_reps >= 2:
                     stuck_points.append({
                         "step": step_idx,
@@ -691,9 +702,10 @@ class AceRunner:
                             f"Layer 1 Dynamic Replanning: Synthesized {len(replanned)} alternative sub-goals: "
                             f"{[r.description for r in replanned]}"
                         )
-                        for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                        new_subgoals = subgoals[:subgoal_idx] + replanned + subgoals[subgoal_idx + 1:]
+                        for offset, rsg in enumerate(new_subgoals, start=1):
                             rsg.index = offset
-                        subgoals = subgoals[:subgoal_idx] + replanned
+                        subgoals = new_subgoals
                         active_subgoal = subgoals[subgoal_idx]
 
                 # 7. Layer 4 Execution Safety Firewall evaluation
@@ -730,16 +742,17 @@ class AceRunner:
                             diagnostic=diag,
                         )
                         if replanned:
-                            for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                            new_subgoals = subgoals[:subgoal_idx] + replanned + subgoals[subgoal_idx + 1:]
+                            for offset, rsg in enumerate(new_subgoals, start=1):
                                 rsg.index = offset
-                            subgoals = subgoals[:subgoal_idx] + replanned
+                            subgoals = new_subgoals
                     step_idx += 1
                     continue
 
                 logger.info(f"Planned Action: {action.kind.value} {action.coordinate or ''} | Reason: {action.reason} | Latency: {plan_latency_ms:.1f}ms")
 
-                # 8. Record step in session
-                is_subgoal_stop = (action.kind == ActionKind.STOP and (subgoal_idx + 1 < len(subgoals)))
+                # 8. Record step in session (STOP is treated as subgoal stop until verified)
+                is_subgoal_stop = (action.kind == ActionKind.STOP)
                 session.record_step(
                     action,
                     observation=obs,
@@ -754,7 +767,8 @@ class AceRunner:
                         expected_process_name=expected_process,
                         goal=active_subgoal.description,
                     )
-                    if stage2_res.passed or dry_run:
+                    v_passed = stage2_res.passed or dry_run
+                    if v_passed:
                         if hasattr(active_subgoal, "mark_completed"):
                             active_subgoal.mark_completed()
                         logger.info(f"Sub-goal {active_subgoal.index} completed: {active_subgoal.description} ({action.reason})")
@@ -762,6 +776,7 @@ class AceRunner:
                         if subgoal_idx >= len(subgoals):
                             logger.info(f"Goal completed: {action.reason}")
                             speak_feedback(f"Task completed: {action.reason}", enabled=self.enable_voice)
+                            session.finish(action.reason or "All planned sub-goals completed successfully.")
                             break
                         else:
                             logger.info(f"Advancing to next sub-goal {subgoal_idx + 1}/{len(subgoals)}: '{subgoals[subgoal_idx].description}'")
@@ -782,9 +797,10 @@ class AceRunner:
                             diagnostic=diag,
                         )
                         if replanned:
-                            for offset, rsg in enumerate(replanned, start=active_subgoal.index):
+                            new_subgoals = subgoals[:subgoal_idx] + replanned + subgoals[subgoal_idx + 1:]
+                            for offset, rsg in enumerate(new_subgoals, start=1):
                                 rsg.index = offset
-                            subgoals = subgoals[:subgoal_idx] + replanned
+                            subgoals = new_subgoals
                         step_idx += 1
                         continue
 

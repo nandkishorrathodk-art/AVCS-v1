@@ -27,15 +27,15 @@ def _validate_no_coordinates(text: str) -> None:
 
     # Prohibited coordinate patterns
     coord_patterns = [
-        r'\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)',  # (100, 200) or (100.5, 200)
-        r'\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]',  # [100, 200]
-        r'\{\s*[\'"]?[xy][\'"]?\s*[:=]\s*-?\d+',              # {"x": 100} or {x: 100}
-        r'\b(?:x|y)\s*[:=]\s*-?\d+',                           # x=100, x: 100, y=200, y: 200
-        r'ACT:(?:CLICK|MOVE|PRESS)\s+\d+',                     # ACT:CLICK 100 200
-        r'\bcoord(?:inate)?s?\s*[:=]?\s*\[?\s*-?\d+',          # coordinate: [100, 200]
-        r'\bpos(?:ition)?\s*[:=]?\s*[\(\[]?\s*-?\d+',         # pos: (100, 200)
-        r'\b(?:click|tap|press|move|mouse)\s+(?:at\s+)?[\(\[]?\s*-?\d+(?:\.\d+)?\s*[,x\s]\s*-?\d+', # click at 100, 200
-        r'\bat\s+[\(\[]?\s*-?\d+(?:\.\d+)?\s*[,x\s]\s*-?\d+(?:\.\d+)?\s*[\)\]]?', # at (100, 200) or at 100, 200
+        r'[\(\[<]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>]',  # (100, 200), [100, 200], <100, 200>
+        r'\{\s*[\'"]?[xy][\'"]?\s*[:=]\s*-?\d+',                                      # {"x": 100} or {x: 100}
+        r'\b(?:x|y)\s*[:=]\s*-?\d+',                                                   # x=100, x: 100, y=200, y: 200
+        r'\bx\s*=\s*\d+\s+y\s*=\s*\d+',                                               # x=500 y=400
+        r'ACT:(?:CLICK|MOVE|PRESS)\s+\d+',                                             # ACT:CLICK 100 200
+        r'\b(?:point|loc|location|pixel|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<]?\s*-?\d+', # point: 500, 400
+        r'\d+\s*px\s*,\s*\d+\s*px',                                                   # 500px, 400px
+        r'\b(?:click|tap|press|move|mouse)\s+(?:at\s+)?[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+', # click at 100, 200
+        r'\bat\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:\.\d+)?(?:px)?[\)\]>]?', # at (100, 200) or at 100, 200
     ]
 
     for pat in coord_patterns:
@@ -46,33 +46,86 @@ def _validate_no_coordinates(text: str) -> None:
             )
 
 
+def _validate_english_only(text: str) -> None:
+    """Enforces strict user requirement: SubGoal must be strictly in English (no Hindi/Devanagari text)."""
+    if not text:
+        return
+    if re.search(r'[\u0900-\u097F]', text):
+        raise ValueError(
+            f"Invariant violation: SubGoal must be in English only (no Hindi text permitted per user requirements). "
+            f"Found Devanagari script in text: {text!r}"
+        )
+
+
 def _sanitize_coordinates(text: str) -> str:
     """Sanitizes raw (x, y) coordinates into semantic directives so planner never leaks coordinates."""
     if not text:
         return text
 
     s = text
-    # Replace tuple/bracket coords like (100, 200) or [100, 200]
-    s = re.sub(r'[\(\[]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[\)\]]', 'target element', s)
-    # Replace explicit x=..., y=... or x: ..., y: ...
+    # Replace tuple/bracket/angle coords like (100, 200) or [100, 200] or <100, 200>
+    s = re.sub(r'[\(\[<]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>]', 'target element', s)
+    # Replace point: 500, 400 or location: 500, 400 or coords: [100, 200]
+    s = re.sub(r'\b(?:point|loc|location|pixel|px|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<]?\s*-?\d+.*?(?:[\)\]>]|$)', 'target element', s, flags=re.IGNORECASE)
+    # Replace explicit x=..., y=... or x: ..., y: ... or x=500 y=400
+    s = re.sub(r'\bx\s*=\s*\d+\s+y\s*=\s*\d+', 'target element', s, flags=re.IGNORECASE)
     s = re.sub(r'\b[xy]\s*[:=]\s*-?\d+(?:\.\d+)?', 'target element', s, flags=re.IGNORECASE)
+    # Replace 500px, 400px
+    s = re.sub(r'\d+\s*px\s*,\s*\d+\s*px', 'target element', s, flags=re.IGNORECASE)
     # Replace ACT:CLICK 100 200
     s = re.sub(r'ACT:(?:CLICK|MOVE|PRESS)\s+\d+(?:\s+\d+)?', 'interact with element', s, flags=re.IGNORECASE)
-    # Replace coords: [100, 200]
-    s = re.sub(r'\bcoord(?:inate)?s?\s*[:=]?\s*\[?\s*-?\d+.*?(?:\]|$)', 'target element', s, flags=re.IGNORECASE)
     # Replace click at 100, 200
-    s = re.sub(r'\b(?:click|tap|press|move)\s+at\s+[\(\[]?\s*-?\d+(?:\.\d+)?\s*[,x\s]\s*-?\d+[\)\]]?', 'click target element', s, flags=re.IGNORECASE)
-    s = re.sub(r'\bat\s+[\(\[]?\s*-?\d+(?:\.\d+)?\s*[,x\s]\s*-?\d+[\)\]]?', 'at target element', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b(?:click|tap|press|move)\s+at\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>]?', 'click target element', s, flags=re.IGNORECASE)
+    s = re.sub(r'\bat\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>]?', 'at target element', s, flags=re.IGNORECASE)
     # Clean up excess spaces
     s = re.sub(r'\s+', ' ', s).strip()
     return s
+
+
+def _translate_to_english_directive(text: str) -> Tuple[str, str]:
+    """Translates arbitrary Hindi/Hinglish text to clean English description and expected UI state."""
+    translations = [
+        (r'\bchrome\s+(?:band\s*karo|close\s*karo|khatam\s*karo)\b', 'Close Google Chrome application'),
+        (r'\bnotepad\s+(?:band\s*karo|close\s*karo)\b', 'Close Notepad application'),
+        (r'\b(?:band\s*karo|band\s*kar\s*do|close\s*karo|हटाओ|बंद\s*करो|बंद\s*करें)\b', 'close active window'),
+        (r'\b(?:kholo|khol\s*do|kholiye|खोलो|खोलें|खोलिए)\b', 'open application'),
+        (r'\b(?:chalao|chalaayein|start\s*karo|चलाओ|शुरू\s*करो)\b', 'launch application'),
+        (r'\b(?:dhoondo|khojo|search\s*karo|ढूंढो|खोजो|सर्च\s*करो)\b', 'search query'),
+        (r'\b(?:likho|darj\s*karo|type\s*karo|लिखो|टाइप\s*करो|दर्ज\s*करो)\b', 'type text'),
+        (r'\b(?:dabao|press\s*karo|click\s*karo|दबाओ|क्लिक\s*करो)\b', 'interact with element'),
+        (r'\b(?:bajaao|play\s*karo|बजाओ)\b', 'play media'),
+        (r'\b(?:save\s*karo|seve\s*karo|सेव\s*करो|सहेजें)\b', 'save file'),
+        (r'\b(?:refresh\s*karo|taaza\s*karo|रिफ्रेश)\b', 'refresh view'),
+        (r'\b(?:gaana|music|song|गाना|संगीत)\b', 'music'),
+        (r'\b(?:video|वीडियो)\b', 'video'),
+        (r'\b(?:tasveer|photo|image|तस्वीर|फोटो)\b', 'image'),
+        (r'\b(?:file|document|फ़ाइल|फाइल|दस्तावेज़)\b', 'document'),
+        (r'\b(?:panna|page|पेज|पन्ना)\b', 'page'),
+        (r'\b(?:karo|kijiye|करो|करें|कीजिए)\b', ''),
+        (r'\b(?:par|me|पर|में)\b', 'on'),
+        (r'\b(?:aur|और)\b', 'and'),
+        (r'\b(?:fir|phir|फिर)\b', 'then'),
+    ]
+    s = text
+    for pat, repl in translations:
+        s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+    # Strip any residual Devanagari characters
+    s = re.sub(r'[\u0900-\u097F]+', 'action', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    if not s or s == 'action':
+        s = "Execute target desktop action"
+    desc = s[0].upper() + s[1:]
+    expected = f"Completed '{desc}'"
+    return desc, expected
 
 
 @dataclass
 class SubGoal:
     """Atomic semantic sub-goal directive emitted by Layer 1 Cognitive Planner.
 
-    Strict Invariant: NEVER contains low-level (x, y) coordinates.
+    Strict Invariants:
+    1. NEVER contains low-level (x, y) coordinates.
+    2. Strictly English only (no Hindi/Devanagari text permitted per user requirements).
     """
 
     index: int
@@ -84,6 +137,8 @@ class SubGoal:
     def __post_init__(self) -> None:
         _validate_no_coordinates(self.description)
         _validate_no_coordinates(self.expected_ui_state)
+        _validate_english_only(self.description)
+        _validate_english_only(self.expected_ui_state)
 
     @property
     def is_completed(self) -> bool:
@@ -263,7 +318,7 @@ class CognitivePlanner:
             r'\baur\s+phir\b|\baur\s+fir\b|\baur\b|\bphir\b|\bfir\b|'
             r'\bkhol\s*kar\s*ke\b|\bkhol\s*kar\b|\bkhol\s*ke\b|\bkholkar\b|\bkholke\b|'
             r'\bkar\s*ke\b|\bke\s+baad\b|'
-            r'और\s+फिर|और|फिर|के\s+बाद|तथा|व|'
+            r'और\s+फिर|और|फिर|के\s+बाद|\s+तथा\s+|\s+व\s+|\bतथा\b|'
             r'खोल\s*कर\s*के|खोलकर|खोल\s*कर|खोलके|खोल\s*के'
             r')\s*'
         )
@@ -272,7 +327,10 @@ class CognitivePlanner:
         return clauses if clauses else [text]
 
     def _decompose_multilingual_rules(self, goal: str) -> List[SubGoal]:
-        """Generates coordinate-free semantic sub-goals using deterministic linguistic patterns."""
+        """Generates coordinate-free semantic sub-goals using deterministic linguistic patterns.
+
+        Guarantees strict invariant: All descriptions and expected UI states are strictly English.
+        """
         clauses = self._split_clauses(goal)
         subgoals: List[SubGoal] = []
 
@@ -290,6 +348,8 @@ class CognitivePlanner:
             "गूगल क्रोम": ("Google Chrome", "Google Chrome window active and address bar visible"),
             "edge": ("Microsoft Edge", "Microsoft Edge window active"),
             "browser": ("Web Browser", "Browser window active"),
+            "ब्राउज़र": ("Web Browser", "Browser window active"),
+            "ब्राउजर": ("Web Browser", "Browser window active"),
             "paint": ("Paint", "Paint application canvas ready"),
             "पेंट": ("Paint", "Paint application canvas ready"),
             "explorer": ("File Explorer", "File Explorer window open"),
@@ -337,6 +397,35 @@ class CognitivePlanner:
                     idx += 1
                     continue
 
+            # Pattern B0: Close / Exit application or window (must precede launch pattern)
+            # e.g., "Chrome band karo", "Notepad close karo", "window band kar do", "विंडो बंद करो", "नोटपैड बंद करो"
+            close_verbs = [
+                "close", "band karo", "band kar do", "band kijiye", "band", "exit", "quit", "hatao",
+                "बंद करो", "बंद करें", "बंद कर दें", "बंद कीजिए", "हटाओ", "बंद"
+            ]
+            if any(cv in lower for cv in close_verbs):
+                matched_app = None
+                for app_key, (app_name, _) in app_catalog.items():
+                    if re.search(r'(?:\b|^)' + re.escape(app_key) + r'(?:\b|$)', lower):
+                        matched_app = app_name
+                        break
+                if matched_app:
+                    subgoals.append(SubGoal(
+                        index=idx,
+                        description=f"Close {matched_app} application",
+                        expected_ui_state=f"{matched_app} application closed and window removed",
+                    ))
+                    idx += 1
+                    continue
+                else:
+                    subgoals.append(SubGoal(
+                        index=idx,
+                        description="Close active window",
+                        expected_ui_state="Target window closed and desktop returned to foreground",
+                    ))
+                    idx += 1
+                    continue
+
             # Pattern B: Search query in search engine or app
             # e.g., "Google par OpenAI search karo", "search for OpenAI on Google", "गूगल पर OpenAI सर्च करो"
             search_match = re.search(
@@ -351,19 +440,23 @@ class CognitivePlanner:
             )
 
             if hinglish_search:
-                platform = hinglish_search.group(1).strip()
-                query = hinglish_search.group(2).strip()
+                platform_raw = hinglish_search.group(1).strip()
+                query_raw = hinglish_search.group(2).strip()
+                platform = "Google" if "गूगल" in platform_raw or "google" in platform_raw.lower() else platform_raw.title()
+                query = re.sub(r'[\u0900-\u097F]+', 'target query', query_raw)
                 subgoals.append(SubGoal(
                     index=idx,
-                    description=f"Search for '{query}' on {platform.title()}",
-                    expected_ui_state=f"Search results for '{query}' displayed on {platform.title()}",
+                    description=f"Search for '{query}' on {platform}",
+                    expected_ui_state=f"Search results for '{query}' displayed on {platform}",
                 ))
                 idx += 1
                 continue
             elif search_match and search_match.group(1).strip().lower() not in ("karo", "kijiye", "करो", "करें"):
-                query = search_match.group(1).strip()
-                platform = search_match.group(2).strip() if search_match.group(2) else ""
-                dest = f" on {platform.title()}" if platform else ""
+                query_raw = search_match.group(1).strip()
+                platform_raw = search_match.group(2).strip() if search_match.group(2) else ""
+                platform = "Google" if "गूगल" in platform_raw or "google" in platform_raw.lower() else platform_raw.title()
+                query = re.sub(r'[\u0900-\u097F]+', 'target query', query_raw)
+                dest = f" on {platform}" if platform else ""
                 subgoals.append(SubGoal(
                     index=idx,
                     description=f"Search for '{query}'{dest}",
@@ -394,10 +487,11 @@ class CognitivePlanner:
                             expected_ui_state=expected_ui,
                         ))
                     else:
+                        clean_query = re.sub(r'[\u0900-\u097F]+', 'target query', query)
                         subgoals.append(SubGoal(
                             index=idx,
-                            description=f"Search for '{query}'",
-                            expected_ui_state=f"Search results for '{query}' displayed",
+                            description=f"Search for '{clean_query}'",
+                            expected_ui_state=f"Search results for '{clean_query}' displayed",
                         ))
                     idx += 1
                     continue
@@ -409,7 +503,7 @@ class CognitivePlanner:
                     matched_app = (app_name, expected_ui)
                     break
 
-            launch_verbs = ["open", "launch", "start", "run", "kholo", "chalao", "karo", "खोलो", "खोलें", "खोलिए", "चलाओ", "शुरू"]
+            launch_verbs = ["open", "launch", "start", "run", "kholo", "khol do", "kholiye", "chalao", "खोलो", "खोलें", "खोलिए", "चलाओ", "शुरू"]
             is_standalone_app = lower in app_catalog or any(lower == k for k in app_catalog)
             if matched_app and (any(act in lower for act in launch_verbs) or is_standalone_app):
                 app_name, expected_ui = matched_app
@@ -425,10 +519,11 @@ class CognitivePlanner:
             type_m = re.search(r'(?:type|write|likho|enter|टाइप|लिखो|दर्ज)\s+(?:करो|करें)?\s*(.+)', clean, re.IGNORECASE)
             if type_m:
                 text_to_type = type_m.group(1).strip()
+                clean_type_text = re.sub(r'[\u0900-\u097F]+', 'target text', text_to_type)
                 subgoals.append(SubGoal(
                     index=idx,
-                    description=f"Type text '{text_to_type}' into active target field",
-                    expected_ui_state=f"Text '{text_to_type}' visible in target field",
+                    description=f"Type text '{clean_type_text}' into active target field",
+                    expected_ui_state=f"Text '{clean_type_text}' visible in target field",
                 ))
                 idx += 1
                 continue
@@ -439,7 +534,7 @@ class CognitivePlanner:
                 expr = clean
                 for w in ["calculate", "hisab karo", "hisab", "karo", "गणना करो", "गणना", "हिसाब"]:
                     expr = expr.replace(w, "")
-                expr = expr.strip()
+                expr = re.sub(r'[\u0900-\u097F]+', '', expr).strip()
                 subgoals.append(SubGoal(
                     index=idx,
                     description=f"Calculate {expr or 'expression'}",
@@ -458,21 +553,87 @@ class CognitivePlanner:
                 idx += 1
                 continue
 
-            # Default fallback for arbitrary clause (guaranteed sanitized)
+            # Pattern G: Media playback (audio, song, video)
+            if any(k in lower for k in ["play", "bajaao", "बजाओ", "गाना", "video chalao", "वीडियो चलाओ", "music", "song", "वीडियो"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Play media or audio playback",
+                    expected_ui_state="Media player or browser playback active",
+                ))
+                idx += 1
+                continue
+
+            # Pattern H: Refresh page or view
+            if any(k in lower for k in ["refresh", "reload", "रिफ्रेश", "रीलोड"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Refresh current page or view",
+                    expected_ui_state="Page reloaded with refreshed content",
+                ))
+                idx += 1
+                continue
+
+            # Pattern I: Window minimize / maximize
+            if any(k in lower for k in ["minimize", "chhota karo", "छोटा करो"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Minimize active window",
+                    expected_ui_state="Active window minimized to taskbar",
+                ))
+                idx += 1
+                continue
+            if any(k in lower for k in ["maximize", "bada karo", "बड़ा करो"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Maximize active window",
+                    expected_ui_state="Active window maximized to full screen",
+                ))
+                idx += 1
+                continue
+
+            # Pattern J: Clipboard copy / paste / select all
+            if any(k in lower for k in ["copy", "copy karo", "कॉपी करो"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Copy selected content",
+                    expected_ui_state="Selected text or element copied to clipboard",
+                ))
+                idx += 1
+                continue
+            if any(k in lower for k in ["paste", "paste karo", "पेस्ट करो"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Paste clipboard content",
+                    expected_ui_state="Clipboard content pasted into active field",
+                ))
+                idx += 1
+                continue
+            if any(k in lower for k in ["select all", "sab select", "सब सेलेक्ट"]):
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description="Select all content",
+                    expected_ui_state="All items or text in active view selected",
+                ))
+                idx += 1
+                continue
+
+            # Default fallback for arbitrary clause (guaranteed translated to pure English)
+            desc_en, expected_en = _translate_to_english_directive(clean)
             subgoals.append(SubGoal(
                 index=idx,
-                description=clean,
-                expected_ui_state=f"Completed '{clean}'",
+                description=desc_en,
+                expected_ui_state=expected_en,
             ))
             idx += 1
 
         # Fallback if no subgoals generated
         if not subgoals:
             sanitized_goal = _sanitize_coordinates(goal)
+            desc_en, expected_en = _translate_to_english_directive(sanitized_goal)
             subgoals.append(SubGoal(
                 index=1,
-                description=sanitized_goal,
-                expected_ui_state=f"Accomplish goal: '{sanitized_goal}'",
+                description=desc_en,
+                expected_ui_state=expected_en,
             ))
 
         return subgoals

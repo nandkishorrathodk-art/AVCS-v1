@@ -129,11 +129,17 @@ class AceSession:
 
     def is_stuck(self, threshold: int = 2, new_action: Optional[Action] = None) -> bool:
         """Returns True if the session has repeated the same action at or above threshold times."""
+        if not self.steps and new_action is None:
+            return False
+        act_kind = new_action.kind.value if new_action is not None else (self.steps[-1].action.get("kind") if self.steps else "")
+        if act_kind in ("stop", "wait"):
+            return False
         if self.get_repetition_count(new_action=new_action) >= threshold:
             return True
         if new_action is not None and self.count_recent_matches(new_action, window=5) >= threshold:
             return True
         return False
+
 
     def record_step(
         self,

@@ -1239,7 +1239,8 @@ class TestBoostEngineEnhancements(unittest.TestCase):
 
         # Mock foreground window as ConsoleWindowClass
         with patch.object(runner.user32, "GetForegroundWindow", return_value=0x1234), \
-             patch.object(runner.user32, "GetClassNameW", side_effect=lambda hwnd, buf, size: setattr(buf, "value", "ConsoleWindowClass")):
+             patch.object(runner.user32, "GetClassNameW", side_effect=lambda hwnd, buf, size: setattr(buf, "value", "ConsoleWindowClass")), \
+             patch.object(runner.computer, "get_cursor_pos", return_value=(500, 500)):
             mock_client = MagicMock()
             mock_client.model = "gpt-6-astra"
             # Ungrounded typing action into terminal
@@ -2622,6 +2623,163 @@ class TestPhase2EdgeCases(unittest.TestCase):
         planner.decompose("Launch calculator")
         elapsed = time.monotonic() - t0
         self.assertGreaterEqual(elapsed, 0.04)
+
+    def test_subgoal_english_only_invariant(self):
+        # Strict user requirement: SubGoal must be strictly English (no Hindi text)
+        with self.assertRaises(ValueError) as ctx:
+            SubGoal(index=1, description="नोटपैड खोलो", expected_ui_state="Done")
+        self.assertIn("English only", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx2:
+            SubGoal(index=1, description="Open Notepad", expected_ui_state="विंडो सक्रिय")
+        self.assertIn("English only", str(ctx2.exception))
+
+    def test_extended_coordinate_rejection(self):
+        coords = [
+            "<500, 400>",
+            "point: 500, 400",
+            "location: 500, 400",
+            "click at 500px, 400px",
+            "500px, 400px",
+            "x=500 y=400",
+        ]
+        for c in coords:
+            with self.assertRaises(ValueError):
+                _validate_no_coordinates(c)
+
+    def test_close_and_media_commands_decomposition(self):
+        planner = CognitivePlanner()
+        # Close / Exit commands
+        s_chrome = planner.decompose("Chrome band karo")
+        self.assertEqual(len(s_chrome), 1)
+        self.assertIn("Close Google Chrome", s_chrome[0].description)
+        self.assertIn("closed and window removed", s_chrome[0].expected_ui_state)
+
+        s_np = planner.decompose("Notepad close karo")
+        self.assertEqual(len(s_np), 1)
+        self.assertIn("Close Notepad", s_np[0].description)
+
+        # Media playback
+        s_media = planner.decompose("गाना बजाओ")
+        self.assertEqual(len(s_media), 1)
+        self.assertIn("Play media", s_media[0].description)
+
+        # Save document
+        s_save = planner.decompose("फ़ाइल सेव करो")
+        self.assertEqual(len(s_save), 1)
+        self.assertIn("Save document", s_save[0].description)
+
+    def test_va_character_delimiter_no_word_chopping(self):
+        planner = CognitivePlanner()
+        # Words containing the character 'व' must not be split
+        s_vid = planner.decompose("वीडियो चलाओ")
+        self.assertEqual(len(s_vid), 1)
+        self.assertIn("Play media", s_vid[0].description)
+
+        s_save = planner.decompose("फाइल सेव करो")
+        self.assertEqual(len(s_save), 1)
+        self.assertIn("Save document", s_save[0].description)
+
+    def test_replanning_preserves_subsequent_subgoals(self):
+        planner = CognitivePlanner()
+        initial_subgoals = [
+            SubGoal(index=1, description="Open Windows Start Menu", expected_ui_state="Start menu open"),
+            SubGoal(index=2, description="Click target button", expected_ui_state="Button clicked"),
+            SubGoal(index=3, description="Save document or current file", expected_ui_state="File saved"),
+        ]
+
+        mock_agent = MagicMock()
+        # Step 1: Open start menu
+        # Step 2, 3, 4: Loop on clicking button -> triggers replan for subgoal 2
+        # Step 5: Escape key handled (completes replanned subgoal 2)
+        # Step 6: Retry handled (completes replanned subgoal 3)
+        # Step 7: Save document handled (completes preserved subgoal 3 -> now index 4)
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.STOP, reason="Start opened"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 300), reason="Click button"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 300), reason="Click button"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 300), reason="Click button"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Escape handled"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Retry handled"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Save done"), 50.0),
+        ]
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        runner = AceRunner(agent=mock_agent, computer=mock_computer, planner=planner, enable_voice=False)
+
+        session = runner.run(
+            goal="Composite workflow",
+            max_steps=10,
+            dry_run=True,
+            subgoals=initial_subgoals,
+        )
+
+        # Subgoal 3 ('Save document or current file') must still be present in the session subgoals!
+        subgoal_descs = [s["description"] for s in session.subgoals]
+        self.assertTrue(any("Save document" in d for d in subgoal_descs))
+        # Total subgoals should be 4 (step 1 + 2 replanned + step 3)
+        self.assertEqual(len(session.subgoals), 4)
+        for i, s in enumerate(session.subgoals, start=1):
+            self.assertEqual(s["index"], i)
+
+    def test_final_subgoal_stop_verification_failure_continues_execution(self):
+        mock_agent = MagicMock()
+        # Step 1: STOP (fails verification -> triggers replan into Route 4: Win+R then Type).
+        # Step 2: Key Win+R (executes on replanned subgoal 1).
+        # Step 3: STOP (completes replanned subgoal 1).
+        # Step 4: Type 'notepad' (executes on replanned subgoal 2).
+        # Step 5: STOP (completes replanned subgoal 2, passes verification).
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.STOP, reason="First attempt claimed launched"), 50.0),
+            (Action(kind=ActionKind.KEY, keys=["win", "r"], reason="Open run dialog"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Run dialog opened"), 50.0),
+            (Action(kind=ActionKind.TYPE, text="notepad", reason="Type notepad"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Notepad confirmed launched"), 50.0),
+        ]
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = WindowsComputer()
+        mock_verifier = DualStageVerifier(computer=mock_computer)
+        mock_verifier.verify_semantic = MagicMock(side_effect=[
+            Stage2Result(passed=False, details="Verification failed: window not found"),
+            Stage2Result(passed=True, details="Verification passed: Run dialog active"),
+            Stage2Result(passed=True, details="Verification passed: Notepad active"),
+            Stage2Result(passed=True, details="Final verification passed"),
+        ])
+
+        planner = CognitivePlanner()
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            verifier=mock_verifier,
+            planner=planner,
+            enable_voice=False,
+        )
+
+        session = runner.run(goal="Launch notepad", max_steps=10, dry_run=False)
+        # Must execute more than 1 step (continued to execute replanned steps)
+        self.assertGreater(session.step_count, 1)
+        self.assertTrue(session.is_complete)
+        self.assertEqual(session.stop_reason, "Notepad confirmed launched")
+
+    def test_visual_cortex_gate_upsampling_small_frame(self):
+        import numpy as np
+        gate = VisualCortexGate(source="synthetic")
+        # 64x64 low-res image frame
+        small_frame = np.full((64, 64, 3), 180, dtype=np.uint8)
+        t_4ch = gate._convert_to_tensor_4ch(small_frame)
+        self.assertEqual(t_4ch.shape, (1, 4, 128, 128))
+        res = gate.check_stability(small_frame)
+        self.assertTrue(res.is_stable)
+
+    def test_circular_import_safety(self):
+        import avcs.eye_stream
+        import avcs.cortex.gate
+        self.assertTrue(hasattr(avcs.eye_stream, "EyeStream"))
+        self.assertTrue(hasattr(avcs.cortex.gate, "VisualCortexGate"))
 
 
 if __name__ == "__main__":

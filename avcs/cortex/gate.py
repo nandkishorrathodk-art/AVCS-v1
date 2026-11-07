@@ -25,7 +25,10 @@ from avcs.cortex.model import (
     StreamingVisualCortexV2,
 )
 from avcs.cortex.preprocessor import EdgeLuminancePreprocessor
-from avcs.eye_stream import EyeFrame, EyeStream
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from avcs.eye_stream import EyeFrame, EyeStream
 
 logger = logging.getLogger("avcs.cortex.gate")
 
@@ -93,8 +96,14 @@ class VisualCortexGate:
 
         if cortex is not None:
             self.cortex = cortex
+        elif source != "synthetic" and load_weights:
+            try:
+                from avcs.eye_stream import EyeStream
+                self.cortex = EyeStream(source=source, load_weights=load_weights, device=str(self.device))
+            except Exception:
+                self.cortex = StreamingVisualCortexV2()
         else:
-            self.cortex = EyeStream(source=source, load_weights=load_weights, device=str(self.device))
+            self.cortex = StreamingVisualCortexV2()
 
         self.cortex.to(self.device)
         self.cortex.eval()
@@ -159,8 +168,8 @@ class VisualCortexGate:
 
         H, W = raw_rgb.shape[:2]
         if (H, W) != (128, 128):
-            sy = max(1.0, float(H) / 128.0)
-            sx = max(1.0, float(W) / 128.0)
+            sy = float(H) / 128.0
+            sx = float(W) / 128.0
             y_idx = np.minimum((np.arange(128) * sy).astype(int), H - 1)
             x_idx = np.minimum((np.arange(128) * sx).astype(int), W - 1)
             frame_small = raw_rgb[y_idx[:, None], x_idx]
