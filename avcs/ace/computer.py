@@ -12,6 +12,8 @@ import ctypes.wintypes
 import io
 import math
 import sys
+from enum import Enum
+import re
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -126,11 +128,160 @@ class Observation:
     capture_time_ms: float = 0.0
 
 
+class SafetyRiskLevel(str, Enum):
+    """Categorized risk levels for desktop actuation."""
+    SAFE = "safe"
+    CONSOLE_HAZARD = "console_hazard"
+    FILE_DELETION = "permanent_file_deletion"
+    FINANCIAL_PAYMENT = "financial_payment"
+    OUTBOUND_COMMUNICATION = "outbound_communication"
+    SENSITIVE_SYSTEM = "sensitive_system"
+
+
+@dataclass
+class SafetyCheckResult:
+    """Result of an Execution Safety Firewall evaluation."""
+    allowed: bool
+    risk_level: SafetyRiskLevel
+    reason: str
+    requires_confirmation: bool = False
+
+
+class ExecutionSafetyFirewall:
+    """Execution Safety Firewall guarding against destructive or irreversible actions.
+
+    Enforces P1 guardrails:
+    1. Console protection: Blocks ungrounded terminal typing.
+    2. Irreversible operation gating: Permanent file deletion, financial payments, and outbound messaging.
+    """
+
+    DELETION_PATTERNS = [
+        r'\b(?:del|erase)\s+.*[/\-](?:f|q|s)\b',
+        r'\b(?:rmdir|rd)\s+[/\-]s\b',
+        r'\brm\s+-[rRfF]+\b',
+        r'\bformat\s+[a-zA-Z]:',
+        r'\bRemove-Item\b.*(?:-Recurse|-Force)\b',
+        r'\b(?:del|erase|rmdir|rd|ri)\s+.*(?:-recurse|-force)\b',
+        r'\b(?:sdelete|shred|wipe)\b',
+        r'\bempty\s+(?:the\s+)?recycle\s*bin\b',
+        r'\b(?:drop|truncate)\s+(?:database|table)\b',
+        r'\b(?:diskpart|fdisk|mkfs)\b',
+        r'\bgit\s+(?:clean\s+-[a-zA-Z]*f|reset\s+--hard)\b',
+    ]
+
+    FINANCIAL_PATTERNS = [
+        r'\b(?:credit\s*card|cvv|cvc|card\s*number|expiry\s*date)\b',
+        r'\b(?:pay\s*now|make\s*payment|send\s*payment|transfer\s*funds)\b',
+        r'\b(?:authorize\s*transaction|confirm\s*purchase|place\s*order|buy\s*now)\b',
+        r'\b(?:bank\s*account|routing\s*number|wire\s*transfer)\b',
+        r'\b(?:checkout|confirm\s*order|complete\s*order|complete\s*purchase|proceed\s*to\s*pay)\b',
+        r'\b(?:paypal|upi\s*id|crypto\s*transfer|bitcoin|ethereum)\b',
+    ]
+
+    COMMUNICATION_PATTERNS = [
+        r'\b(?:send\s+(?:email|message|sms|dm|reply|tweet)|compose\s+email|post\s+(?:tweet|update|status|message)|send\s+to\s+channel)\b',
+        r'\b(?:send\s*slack|discord\s*send|telegram\s*send|whatsapp\s*send)\b',
+        r'\b(?:click\s+(?:send|submit|post|tweet|publish)\b)',
+    ]
+
+    CONSOLE_CLASSES = ("cascadia", "consolewindowclass", "windowsterminal", "mintty", "conemuwindowclass")
+
+    def __init__(self, require_confirmation: bool = True) -> None:
+        self.require_confirmation = require_confirmation
+
+    def evaluate(
+        self,
+        action: Action,
+        active_window_class: Optional[str] = None,
+        user_confirmed: bool = False,
+    ) -> SafetyCheckResult:
+        """Evaluates an action for safety hazards and returns approval result."""
+        # 1. Console protection: ungrounded typing into terminal
+        if action.kind == ActionKind.TYPE and action.coordinate is None:
+            if active_window_class and any(term in active_window_class.lower() for term in self.CONSOLE_CLASSES):
+                return SafetyCheckResult(
+                    allowed=False,
+                    risk_level=SafetyRiskLevel.CONSOLE_HAZARD,
+                    reason=f"Execution Safety Firewall: Active console '{active_window_class}' detected. Rejecting ungrounded typing into terminal to prevent corruption. Click target UI element first.",
+                    requires_confirmation=False,
+                )
+
+        text_content = ""
+        if action.text:
+            text_content += " " + action.text
+        if action.reason:
+            text_content += " " + action.reason
+
+        # 2. Check for Shift+Delete hotkey (permanent file deletion in Windows)
+        if action.kind == ActionKind.KEY and action.keys:
+            norm_keys = [k.lower().strip() for k in action.keys]
+            if any(k in ("shift", "shift_l", "shift_r") for k in norm_keys) and any(k in ("delete", "del") for k in norm_keys):
+                if not user_confirmed and self.require_confirmation:
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.FILE_DELETION,
+                        reason="Execution Safety Firewall: High-risk permanent file deletion shortcut (Shift+Delete) detected. Confirmation required before proceeding.",
+                        requires_confirmation=True,
+                    )
+
+        # 3. Permanent file deletion patterns
+        for pat in self.DELETION_PATTERNS:
+            if re.search(pat, text_content, re.IGNORECASE):
+                if not user_confirmed and self.require_confirmation:
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.FILE_DELETION,
+                        reason="Execution Safety Firewall: High-risk permanent file deletion detected. Confirmation required before proceeding.",
+                        requires_confirmation=True,
+                    )
+
+        # 4. Financial / Payment patterns
+        for pat in self.FINANCIAL_PATTERNS:
+            if re.search(pat, text_content, re.IGNORECASE):
+                if not user_confirmed and self.require_confirmation:
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.FINANCIAL_PAYMENT,
+                        reason="Execution Safety Firewall: High-risk financial/payment action detected. Confirmation required before proceeding.",
+                        requires_confirmation=True,
+                    )
+
+        # 5. Outbound communications
+        for pat in self.COMMUNICATION_PATTERNS:
+            if re.search(pat, text_content, re.IGNORECASE):
+                if not user_confirmed and self.require_confirmation:
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.OUTBOUND_COMMUNICATION,
+                        reason="Execution Safety Firewall: High-risk outbound communication detected. Confirmation required before proceeding.",
+                        requires_confirmation=True,
+                    )
+
+        return SafetyCheckResult(
+            allowed=True,
+            risk_level=SafetyRiskLevel.SAFE,
+            reason="Action approved by Execution Safety Firewall.",
+            requires_confirmation=False,
+        )
+
+
 class WindowsComputer:
     """Real-time Windows Desktop Observer and Biological Actuator."""
 
     CANONICAL_WIDTH = 1280
     CANONICAL_HEIGHT = 800
+
+    # Calibrated Fitts's Law duration boundaries: 50 ms to 120 ms at 100 Hz
+    FITTS_MIN_DURATION_S = 0.050
+    FITTS_MAX_DURATION_S = 0.120
+
+    def calculate_fitts_duration(self, dist: float) -> float:
+        """Calculates 5th-order minimum-jerk flight duration calibrated to 50ms - 120ms at 100 Hz.
+
+        Eliminates artificial latency while ensuring biological minimum-jerk smoothness without teleportation.
+        """
+        raw_dur = 0.050 + 0.00014 * dist
+        return min(self.FITTS_MAX_DURATION_S, max(self.FITTS_MIN_DURATION_S, raw_dur))
 
     def __init__(self) -> None:
         if sys.platform != "win32":
@@ -312,8 +463,8 @@ class WindowsComputer:
         if duration_ms is not None and duration_ms > 0:
             duration_sec = duration_ms / 1000.0
         else:
-            # Fitts's Law scaling: T = clamp(0.20, 0.45, 0.18 + 0.00030 * dist) seconds
-            duration_sec = min(0.45, max(0.20, 0.18 + 0.00030 * dist))
+            # Calibrated Fitts's Law duration clamp: 50 ms - 120 ms (0.05s - 0.12s) at 100 Hz
+            duration_sec = self.calculate_fitts_duration(dist)
 
         # ~100 Hz sampling rate
         steps = max(5, int(round(duration_sec * 100.0)))
@@ -527,16 +678,23 @@ class WindowsComputer:
                 self._move_minimum_jerk(nx, ny)
 
         elif action.kind == ActionKind.LEFT_CLICK_DRAG:
-            if action.start_coordinate and action.end_coordinate:
+            target_end = action.end_coordinate or action.coordinate
+            if action.start_coordinate and target_end:
                 sx, sy = self._canonical_to_native(*action.start_coordinate)
-                ex, ey = self._canonical_to_native(*action.end_coordinate)
-                self._move_minimum_jerk(sx, sy)
-                time.sleep(0.035)
-                self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=sx, y=sy)
-                time.sleep(0.065)
-                self._move_minimum_jerk(ex, ey)
-                time.sleep(0.035)
-                self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=ex, y=ey)
+                ex, ey = self._canonical_to_native(*target_end)
+            elif target_end:
+                sx, sy = self.get_cursor_pos()
+                ex, ey = self._canonical_to_native(*target_end)
+            else:
+                sx, sy = self.get_cursor_pos()
+                ex, ey = sx, sy
+            self._move_minimum_jerk(sx, sy)
+            time.sleep(0.035)
+            self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=sx, y=sy)
+            time.sleep(0.065)
+            self._move_minimum_jerk(ex, ey)
+            time.sleep(0.035)
+            self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=ex, y=ey)
 
         elif action.kind == ActionKind.SCROLL:
             if action.coordinate:

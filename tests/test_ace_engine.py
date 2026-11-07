@@ -14,16 +14,38 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from avcs.ace.actions import Action, ActionKind
+from avcs.ace.actions import Action, ActionAdapter, ActionKind
 from avcs.ace.agent import AceAgent
 from avcs.ace.client import CustomLLMClient
-from avcs.ace.computer import INPUT, Observation, WindowsComputer
-from avcs.ace.runner import AceRunner, SafetyBreakoutError
+from avcs.ace.computer import (
+    INPUT,
+    ExecutionSafetyFirewall,
+    Observation,
+    SafetyCheckResult,
+    SafetyRiskLevel,
+    WindowsComputer,
+)
+from avcs.ace.runner import (
+    AceRunner,
+    DualStageVerificationResult,
+    DualStageVerifier,
+    SafetyBreakoutError,
+    Stage1Result,
+    Stage2Result,
+    TrajectoryLogger,
+)
 from avcs.ace.session import AceSession
+from avcs.ace.skills_vault.cache import (
+    SkillCache,
+    SkillCacheEntry,
+    SkillLookupResult,
+    UIStateAnchor,
+)
 
 
 class TestActionSpace(unittest.TestCase):
@@ -786,6 +808,19 @@ class TestWindowsComputer(unittest.TestCase):
 class TestAceRunner(unittest.TestCase):
     """Verifies autonomous multi-step execution loop and safety breakout."""
 
+    def setUp(self):
+        import tempfile
+        self._temp_vault = tempfile.TemporaryDirectory()
+        self._patch_logger = patch("avcs.ace.runner.TrajectoryLogger", lambda *a, **k: TrajectoryLogger(vault_dir=self._temp_vault.name))
+        self._patch_cache = patch("avcs.ace.runner.SkillCache", lambda *a, **k: SkillCache(vault_dir=self._temp_vault.name))
+        self._patch_logger.start()
+        self._patch_cache.start()
+
+    def tearDown(self):
+        self._patch_cache.stop()
+        self._patch_logger.stop()
+        self._temp_vault.cleanup()
+
     def test_autonomous_runner_execution_until_stop(self):
         mock_client = MagicMock()
         # Multi-step sequence: Step 1 click, Step 2 type, Step 3 stop
@@ -1028,17 +1063,23 @@ class TestAceRunner(unittest.TestCase):
         from avcs.ace.streamer import ScreenStreamer
         computer = WindowsComputer()
         streamer = ScreenStreamer(computer=computer, target_fps=30.0, image_format="webp")
-        streamer.start()
+        streamer.start(startup_timeout=1.5)
         try:
             self.assertTrue(streamer.is_running)
-            time.sleep(0.1)
+            obs = None
+            for _ in range(15):
+                obs = streamer.get_latest_observation()
+                if obs is not None:
+                    break
+                time.sleep(0.1)
+            self.assertIsNotNone(obs, "ScreenStreamer failed to capture a frame within timeout")
             t0 = time.time()
-            obs = streamer.get_latest_observation()
+            obs2 = streamer.get_latest_observation()
             read_latency_ms = (time.time() - t0) * 1000.0
-            self.assertIsNotNone(obs)
+            self.assertIsNotNone(obs2)
             self.assertLess(read_latency_ms, 5.0)  # Instant in-memory pointer read
-            self.assertEqual(obs.width, 1280)
-            self.assertEqual(obs.height, 800)
+            self.assertEqual(obs2.width, 1280)
+            self.assertEqual(obs2.height, 800)
         finally:
             streamer.stop()
             self.assertFalse(streamer.is_running)
@@ -1344,6 +1385,677 @@ class TestBoostEngineEnhancements(unittest.TestCase):
              patch.object(sys, "exit") as mock_exit:
             main()
             mock_exit.assert_called_once_with(0)
+
+
+class TestActionAdapter(unittest.TestCase):
+    """Verifies ActionAdapter normalization across Anthropic, OpenAI, AVCS Grammar, and reason fallback."""
+
+    def test_anthropic_computer_use_format(self):
+        # Key Return -> enter
+        a1 = ActionAdapter.adapt({"action": "key", "text": "Return"})
+        self.assertEqual(a1.kind, ActionKind.KEY)
+        self.assertEqual(a1.keys, ["enter"])
+
+        # Key BackSpace -> backspace
+        a2 = ActionAdapter.adapt({"action": "key", "text": "BackSpace"})
+        self.assertEqual(a2.kind, ActionKind.KEY)
+        self.assertEqual(a2.keys, ["backspace"])
+
+        # Key Super_L -> win
+        a3 = ActionAdapter.adapt({"action": "key", "text": "Super_L"})
+        self.assertEqual(a3.kind, ActionKind.KEY)
+        self.assertEqual(a3.keys, ["win"])
+
+        # Mouse move
+        a4 = ActionAdapter.adapt({"action": "mouse_move", "coordinate": [292, 768]})
+        self.assertEqual(a4.kind, ActionKind.MOUSE_MOVE)
+        self.assertEqual(a4.coordinate, (292, 768))
+
+        # Clicks
+        a5 = ActionAdapter.adapt({"action": "left_click", "coordinate": [150, 250]})
+        self.assertEqual(a5.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a5.coordinate, (150, 250))
+
+        a6 = ActionAdapter.adapt({"action": "right_click", "coordinate": [300, 400]})
+        self.assertEqual(a6.kind, ActionKind.RIGHT_CLICK)
+        self.assertEqual(a6.coordinate, (300, 400))
+
+        a7 = ActionAdapter.adapt({"action": "double_click", "coordinate": [500, 600]})
+        self.assertEqual(a7.kind, ActionKind.DOUBLE_CLICK)
+        self.assertEqual(a7.coordinate, (500, 600))
+
+        a8 = ActionAdapter.adapt({"action": "triple_click", "coordinate": [500, 600]})
+        self.assertEqual(a8.kind, ActionKind.TRIPLE_CLICK)
+        self.assertEqual(a8.coordinate, (500, 600))
+
+        # Type
+        a9 = ActionAdapter.adapt({"action": "type", "text": "Hello Anthropic"})
+        self.assertEqual(a9.kind, ActionKind.TYPE)
+        self.assertEqual(a9.text, "Hello Anthropic")
+
+        # Screenshot / cursor_position -> WAIT
+        a10 = ActionAdapter.adapt({"action": "screenshot"})
+        self.assertEqual(a10.kind, ActionKind.WAIT)
+
+        a11 = ActionAdapter.adapt({"action": "cursor_position"})
+        self.assertEqual(a11.kind, ActionKind.WAIT)
+
+    def test_anthropic_computer_nested_wrapper(self):
+        # Nested inside {"name": "computer", "input": {...}}
+        payload = {
+            "name": "computer",
+            "input": {
+                "action": "left_click",
+                "coordinate": [450, 550],
+            },
+        }
+        act = ActionAdapter.adapt(payload)
+        self.assertEqual(act.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(act.coordinate, (450, 550))
+
+    def test_openai_tool_calling_format(self):
+        # Function call format
+        payload1 = {
+            "function": {
+                "name": "left_click",
+                "arguments": json.dumps({"coordinate": [292, 768]}),
+            }
+        }
+        a1 = ActionAdapter.adapt(payload1)
+        self.assertEqual(a1.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a1.coordinate, (292, 768))
+
+        # Tool calls array format
+        payload2 = {
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "type",
+                        "arguments": json.dumps({"text": "Notepad"}),
+                    },
+                }
+            ]
+        }
+        a2 = ActionAdapter.adapt(payload2)
+        self.assertEqual(a2.kind, ActionKind.TYPE)
+        self.assertEqual(a2.text, "Notepad")
+
+        # Nested parameters format
+        payload3 = {
+            "action": "key",
+            "parameters": {"keys": ["ctrl", "s"]},
+        }
+        a3 = ActionAdapter.adapt(payload3)
+        self.assertEqual(a3.kind, ActionKind.KEY)
+        self.assertEqual(a3.keys, ["ctrl", "s"])
+
+        # Nested input format
+        payload4 = {
+            "input": {"action": "wait", "duration": 1.8}
+        }
+        a4 = ActionAdapter.adapt(payload4)
+        self.assertEqual(a4.kind, ActionKind.WAIT)
+        self.assertEqual(a4.duration, 1.8)
+
+    def test_avcs_fast_action_grammar_tokens(self):
+        # CLICK
+        a1 = ActionAdapter.adapt("ACT:CLICK 292 768")
+        self.assertEqual(a1.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a1.coordinate, (292, 768))
+
+        # TYPE
+        a2 = ActionAdapter.adapt("ACT:TYPE Notepad")
+        self.assertEqual(a2.kind, ActionKind.TYPE)
+        self.assertEqual(a2.text, "Notepad")
+
+        # KEY
+        a3 = ActionAdapter.adapt("ACT:KEY win")
+        self.assertEqual(a3.kind, ActionKind.KEY)
+        self.assertEqual(a3.keys, ["win"])
+
+        # WAIT
+        a4 = ActionAdapter.adapt("ACT:WAIT 0.5")
+        self.assertEqual(a4.kind, ActionKind.WAIT)
+        self.assertEqual(a4.duration, 0.5)
+
+        # STOP
+        a5 = ActionAdapter.adapt("ACT:STOP Done")
+        self.assertEqual(a5.kind, ActionKind.STOP)
+        self.assertEqual(a5.reason, "Done")
+
+        # DRAG
+        a6 = ActionAdapter.adapt("ACT:DRAG 100 200 400 500")
+        self.assertEqual(a6.kind, ActionKind.LEFT_CLICK_DRAG)
+        self.assertEqual(a6.start_coordinate, (100, 200))
+        self.assertEqual(a6.end_coordinate, (400, 500))
+
+        # SCROLL
+        a7 = ActionAdapter.adapt("ACT:SCROLL 0 -120")
+        self.assertEqual(a7.kind, ActionKind.SCROLL)
+        self.assertEqual(a7.scroll_delta, (0, -120))
+
+        # Multiline reasoning text with embedded grammar token and comment
+        reasoning = (
+            "Thinking: The user wants to click the start menu.\n"
+            "ACT:CLICK 260 780 # Open Start button\n"
+            "Execution dispatched."
+        )
+        a8 = ActionAdapter.adapt(reasoning)
+        self.assertEqual(a8.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a8.coordinate, (260, 780))
+        self.assertEqual(a8.reason, "Open Start button")
+
+    def test_anthropic_key_combo_normalization(self):
+        # Super_L+r -> win, r
+        a1 = ActionAdapter.adapt({"action": "key", "text": "Super_L+r"})
+        self.assertEqual(a1.kind, ActionKind.KEY)
+        self.assertEqual(a1.keys, ["win", "r"])
+
+        # ctrl+Return -> ctrl, enter
+        a2 = ActionAdapter.adapt({"action": "key", "text": "ctrl+Return"})
+        self.assertEqual(a2.kind, ActionKind.KEY)
+        self.assertEqual(a2.keys, ["ctrl", "enter"])
+
+        # list with mixed casing
+        a3 = ActionAdapter.adapt({"action": "key", "keys": ["ctrl_l+Alt_L", "Delete"]})
+        self.assertEqual(a3.kind, ActionKind.KEY)
+        self.assertEqual(a3.keys, ["ctrl", "alt", "delete"])
+
+    def test_anthropic_content_messages_api_unwrapping(self):
+        payload = {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01Abc",
+                    "name": "computer",
+                    "input": {
+                        "action": "left_click",
+                        "coordinate": [350, 450],
+                    },
+                }
+            ]
+        }
+        act = ActionAdapter.adapt(payload)
+        self.assertEqual(act.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(act.coordinate, (350, 450))
+
+    def test_anthropic_left_click_drag_coordinate_destination(self):
+        # Anthropic provides coordinate as drag destination
+        payload = {"action": "left_click_drag", "coordinate": [600, 700]}
+        act = ActionAdapter.adapt(payload)
+        self.assertEqual(act.kind, ActionKind.LEFT_CLICK_DRAG)
+        self.assertEqual(act.end_coordinate, (600, 700))
+
+    def test_scroll_direction_and_amount(self):
+        # Up
+        a_up = ActionAdapter.adapt({"action": "scroll", "direction": "up", "amount": 2})
+        self.assertEqual(a_up.kind, ActionKind.SCROLL)
+        self.assertEqual(a_up.scroll_delta, (0, 240))
+
+        # Down
+        a_down = ActionAdapter.adapt({"action": "scroll", "direction": "down", "amount": 1})
+        self.assertEqual(a_down.kind, ActionKind.SCROLL)
+        self.assertEqual(a_down.scroll_delta, (0, -120))
+
+    def test_grammar_token_comment_inside_quotes(self):
+        # Hash inside quotes must not be stripped as a comment
+        act = ActionAdapter.adapt('ACT:TYPE "issue #123" # comment on issue')
+        self.assertEqual(act.kind, ActionKind.TYPE)
+        self.assertEqual(act.text, "issue #123")
+        self.assertEqual(act.reason, "comment on issue")
+
+    def test_from_reason_fallback_coordinates_and_phrases(self):
+        # Coordinate formats
+        a1 = ActionAdapter.adapt({"reason": "Click at x=250, y=350"})
+        self.assertEqual(a1.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a1.coordinate, (250, 350))
+
+        a2 = ActionAdapter.adapt({"reason": "Left click at [400, 500]"})
+        self.assertEqual(a2.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a2.coordinate, (400, 500))
+
+        # Multi-word typing
+        a3 = ActionAdapter.adapt({"reason": "Type Hello World into search bar"})
+        self.assertEqual(a3.kind, ActionKind.TYPE)
+        self.assertEqual(a3.text, "Hello World")
+
+    def test_general_agents_format(self):
+        payload = {
+            "action": "left_click",
+            "coordinate": [292, 768],
+            "reason": "Click search button",
+        }
+        a = ActionAdapter.adapt(payload)
+        self.assertEqual(a.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a.coordinate, (292, 768))
+        self.assertEqual(a.reason, "Click search button")
+
+    def test_fallback_regex_intent_from_reason(self):
+        # Click intent in reason
+        a1 = ActionAdapter.adapt({"reason": "Click on Start button at (260, 780)"})
+        self.assertEqual(a1.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(a1.coordinate, (260, 780))
+
+        # Press key intent in reason
+        a2 = ActionAdapter.adapt({"reason": "Press win key to open start menu"})
+        self.assertEqual(a2.kind, ActionKind.KEY)
+        self.assertEqual(a2.keys, ["win"])
+
+        # Type intent in reason
+        a3 = ActionAdapter.adapt({"reason": "Type 'Notepad' into search"})
+        self.assertEqual(a3.kind, ActionKind.TYPE)
+        self.assertEqual(a3.text, "Notepad")
+
+        # Double click intent in reason
+        a4 = ActionAdapter.adapt({"action": "wait", "reason": "Double click at (400, 500)"})
+        self.assertEqual(a4.kind, ActionKind.DOUBLE_CLICK)
+        self.assertEqual(a4.coordinate, (400, 500))
+
+
+class TestSkillCacheAndAnchorVerification(unittest.TestCase):
+    """Verifies Layer 2 Anchor-Verified Skill Cache and strict P0 rule enforcement."""
+
+    def setUp(self):
+        import tempfile
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.cache = SkillCache(vault_dir=self.temp_dir.name)
+
+    def tearDown(self):
+        if hasattr(self, "cache") and self.cache:
+            self.cache.close()
+        self.temp_dir.cleanup()
+
+    def test_p0_rule_missing_anchor_rejected(self):
+        # Save skill with anchor
+        anchor = UIStateAnchor(window_title="Windows Desktop", process_name="explorer")
+        actions = [Action(kind=ActionKind.LEFT_CLICK, coordinate=(260, 780), reason="Click start")]
+        self.cache.save_skill(goal="Open Start Menu", actions=actions, anchors=anchor)
+
+        # Lookup with current_anchor=None -> MUST be rejected under P0 rule!
+        res = self.cache.lookup(goal="Open Start Menu", current_anchor=None)
+        self.assertFalse(res.hit)
+        self.assertIn("P0 rule strictly forbids blind replay", res.reason)
+
+    def test_p0_rule_mismatched_anchor_rejected(self):
+        # Save skill for Notepad with Desktop anchor
+        anchor = UIStateAnchor(window_title="Windows Desktop", process_name="explorer")
+        actions = [Action(kind=ActionKind.LEFT_CLICK, coordinate=(260, 780))]
+        self.cache.save_skill(goal="Open Start Menu", actions=actions, anchors=anchor)
+
+        # Live state is Chrome browser (mismatched window & process)
+        mismatched_anchor = UIStateAnchor(window_title="Google Chrome", process_name="chrome")
+        res = self.cache.lookup(goal="Open Start Menu", current_anchor=mismatched_anchor)
+        self.assertFalse(res.hit)
+        self.assertIn("mismatch", res.reason)
+
+    def test_anchor_verification_success_and_cache_hit(self):
+        anchor = UIStateAnchor(window_title="Windows Desktop", process_name="explorer")
+        actions = [
+            Action(kind=ActionKind.KEY, keys=["win"], reason="Open start"),
+            Action(kind=ActionKind.TYPE, text="Notepad", reason="Type app name"),
+        ]
+        self.cache.save_skill(goal="Launch Notepad App", actions=actions, anchors=anchor)
+
+        # Live state matches anchor!
+        matching_anchor = UIStateAnchor(window_title="Windows Desktop Shell", process_name="explorer.exe")
+        res = self.cache.lookup(goal="Launch Notepad App", current_anchor=matching_anchor)
+        self.assertTrue(res.hit)
+        self.assertEqual(len(res.actions), 2)
+        self.assertEqual(res.actions[0].kind, ActionKind.KEY)
+        self.assertEqual(res.actions[1].text, "Notepad")
+        self.assertIn("0ms model latency", res.reason)
+
+    def test_bounding_box_anchor_tolerance(self):
+        anchor = UIStateAnchor(bounding_box=(100, 100, 200, 200))
+        # Within 15px tolerance
+        current_valid = UIStateAnchor(bounding_box=(108, 95, 205, 192))
+        self.assertTrue(anchor.matches(current_valid, tolerance_px=15))
+
+        # Outside 15px tolerance
+        current_invalid = UIStateAnchor(bounding_box=(130, 100, 200, 200))
+        self.assertFalse(anchor.matches(current_invalid, tolerance_px=15))
+
+    def test_skill_cache_disk_persistence(self):
+        anchor = UIStateAnchor(window_title="Notepad", process_name="notepad")
+        actions = [Action(kind=ActionKind.TYPE, text="Saved text")]
+        self.cache.save_skill(goal="Save Document", actions=actions, anchors=anchor)
+
+        # Reload a completely fresh SkillCache instance from same directory
+        fresh_cache = SkillCache(vault_dir=self.temp_dir.name)
+        skills = fresh_cache.list_skills()
+        self.assertEqual(len(skills), 1)
+        self.assertEqual(skills[0]["goal"], "Save Document")
+
+        # Can retrieve with matching anchor
+        res = fresh_cache.lookup("Save Document", current_anchor=anchor)
+        self.assertTrue(res.hit)
+        self.assertEqual(res.actions[0].text, "Saved text")
+        fresh_cache.close()
+
+    def test_ace_runner_cache_hit_deterministic_replay(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                anchor = UIStateAnchor(window_title="Desktop", process_name="explorer")
+                cached_actions = [
+                    Action(kind=ActionKind.LEFT_CLICK, coordinate=(260, 780), reason="Click start"),
+                    Action(kind=ActionKind.STOP, reason="Done"),
+                ]
+                cache.save_skill(goal="Replay goal", actions=cached_actions, anchors=anchor)
+
+                agent = AceAgent()
+                computer = WindowsComputer()
+                runner = AceRunner(agent=agent, computer=computer, skill_cache=cache, enable_voice=False)
+
+                # Mock LLM client so if it were called it would raise an error
+                mock_client = MagicMock()
+                mock_client.predict_action.side_effect = RuntimeError("LLM called during deterministic cache replay!")
+                runner.agent.client = mock_client
+
+                # Run with matching anchor
+                session = runner.run(goal="Replay goal", max_steps=5, dry_run=True, current_anchor=anchor)
+                self.assertTrue(session.is_complete)
+                self.assertEqual(session.step_count, 2)
+                self.assertEqual(session.steps[0].action["kind"], "left_click")
+                # 0 calls to LLM!
+                mock_client.predict_action.assert_not_called()
+
+    def test_p0_empty_anchor_cannot_match(self):
+        # Empty anchor with zero constraints MUST NOT match anything under P0
+        empty_anchor = UIStateAnchor()
+        self.assertTrue(empty_anchor.is_empty())
+        current = UIStateAnchor(window_title="Random Window", process_name="random.exe")
+        self.assertFalse(empty_anchor.matches(current))
+
+    def test_p0_empty_anchor_saving_raises_value_error(self):
+        act = [Action(kind=ActionKind.LEFT_CLICK, coordinate=(10, 10))]
+        with self.assertRaises(ValueError) as ctx:
+            self.cache.save_skill(goal="Test goal", actions=act, anchors=UIStateAnchor())
+        self.assertIn("P0 Violation", str(ctx.exception))
+
+    def test_multi_anchor_skill_persistence_no_overwrite(self):
+        # Save two different entries for the same goal with different anchors
+        a1 = [Action(kind=ActionKind.LEFT_CLICK, coordinate=(10, 10))]
+        a2 = [Action(kind=ActionKind.LEFT_CLICK, coordinate=(20, 20))]
+        anc1 = UIStateAnchor(window_title="Window 1", process_name="proc1")
+        anc2 = UIStateAnchor(window_title="Window 2", process_name="proc2")
+
+        self.cache.save_skill(goal="Common Goal", actions=a1, anchors=anc1)
+        self.cache.save_skill(goal="Common Goal", actions=a2, anchors=anc2)
+
+        # Reload a completely fresh instance from disk
+        fresh = SkillCache(vault_dir=self.temp_dir.name)
+        skills = fresh.list_skills()
+        self.assertEqual(len(skills), 2)
+
+        # Both anchors can be matched and retrieved
+        res1 = fresh.lookup("Common Goal", current_anchor=anc1)
+        self.assertTrue(res1.hit)
+        self.assertEqual(res1.actions[0].coordinate, (10, 10))
+
+        res2 = fresh.lookup("Common Goal", current_anchor=anc2)
+        self.assertTrue(res2.hit)
+        self.assertEqual(res2.actions[0].coordinate, (20, 20))
+        fresh.close()
+
+    def test_sqlite_backend_skill_cache(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            # 1. Test explicit close() and release of file lock
+            sql_cache = SkillCache(vault_dir=td, backend="sqlite")
+            anc = UIStateAnchor(window_title="SQLite Desktop", process_name="explorer")
+            act = [Action(kind=ActionKind.KEY, keys=["win"])]
+            sql_cache.save_skill(goal="Open Menu", actions=act, anchors=anc)
+            sql_cache.close()
+            self.assertIsNone(sql_cache._conn)
+
+            # 2. Test context manager with SkillCache(...) as fresh_sql:
+            with SkillCache(vault_dir=td, backend="sqlite") as fresh_sql:
+                self.assertEqual(len(fresh_sql.list_skills()), 1)
+
+                res = fresh_sql.lookup("Open Menu", current_anchor=anc)
+                self.assertTrue(res.hit)
+                self.assertEqual(res.actions[0].keys, ["win"])
+
+                # Clear works
+                fresh_sql.clear()
+                self.assertEqual(len(fresh_sql.list_skills()), 0)
+
+
+class TestDualStageVerifier(unittest.TestCase):
+    """Verifies Stage 1 Physical Verification and Stage 2 Semantic Verification."""
+
+    def setUp(self):
+        self.verifier = DualStageVerifier()
+
+    def test_stage1_physical_verification_ripple_detected(self):
+        pre_obs = Observation(image_bytes=b"FRAME_A_PIXELS_" * 100, format="jpeg")
+        post_obs = Observation(image_bytes=b"FRAME_B_RIPPLE_" * 100, format="jpeg")
+
+        res = self.verifier.verify_physical(pre_obs, post_obs)
+        self.assertTrue(res.passed)
+        self.assertTrue(res.ripple_detected)
+        self.assertGreater(res.optical_delta, 0.0)
+        self.assertLess(res.latency_ms, 10.0)  # fast probe
+
+    def test_stage1_physical_verification_zero_delta(self):
+        identical_bytes = b"STATIC_FRAME_PIXELS" * 50
+        pre_obs = Observation(image_bytes=identical_bytes, format="jpeg")
+        post_obs = Observation(image_bytes=identical_bytes, format="jpeg")
+
+        res = self.verifier.verify_physical(pre_obs, post_obs)
+        self.assertFalse(res.passed)
+        self.assertFalse(res.ripple_detected)
+        self.assertEqual(res.optical_delta, 0.0)
+
+    def test_stage1_missing_observation(self):
+        res = self.verifier.verify_physical(None, None)
+        self.assertFalse(res.passed)
+        self.assertIn("Missing", res.details)
+
+    def test_stage2_semantic_verification_window_title(self):
+        with patch.object(self.verifier, "get_all_window_titles", return_value=["Untitled - Notepad", "Settings"]):
+            res = self.verifier.verify_semantic(expected_window_title="Notepad")
+            self.assertTrue(res.passed)
+            self.assertEqual(res.matched_window, "Untitled - Notepad")
+            self.assertIn("Semantic Verification passed", res.details)
+
+    def test_stage2_semantic_verification_process_name(self):
+        with patch.object(self.verifier, "get_all_window_titles", return_value=[]), \
+             patch.object(self.verifier, "get_foreground_process_name", return_value="calculator.exe"):
+            res = self.verifier.verify_semantic(expected_process_name="calculator")
+            self.assertTrue(res.passed)
+            self.assertEqual(res.matched_process, "calculator.exe")
+
+    def test_stage2_semantic_verification_from_goal_keywords(self):
+        with patch.object(self.verifier, "get_all_window_titles", return_value=["Calculator Window"]):
+            res = self.verifier.verify_semantic(goal="Please open Calculator for math")
+            self.assertTrue(res.passed)
+            self.assertIn("Calculator Window", res.matched_window)
+
+    def test_stage2_semantic_verification_failure(self):
+        with patch.object(self.verifier, "get_all_window_titles", return_value=["Browser Window"]), \
+             patch.object(self.verifier, "get_foreground_process_name", return_value="chrome.exe"):
+            res = self.verifier.verify_semantic(expected_window_title="Paint")
+            self.assertFalse(res.passed)
+            self.assertIn("failed", res.details.lower())
+
+
+class TestTrajectoryLogger(unittest.TestCase):
+    """Verifies serialization of golden and negative failure trajectories for offline learning."""
+
+    def test_log_golden_success_trajectory(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            logger = TrajectoryLogger(vault_dir=td)
+            session = AceSession(goal="Test golden goal")
+            session.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(100, 100)))
+            session.finish("Done successfully")
+
+            path_str = logger.log_trajectory(session, verified_success=True)
+            self.assertTrue(os.path.exists(path_str))
+            self.assertIn("golden", path_str)
+
+            data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "success")
+            self.assertTrue(data["verified_success"])
+            self.assertEqual(data["goal"], "Test golden goal")
+            self.assertEqual(len(data["steps"]), 1)
+
+    def test_log_negative_failure_trajectory_with_stuck_points(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            logger = TrajectoryLogger(vault_dir=td)
+            session = AceSession(goal="Test failure goal")
+            session.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(500, 400)))
+            session.finish("Repetition stuck")
+
+            stuck = [{"step": 1, "repetitions": 3}]
+            path_str = logger.log_trajectory(
+                session,
+                verified_success=False,
+                failure_reason="Stuck in click loop",
+                stuck_points=stuck,
+            )
+            self.assertTrue(os.path.exists(path_str))
+            self.assertIn("failures", path_str)
+
+            data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "failure")
+            self.assertFalse(data["verified_success"])
+            self.assertEqual(data["failure_reason"], "Stuck in click loop")
+            self.assertEqual(len(data["stuck_points"]), 1)
+
+
+class TestCalibratedDurationAndSafetyFirewall(unittest.TestCase):
+    """Verifies Fitts's Law duration clamp calibration (50-120ms) and Safety Firewall guardrails."""
+
+    def test_fitts_law_duration_calibrated_boundaries(self):
+        computer = WindowsComputer()
+        self.assertEqual(computer.FITTS_MIN_DURATION_S, 0.050)
+        self.assertEqual(computer.FITTS_MAX_DURATION_S, 0.120)
+
+        # Dist 0 -> exactly clamped to 50ms (0.050s)
+        dur0 = computer.calculate_fitts_duration(0.0)
+        self.assertAlmostEqual(dur0, 0.050, places=3)
+
+        # Dist 500 -> 0.050 + 0.00014 * 500 = 0.120s
+        dur500 = computer.calculate_fitts_duration(500.0)
+        self.assertAlmostEqual(dur500, 0.120, places=3)
+
+        # Dist 2000 -> clamped to 120ms (0.120s)
+        dur2000 = computer.calculate_fitts_duration(2000.0)
+        self.assertEqual(dur2000, 0.120)
+
+    def test_firewall_permanent_file_deletion_guardrail(self):
+        firewall = ExecutionSafetyFirewall(require_confirmation=True)
+
+        # del /f /q command
+        act_del = Action(kind=ActionKind.TYPE, text="del /f /q important_files.txt")
+        res1 = firewall.evaluate(act_del, user_confirmed=False)
+        self.assertFalse(res1.allowed)
+        self.assertTrue(res1.requires_confirmation)
+        self.assertEqual(res1.risk_level, SafetyRiskLevel.FILE_DELETION)
+
+        # rm -rf command
+        act_rm = Action(kind=ActionKind.TYPE, text="rm -rf /data")
+        res2 = firewall.evaluate(act_rm, user_confirmed=False)
+        self.assertFalse(res2.allowed)
+        self.assertEqual(res2.risk_level, SafetyRiskLevel.FILE_DELETION)
+
+        # Shift+Delete hotkey
+        act_shift_del = Action(kind=ActionKind.KEY, keys=["shift", "delete"])
+        res3 = firewall.evaluate(act_shift_del, user_confirmed=False)
+        self.assertFalse(res3.allowed)
+        self.assertEqual(res3.risk_level, SafetyRiskLevel.FILE_DELETION)
+
+    def test_firewall_financial_payment_guardrail(self):
+        firewall = ExecutionSafetyFirewall(require_confirmation=True)
+
+        act_card = Action(kind=ActionKind.TYPE, text="credit card cvv 999")
+        res1 = firewall.evaluate(act_card, user_confirmed=False)
+        self.assertFalse(res1.allowed)
+        self.assertTrue(res1.requires_confirmation)
+        self.assertEqual(res1.risk_level, SafetyRiskLevel.FINANCIAL_PAYMENT)
+
+        act_pay = Action(kind=ActionKind.LEFT_CLICK, coordinate=(500, 400), reason="Click Pay Now to complete order")
+        res2 = firewall.evaluate(act_pay, user_confirmed=False)
+        self.assertFalse(res2.allowed)
+        self.assertEqual(res2.risk_level, SafetyRiskLevel.FINANCIAL_PAYMENT)
+
+    def test_firewall_outbound_communication_guardrail(self):
+        firewall = ExecutionSafetyFirewall(require_confirmation=True)
+
+        act_email = Action(kind=ActionKind.TYPE, text="send email to all contacts")
+        res1 = firewall.evaluate(act_email, user_confirmed=False)
+        self.assertFalse(res1.allowed)
+        self.assertTrue(res1.requires_confirmation)
+        self.assertEqual(res1.risk_level, SafetyRiskLevel.OUTBOUND_COMMUNICATION)
+
+        act_tweet = Action(kind=ActionKind.LEFT_CLICK, coordinate=(300, 300), reason="post tweet to twitter")
+        res2 = firewall.evaluate(act_tweet, user_confirmed=False)
+        self.assertFalse(res2.allowed)
+        self.assertEqual(res2.risk_level, SafetyRiskLevel.OUTBOUND_COMMUNICATION)
+
+    def test_firewall_user_confirmation_bypass(self):
+        firewall = ExecutionSafetyFirewall(require_confirmation=True)
+        act = Action(kind=ActionKind.TYPE, text="del /f /q test.txt")
+        # With user_confirmed=True, the firewall allows the action
+        res = firewall.evaluate(act, user_confirmed=True)
+        self.assertTrue(res.allowed)
+
+
+class TestPhase1EdgeCases(unittest.TestCase):
+    """Verifies edge cases across Phase 1 foundation layers."""
+
+    def test_action_adapter_edge_cases(self):
+        # Empty string and None
+        self.assertEqual(ActionAdapter.adapt("").kind, ActionKind.WAIT)
+        self.assertEqual(ActionAdapter.adapt(None).kind, ActionKind.WAIT)
+        self.assertEqual(ActionAdapter.adapt({}).kind, ActionKind.WAIT)
+
+        # Lowercase and whitespace in grammar
+        act1 = ActionAdapter.adapt("  act:click   100.4   200.8   ")
+        self.assertEqual(act1.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(act1.coordinate, (100, 200))
+
+        # Unicode Hindi text in grammar
+        act2 = ActionAdapter.adapt("ACT:TYPE नमस्ते दुनिया")
+        self.assertEqual(act2.kind, ActionKind.TYPE)
+        self.assertEqual(act2.text, "नमस्ते दुनिया")
+
+        # OpenAI tool call with empty arguments
+        act3 = ActionAdapter.adapt({"function": {"name": "wait", "arguments": "{}"}})
+        self.assertEqual(act3.kind, ActionKind.WAIT)
+
+    def test_skill_cache_edge_cases(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                # Empty goal raises ValueError
+                with self.assertRaises(ValueError):
+                    cache.save_skill(goal="", actions=[], anchors=UIStateAnchor(window_title="test"))
+                # Missing anchors raises ValueError
+                with self.assertRaises(ValueError):
+                    cache.save_skill(goal="test", actions=[], anchors=[])
+                # Non-existent goal lookup returns hit=False
+                res = cache.lookup("NonExistentGoal")
+                self.assertFalse(res.hit)
+
+    def test_firewall_edge_cases(self):
+        firewall = ExecutionSafetyFirewall(require_confirmation=True)
+        # Safe action is approved
+        safe_act = Action(kind=ActionKind.TYPE, text="Hello world in Notepad")
+        res = firewall.evaluate(safe_act)
+        self.assertTrue(res.allowed)
+        self.assertEqual(res.risk_level, SafetyRiskLevel.SAFE)
+
+        # Disguised powershell deletion
+        del_act = Action(kind=ActionKind.TYPE, text="Remove-Item C:\\test -Recurse -Force")
+        res_del = firewall.evaluate(del_act)
+        self.assertFalse(res_del.allowed)
+        self.assertEqual(res_del.risk_level, SafetyRiskLevel.FILE_DELETION)
 
 
 if __name__ == "__main__":

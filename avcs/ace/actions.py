@@ -126,8 +126,29 @@ class Action:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Action:
-        # 1. Unwrap nested parameter dictionaries (parameters, arguments, args, params, input)
+        # 1. Unwrap nested parameter dictionaries (parameters, arguments, args, params, input, choices, message)
         flat_data = dict(data)
+        if "choices" in flat_data and isinstance(flat_data["choices"], list) and flat_data["choices"]:
+            first_choice = flat_data["choices"][0]
+            if isinstance(first_choice, dict) and "message" in first_choice:
+                flat_data = dict(first_choice["message"])
+        if "message" in flat_data and isinstance(flat_data["message"], dict):
+            flat_data = dict(flat_data["message"])
+        if "tool_calls" in flat_data and isinstance(flat_data["tool_calls"], list) and flat_data["tool_calls"]:
+            flat_data = dict(flat_data["tool_calls"][0])
+        if "function" in flat_data and isinstance(flat_data["function"], dict):
+            fn = flat_data["function"]
+            fn_name = fn.get("name")
+            fn_args = fn.get("arguments", fn.get("parameters", fn.get("args", {})))
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except Exception:
+                    fn_args = {}
+            if isinstance(fn_args, dict):
+                flat_data = dict(fn_args)
+                flat_data["action"] = fn_name
+
         for nested_key in ("parameters", "arguments", "args", "params", "input"):
             nested_val = flat_data.get(nested_key)
             if isinstance(nested_val, dict):
@@ -164,6 +185,8 @@ class Action:
             "left_click_drag": ActionKind.LEFT_CLICK_DRAG,
             "drag": ActionKind.LEFT_CLICK_DRAG,
             "scroll": ActionKind.SCROLL,
+            "mouse_scroll": ActionKind.SCROLL,
+            "wheel": ActionKind.SCROLL,
             "type": ActionKind.TYPE,
             "type_text": ActionKind.TYPE,
             "input_text": ActionKind.TYPE,
@@ -211,6 +234,10 @@ class Action:
         if end_c is None and "x2" in data and "y2" in data:
             end_c = cls._parse_coordinate_pair(data["x2"], data["y2"])
 
+        # Fallback for left_click_drag when destination coordinate is passed as 'coordinate'
+        if kind == ActionKind.LEFT_CLICK_DRAG and end_c is None and coord is not None:
+            end_c = coord
+
         def _split_key_combo(s: str) -> List[str]:
             s_clean = s.strip().lower()
             if s_clean in ("-", "+"):
@@ -256,6 +283,17 @@ class Action:
             scroll_d = (int(float(sd[0])), int(float(sd[1])))
         elif "delta_y" in data or "delta_x" in data:
             scroll_d = (int(float(data.get("delta_x", 0))), int(float(data.get("delta_y", 0))))
+        elif "direction" in data:
+            direction = str(data["direction"]).lower().strip()
+            amount_val = int(float(data.get("amount", data.get("clicks", 1)))) * 120
+            if direction == "up":
+                scroll_d = (0, amount_val)
+            elif direction == "down":
+                scroll_d = (0, -amount_val)
+            elif direction == "right":
+                scroll_d = (amount_val, 0)
+            elif direction == "left":
+                scroll_d = (-amount_val, 0)
 
         # Text alias normalization (text, value, content, input, query, string, search, text_to_type)
         text_val = None
@@ -347,4 +385,348 @@ class Action:
             reason=reason_str,
             press_enter=press_enter_val,
         )
+
+
+class ActionAdapter:
+    """Normalizes diverse model wire formats into our internal deterministic Action schema.
+
+    Supports:
+    1. Anthropic Computer Use format ({"action": "key", "text": "Return"}, {"action": "mouse_move", "coordinate": [x, y]}, etc.)
+    2. OpenAI / Tool-Calling format (nested function, parameters, arguments, args, input, tool_calls)
+    3. AVCS Fast Action Grammar tokens (ACT:CLICK 292 768, ACT:TYPE Notepad, ACT:KEY win, ACT:WAIT 0.5, ACT:STOP Done)
+    4. General Agents API responses
+    5. Fallback regex intent extraction from reason if payload fields are omitted.
+    """
+
+    ANTHROPIC_KEY_MAP = {
+        "return": "enter",
+        "enter": "enter",
+        "backspace": "backspace",
+        "tab": "tab",
+        "space": "space",
+        "escape": "esc",
+        "page_up": "page_up",
+        "page_down": "page_down",
+        "super_l": "win",
+        "super_r": "win",
+        "super": "win",
+        "ctrl_l": "ctrl",
+        "ctrl_r": "ctrl",
+        "alt_l": "alt",
+        "alt_r": "alt",
+        "shift_l": "shift",
+        "shift_r": "shift",
+    }
+
+    @staticmethod
+    def _split_comment_outside_quotes(text: str) -> Tuple[str, str]:
+        """Splits trailing comment (# or //) while preserving # or // inside quoted strings."""
+        in_quote = None
+        for i, ch in enumerate(text):
+            if ch in ('"', "'"):
+                if in_quote == ch:
+                    in_quote = None
+                elif in_quote is None:
+                    in_quote = ch
+            elif in_quote is None:
+                if ch == '#':
+                    return text[:i].strip(), text[i + 1:].strip()
+                if text[i:i + 2] == '//':
+                    return text[:i].strip(), text[i + 2:].strip()
+        return text.strip(), ""
+
+    @classmethod
+    def parse_grammar_token(cls, text: str) -> Optional[Action]:
+        """Parses AVCS Fast Action Grammar tokens into internal Action objects."""
+        s = text.strip()
+        # Find ACT: token within text if embedded in reasoning
+        m_act = re.search(r'\bACT:([A-Z_]+)(?:\s+(.*?))?(?:\n|$)', s, re.IGNORECASE)
+        if not m_act:
+            return None
+
+        verb = m_act.group(1).upper()
+        raw_args = (m_act.group(2) or "").strip()
+        args_str, reason = cls._split_comment_outside_quotes(raw_args)
+
+        if verb in ("CLICK", "LEFT_CLICK"):
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 2:
+                coord = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.LEFT_CLICK, coordinate=coord, reason=reason)
+            return Action(kind=ActionKind.LEFT_CLICK, reason=reason)
+
+        elif verb == "RIGHT_CLICK":
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 2:
+                coord = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.RIGHT_CLICK, coordinate=coord, reason=reason)
+            return Action(kind=ActionKind.RIGHT_CLICK, reason=reason)
+
+        elif verb == "DOUBLE_CLICK":
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 2:
+                coord = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.DOUBLE_CLICK, coordinate=coord, reason=reason)
+            return Action(kind=ActionKind.DOUBLE_CLICK, reason=reason)
+
+        elif verb == "TRIPLE_CLICK":
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 2:
+                coord = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.TRIPLE_CLICK, coordinate=coord, reason=reason)
+            return Action(kind=ActionKind.TRIPLE_CLICK, reason=reason)
+
+        elif verb in ("MOVE", "MOUSE_MOVE", "HOVER"):
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 2:
+                coord = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.MOUSE_MOVE, coordinate=coord, reason=reason)
+            return Action(kind=ActionKind.MOUSE_MOVE, reason=reason)
+
+        elif verb in ("DRAG", "LEFT_CLICK_DRAG"):
+            coords = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(coords) >= 4:
+                sc = Action._parse_coordinate_pair(coords[0], coords[1])
+                ec = Action._parse_coordinate_pair(coords[2], coords[3])
+                return Action(kind=ActionKind.LEFT_CLICK_DRAG, start_coordinate=sc, end_coordinate=ec, reason=reason)
+            elif len(coords) >= 2:
+                ec = Action._parse_coordinate_pair(coords[0], coords[1])
+                return Action(kind=ActionKind.LEFT_CLICK_DRAG, end_coordinate=ec, reason=reason)
+            return Action(kind=ActionKind.LEFT_CLICK_DRAG, reason=reason)
+
+        elif verb == "SCROLL":
+            nums = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if len(nums) >= 4:
+                coord = Action._parse_coordinate_pair(nums[0], nums[1])
+                scroll_d = (int(float(nums[2])), int(float(nums[3])))
+                return Action(kind=ActionKind.SCROLL, coordinate=coord, scroll_delta=scroll_d, reason=reason)
+            elif len(nums) >= 2:
+                scroll_d = (int(float(nums[0])), int(float(nums[1])))
+                return Action(kind=ActionKind.SCROLL, scroll_delta=scroll_d, reason=reason)
+            return Action(kind=ActionKind.SCROLL, scroll_delta=(0, -120), reason=reason)
+
+        elif verb == "TYPE":
+            text_val = args_str
+            # Handle quoted strings e.g. ACT:TYPE "hello world"
+            q_m = re.match(r'^["\'](.*)["\']$', text_val)
+            if q_m:
+                text_val = q_m.group(1)
+            return Action(kind=ActionKind.TYPE, text=text_val, reason=reason)
+
+        elif verb == "KEY":
+            # Can be "ctrl+s" or "win" or "ctrl shift esc"
+            keys_list = [k.strip().lower() for k in re.split(r'[\s\+\-]+', args_str) if k.strip()]
+            norm_keys = [cls.ANTHROPIC_KEY_MAP.get(k, k) for k in keys_list]
+            return Action(kind=ActionKind.KEY, keys=norm_keys, reason=reason)
+
+        elif verb == "WAIT":
+            dur = 0.5
+            nums = re.findall(r'[-+]?\d*\.?\d+', args_str)
+            if nums:
+                dur = float(nums[0])
+            return Action(kind=ActionKind.WAIT, duration=dur, reason=reason)
+
+        elif verb in ("STOP", "FINISH", "DONE"):
+            stop_reason = args_str or reason or "Goal completed successfully"
+            return Action(kind=ActionKind.STOP, reason=stop_reason)
+
+        return None
+
+    @classmethod
+    def from_reason_fallback(cls, reason: str) -> Optional[Action]:
+        """Extracts intent if payload fields were omitted by model."""
+        if not reason or not isinstance(reason, str):
+            return None
+        r = reason.strip()
+        r_lower = r.lower()
+
+        # 1. Flexible coordinate extraction for click/move actions
+        coord = None
+        coord_match = re.search(r'(?:at|to|pos|coords?|position)?\s*[:=\[\(]?\s*(?:x\s*[:=]\s*)?(\d{1,4})\s*[,x\s]\s*(?:y\s*[:=]\s*)?(\d{1,4})\s*[\)\]]?', r, re.IGNORECASE)
+        if coord_match:
+            coord = (int(coord_match.group(1)), int(coord_match.group(2)))
+
+        if any(term in r_lower for term in ("double click", "double-click", "double_click")):
+            return Action(kind=ActionKind.DOUBLE_CLICK, coordinate=coord, reason=r)
+        if any(term in r_lower for term in ("right click", "right-click", "right_click", "context menu")):
+            return Action(kind=ActionKind.RIGHT_CLICK, coordinate=coord, reason=r)
+        if any(term in r_lower for term in ("triple click", "triple-click", "triple_click")):
+            return Action(kind=ActionKind.TRIPLE_CLICK, coordinate=coord, reason=r)
+        if coord and any(term in r_lower for term in ("click", "press", "tap", "select", "focus")):
+            return Action(kind=ActionKind.LEFT_CLICK, coordinate=coord, reason=r)
+        if coord and any(term in r_lower for term in ("move", "hover", "cursor to")):
+            return Action(kind=ActionKind.MOUSE_MOVE, coordinate=coord, reason=r)
+
+        # 2. Key combo or key press
+        hotkey_match = re.search(r'\b((?:ctrl|alt|shift|win|super)\s*[\+\-]\s*[a-z0-9]+(?:\s*[\+\-]\s*[a-z0-9]+)*)\b', r_lower)
+        if hotkey_match:
+            keys = [k.strip() for k in re.split(r'[\+\-\s]+', hotkey_match.group(1)) if k.strip()]
+            norm_keys = [cls.ANTHROPIC_KEY_MAP.get(k, k) for k in keys]
+            return Action(kind=ActionKind.KEY, keys=norm_keys, reason=r)
+
+        if any(term in r_lower for term in ("start menu", "windows key", "win key", "press win", "super key", "open start")):
+            return Action(kind=ActionKind.KEY, keys=["win"], reason=r)
+        if re.search(r'\b(?:enter|return)\b', r_lower):
+            return Action(kind=ActionKind.KEY, keys=["enter"], reason=r)
+        if re.search(r'\b(?:escape|esc)\b', r_lower):
+            return Action(kind=ActionKind.KEY, keys=["esc"], reason=r)
+        if re.search(r'\b(?:tab)\b', r_lower):
+            return Action(kind=ActionKind.KEY, keys=["tab"], reason=r)
+        if re.search(r'\b(?:backspace)\b', r_lower):
+            return Action(kind=ActionKind.KEY, keys=["backspace"], reason=r)
+
+        # 3. Type intent
+        quote_match = re.search(r'''(?:type|search|input|write|enter)\s+(?:for\s+|:\s*)?['"]([^'"]+)['"]''', r, re.IGNORECASE)
+        if not quote_match:
+            quote_match = re.search(r'''['"]([^'"]+)['"]''', r)
+        if quote_match:
+            return Action(kind=ActionKind.TYPE, text=quote_match.group(1), reason=r)
+        
+        # Hinglish and standard sentence typing
+        type_word_match = re.search(r'(?:type|search|input|write)\s+(?:for\s+|karo\s+|kijiye\s+)?([a-zA-Z0-9_\-\.\s]+?)(?:\s+(?:in|into|to|on|with|aur|and)\s+|\s*$)', r, re.IGNORECASE)
+        if type_word_match:
+            candidate = type_word_match.group(1).strip()
+            if candidate.lower() not in ("karo", "kijiye", "kar", "the", "a", "an", "on", "in", "it"):
+                return Action(kind=ActionKind.TYPE, text=candidate, reason=r)
+
+        # 4. Stop intent
+        if any(term in r_lower for term in ("task complete", "goal complete", "finished", "all done", "goal achieved")):
+            return Action(kind=ActionKind.STOP, reason=r)
+
+        # 5. Wait intent
+        wait_m = re.search(r'wait\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?', r_lower)
+        if wait_m:
+            return Action(kind=ActionKind.WAIT, duration=float(wait_m.group(1)), reason=r)
+
+        return None
+
+    @classmethod
+    def adapt(cls, payload: Any) -> Action:
+        """Master normalization method translating any model wire format into Action."""
+        if isinstance(payload, Action):
+            return payload
+
+        # 1. String payload: could be Grammar token, JSON string, or reasoning text
+        if isinstance(payload, str):
+            s = payload.strip()
+            # Fast check for Grammar token
+            grammar_action = cls.parse_grammar_token(s)
+            if grammar_action is not None:
+                return grammar_action
+
+            # Try parsing as JSON string
+            if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                try:
+                    data = json.loads(s)
+                    return cls.adapt(data)
+                except Exception:
+                    pass
+
+            # Fallback intent extraction from string
+            fallback = cls.from_reason_fallback(s)
+            if fallback is not None:
+                return fallback
+
+            return Action(kind=ActionKind.WAIT, duration=0.5, reason=s)
+
+        # 2. Dict payload
+        if isinstance(payload, dict):
+            raw = dict(payload)
+
+            # Anthropic API format: {"content": [{"type": "tool_use", "name": "computer", "input": {...}}]}
+            if "content" in raw and isinstance(raw["content"], list):
+                for block in raw["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        raw = dict(block.get("input", {}))
+                        if "name" in block and block["name"] != "computer" and "action" not in raw:
+                            raw["action"] = block["name"]
+                        break
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        txt = block.get("text", "")
+                        g_act = cls.parse_grammar_token(txt)
+                        if g_act is not None:
+                            return g_act
+
+            # OpenAI Completion Choices format: {"choices": [{"message": {...}}]}
+            if "choices" in raw and isinstance(raw["choices"], list) and raw["choices"]:
+                first_choice = raw["choices"][0]
+                if isinstance(first_choice, dict) and "message" in first_choice:
+                    raw = dict(first_choice["message"])
+            if "message" in raw and isinstance(raw["message"], dict):
+                raw = dict(raw["message"])
+
+            # OpenAI Tool Calls / Function Call unwrapping
+            if "tool_calls" in raw and isinstance(raw["tool_calls"], list) and raw["tool_calls"]:
+                raw = dict(raw["tool_calls"][0])
+            if "function" in raw and isinstance(raw["function"], dict):
+                fn = raw["function"]
+                fn_name = fn.get("name")
+                fn_args = fn.get("arguments", fn.get("parameters", fn.get("args", {})))
+                if isinstance(fn_args, str):
+                    try:
+                        fn_args = json.loads(fn_args)
+                    except Exception:
+                        fn_args = {}
+                if isinstance(fn_args, dict):
+                    raw = dict(fn_args)
+                    raw["action"] = fn_name
+            if "function_call" in raw and isinstance(raw["function_call"], dict):
+                fn = raw["function_call"]
+                fn_name = fn.get("name")
+                fn_args = fn.get("arguments", {})
+                if isinstance(fn_args, str):
+                    try:
+                        fn_args = json.loads(fn_args)
+                    except Exception:
+                        fn_args = {}
+                if isinstance(fn_args, dict):
+                    raw = dict(fn_args)
+                    raw["action"] = fn_name
+
+            # Anthropic Computer Tool wrapper: {"name": "computer", "input": {...}}
+            if raw.get("name") in ("computer", "agent", "tool") and isinstance(raw.get("input"), dict):
+                raw = dict(raw["input"])
+
+            # Anthropic Computer Use specific actions
+            raw_action = str(raw.get("action", raw.get("kind", ""))).lower().strip()
+            if raw_action == "screenshot":
+                return Action(kind=ActionKind.WAIT, duration=0.5, reason=raw.get("reason", "Anthropic screenshot request"))
+            elif raw_action == "cursor_position":
+                return Action(kind=ActionKind.WAIT, duration=0.2, reason=raw.get("reason", "Anthropic cursor position query"))
+            elif raw_action == "key":
+                if "text" in raw and "keys" not in raw:
+                    key_text = str(raw["text"]).strip().lower()
+                    parts = [p.strip() for p in re.split(r'[\+\-\s]+', key_text) if p.strip()]
+                    raw["keys"] = [cls.ANTHROPIC_KEY_MAP.get(p, p) for p in parts]
+                elif "keys" in raw and isinstance(raw["keys"], list):
+                    norm_k = []
+                    for k in raw["keys"]:
+                        for p in re.split(r'[\+\-\s]+', str(k).strip().lower()):
+                            if p.strip():
+                                norm_k.append(cls.ANTHROPIC_KEY_MAP.get(p.strip(), p.strip()))
+                    raw["keys"] = norm_k
+
+            # Parse via Action.from_dict
+            action = Action.from_dict(raw)
+
+            # Fallback intent recovery: if kind is WAIT but reason specifies clear intent
+            if action.kind == ActionKind.WAIT and action.reason and action.reason not in (
+                "Guarded against empty key action",
+                "Guarded against empty type action",
+                "Guarded against empty mouse_move action",
+            ):
+                recovered = cls.from_reason_fallback(action.reason)
+                if recovered is not None:
+                    return recovered
+
+            return action
+
+        # 3. Object with to_dict or dict attribute
+        if hasattr(payload, "to_dict") and callable(getattr(payload, "to_dict")):
+            return cls.adapt(payload.to_dict())
+        if hasattr(payload, "__dict__"):
+            return cls.adapt(vars(payload))
+
+        return Action(kind=ActionKind.WAIT, duration=0.5, reason=str(payload))
+
 

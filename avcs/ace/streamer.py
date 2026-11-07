@@ -41,7 +41,7 @@ class ScreenStreamer:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive() and not self._stop_event.is_set()
 
-    def start(self) -> None:
+    def start(self, startup_timeout: float = 1.5) -> None:
         """Starts the background continuous screen capture thread."""
         if self.is_running:
             return
@@ -49,10 +49,10 @@ class ScreenStreamer:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="ScreenStreamerWorker")
         self._thread.start()
-        # Wait up to 500ms for the first frame to populate
+        # Wait up to startup_timeout (default 1.5s) for the first frame to populate
         t_start = time.time()
-        while self._latest_obs is None and (time.time() - t_start) < 0.5:
-            time.sleep(0.01)
+        while self.get_latest_observation() is None and (time.time() - t_start) < startup_timeout:
+            time.sleep(0.005)
         logger.info(f"ScreenStreamer live: continuous capture at {self.target_fps:.0f} FPS ({self.image_format})")
 
     def stop(self) -> None:
@@ -70,7 +70,7 @@ class ScreenStreamer:
 
     def _worker_loop(self) -> None:
         """Continuous background capture loop."""
-        last_time = time.time()
+        last_time = 0.0
         fps_timer = time.time()
         frames_in_second = 0
 

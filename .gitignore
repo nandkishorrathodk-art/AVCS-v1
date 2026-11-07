@@ -36,3 +36,7 @@ m8-live-results/
 scratch/
 # Downloaded speech-recognition models (see `avcs.voice.demo --get-ears`)
 models/
+# Skills Vault runtime trajectories and cache
+avcs/ace/skills_vault/trajectories/
+avcs/ace/skills_vault/skills/
+avcs/ace/skills_vault/skills.db*

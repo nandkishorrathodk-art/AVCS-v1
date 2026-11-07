@@ -11,6 +11,12 @@ from typing import Any, Dict, List, Optional
 
 from avcs.ace.actions import Action, ActionKind
 from avcs.ace.computer import Observation
+from avcs.ace.skills_vault.cache import (
+    SkillCache,
+    SkillCacheEntry,
+    SkillLookupResult,
+    UIStateAnchor,
+)
 
 
 @dataclasses.dataclass
@@ -199,4 +205,25 @@ class AceSession:
             "elapsed_seconds": round(elapsed, 2),
             "avg_plan_latency_ms": round(avg_latency, 2),
         }
+
+    def get_action_sequence(self) -> List[Dict[str, Any]]:
+        """Returns the list of recorded actions across all steps."""
+        return [step.action for step in self.steps]
+
+    def save_to_skill_cache(
+        self,
+        cache: SkillCache,
+        anchors: Union[UIStateAnchor, List[UIStateAnchor]],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Stores the session's action trajectory into the SkillCache with verified anchors."""
+        meta = {"session_id": self.session_id, "total_steps": self.step_count}
+        if metadata:
+            meta.update(metadata)
+        return cache.save_skill(
+            goal=self.goal,
+            actions=self.get_action_sequence(),
+            anchors=anchors,
+            metadata=meta,
+        )
 
