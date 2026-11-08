@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# If invoked via a system Python lacking dependencies, auto-delegate to repo .venv
+if not getattr(sys, "_avcs_reexeced", False):
+    try:
+        import PIL
+        import torch
+        import requests
+    except ImportError:
+        _repo_root = Path(__file__).resolve().parent.parent
+        _venv_python = _repo_root / ".venv" / "Scripts" / "python.exe"
+        if _venv_python.is_file() and Path(sys.executable).resolve() != _venv_python.resolve():
+            import subprocess
+            sys._avcs_reexeced = True
+            orig_argv = getattr(sys, "orig_argv", None)
+            if orig_argv and len(orig_argv) > 1:
+                cmd = [str(_venv_python), *orig_argv[1:]]
+            else:
+                args = list(sys.argv)
+                if args and args[0].endswith(".py"):
+                    cmd = [str(_venv_python), *args]
+                else:
+                    cmd = [str(_venv_python), "-m", "avcs.ace.run", *args]
+            sys.exit(subprocess.call(cmd))
+
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any

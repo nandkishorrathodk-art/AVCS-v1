@@ -7,7 +7,7 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from avcs.ace.actions import Action, ActionKind
 from avcs.ace.computer import Observation
@@ -16,6 +16,8 @@ from avcs.ace.skills_vault.cache import (
     SkillCacheEntry,
     SkillLookupResult,
     UIStateAnchor,
+    compute_visual_hash,
+    visual_hash_similarity,
 )
 
 
@@ -46,6 +48,8 @@ class AceSession:
         self.steps: List[StepRecord] = []
         self.subgoals: List[Any] = []
         self.last_observation: Optional[Observation] = None
+        self.blacklisted_coordinates: List[Tuple[int, int]] = []
+        self.metadata: Dict[str, Any] = {}
 
     def start(self, goal: str, max_steps: Optional[int] = None, dry_run: bool = False) -> None:
         """Initializes a new session run."""
@@ -62,6 +66,22 @@ class AceSession:
         self.steps = []
         self.subgoals = []
         self.last_observation = None
+        self.blacklisted_coordinates = []
+        self.metadata = {}
+
+    def blacklist_coordinate(self, coord: Tuple[int, int]) -> None:
+        """Adds a coordinate to the session's blacklist to prevent repeated loop deadlocks."""
+        if coord is not None and len(coord) >= 2:
+            c = (int(coord[0]), int(coord[1]))
+            if c not in self.blacklisted_coordinates:
+                self.blacklisted_coordinates.append(c)
+
+    def is_coordinate_blacklisted(self, coord: Optional[Tuple[int, int]], tolerance: int = 5) -> bool:
+        """Checks if a coordinate matches any blacklisted coordinate within spatial tolerance."""
+        if coord is None or len(coord) < 2:
+            return False
+        cx, cy = int(coord[0]), int(coord[1])
+        return any(abs(cx - bx) <= tolerance and abs(cy - by) <= tolerance for bx, by in self.blacklisted_coordinates)
 
     def _match_action(self, step_action: Dict[str, Any], target_kind: str, target_coord: Any, target_keys: Any, target_text: Any) -> bool:
         """Determines if a recorded step action matches the target parameters."""
@@ -211,6 +231,7 @@ class AceSession:
             "stop_reason": self.stop_reason,
             "dry_run": self.dry_run,
             "is_stuck": self.is_stuck(threshold=2),
+            "blacklisted_coordinates": list(self.blacklisted_coordinates),
             "elapsed_seconds": round(elapsed, 2),
             "avg_plan_latency_ms": round(avg_latency, 2),
         }
@@ -219,16 +240,57 @@ class AceSession:
         """Returns the list of recorded actions across all steps."""
         return [step.action for step in self.steps]
 
+    def capture_anchor(
+        self,
+        window_title: Optional[str] = None,
+        process_name: Optional[str] = None,
+        observation: Optional[Observation] = None,
+        coordinate: Optional[Tuple[int, int]] = None,
+        bounding_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> UIStateAnchor:
+        """Captures a UIStateAnchor from desktop state and session observation."""
+        obs = observation or self.last_observation
+        vis_hash = compute_visual_hash(obs, coordinate=coordinate, bounding_box=bounding_box) if obs else None
+        return UIStateAnchor(
+            window_title=window_title,
+            process_name=process_name,
+            bounding_box=bounding_box,
+            visual_hash=vis_hash,
+        )
+
+    def verify_anchor(
+        self,
+        expected_anchor: UIStateAnchor,
+        current_anchor: Optional[UIStateAnchor] = None,
+        tolerance_px: int = 15,
+    ) -> bool:
+        """Verifies if current anchor matches the expected anchor, returning False on anchor drift."""
+        if current_anchor is None or expected_anchor is None:
+            return False
+        return expected_anchor.matches(current_anchor, tolerance_px=tolerance_px)
+
     def save_to_skill_cache(
         self,
         cache: SkillCache,
-        anchors: Union[UIStateAnchor, List[UIStateAnchor]],
+        anchors: Optional[Union[UIStateAnchor, List[UIStateAnchor]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Stores the session's action trajectory into the SkillCache with verified anchors."""
         meta = {"session_id": self.session_id, "total_steps": self.step_count}
         if metadata:
             meta.update(metadata)
+        if anchors is None:
+            # Auto-construct anchor from latest observation and goal
+            first_coord = None
+            for s in self.steps:
+                act = s.action
+                coord = getattr(act, "coordinate", None) or (act.get("coordinate") if isinstance(act, dict) else None)
+                if coord:
+                    first_coord = tuple(coord)
+                    break
+            anchors = self.capture_anchor(coordinate=first_coord)
+            if anchors.is_empty():
+                anchors = UIStateAnchor(window_title="Active Desktop")
         return cache.save_skill(
             goal=self.goal,
             actions=self.get_action_sequence(),

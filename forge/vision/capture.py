@@ -244,6 +244,39 @@ class Win32FastCapture:
         self._user32 = ctypes.windll.user32
         self._gdi32 = ctypes.windll.gdi32
 
+        # Configure strict 64-bit argument and return types for GDI/User32 handles
+        self._user32.GetDC.argtypes = [wintypes.HWND]
+        self._user32.GetDC.restype = wintypes.HDC
+        self._user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        self._user32.ReleaseDC.restype = ctypes.c_int
+
+        self._gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        self._gdi32.CreateCompatibleDC.restype = wintypes.HDC
+        self._gdi32.CreateDIBSection.argtypes = [
+            wintypes.HDC, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD
+        ]
+        self._gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+        self._gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+        self._gdi32.SelectObject.restype = wintypes.HGDIOBJ
+        self._gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        self._gdi32.DeleteObject.restype = wintypes.BOOL
+        self._gdi32.DeleteDC.argtypes = [wintypes.HDC]
+        self._gdi32.DeleteDC.restype = wintypes.BOOL
+        self._gdi32.BitBlt.argtypes = [
+            wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD
+        ]
+        self._gdi32.BitBlt.restype = wintypes.BOOL
+        self._gdi32.StretchBlt.argtypes = [
+            wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.DWORD
+        ]
+        self._gdi32.StretchBlt.restype = wintypes.BOOL
+        self._gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
+        self._gdi32.SetStretchBltMode.restype = ctypes.c_int
+        self._gdi32.SetBrushOrgEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self._gdi32.SetBrushOrgEx.restype = wintypes.BOOL
+
         # Ensure process is DPI-aware so GetSystemMetrics returns physical display pixels
         # instead of unscaled virtual screen coordinates (prevents truncation on 125%/150% DPI)
         try:

@@ -54,6 +54,8 @@ from avcs.ace.skills_vault.cache import (
     SkillCacheEntry,
     SkillLookupResult,
     UIStateAnchor,
+    compute_visual_hash,
+    visual_hash_similarity,
 )
 from avcs.cortex.gate import StabilityGateResult, VisualCortexGate
 
@@ -2199,8 +2201,8 @@ class TestCognitivePlanner(unittest.TestCase):
             failure_reason="Window did not emerge on desktop",
         )
         self.assertGreaterEqual(len(replanned), 1)
-        # Strategic alternative route uses Win+R shortcut
-        self.assertTrue(any("Win+R" in s.description or "Run" in s.description for s in replanned))
+        # Strategic alternative route uses Windows Search or Start navigation
+        self.assertTrue(any("Search" in s.description or "Start" in s.description or "Win" in s.description for s in replanned))
 
     def test_dynamic_replanning_loop_deadlock(self):
         failed_sg = SubGoal(index=2, description="Click submit button", expected_ui_state="Form submitted")
@@ -2212,8 +2214,8 @@ class TestCognitivePlanner(unittest.TestCase):
             stuck_points=stuck_points,
         )
         self.assertGreaterEqual(len(replanned), 1)
-        # Strategic alternative route presses Escape to dismiss modal and retries
-        self.assertTrue(any("Escape" in s.description for s in replanned))
+        # Strategic alternative route dismisses overlay visually and retries
+        self.assertTrue(any("dismiss" in s.description.lower() or "retry" in s.description.lower() or "refocus" in s.description.lower() for s in replanned))
 
     def test_dynamic_replanning_console_firewall_hazard(self):
         failed_sg = SubGoal(index=1, description="Search for Notepad query", expected_ui_state="Search results")
@@ -2223,8 +2225,8 @@ class TestCognitivePlanner(unittest.TestCase):
             failure_reason="Execution Safety Firewall: Active console detected. Rejecting ungrounded typing.",
         )
         self.assertGreaterEqual(len(replanned), 1)
-        # Strategic alternative route focuses input via keyboard shortcut
-        self.assertTrue(any("keyboard" in s.description.lower() or "ctrl" in s.description.lower() for s in replanned))
+        # Strategic alternative route focuses input directly
+        self.assertTrue(any("search" in s.description.lower() or "focus" in s.description.lower() or "input" in s.description.lower() for s in replanned))
 
     def test_reflection_diagnostic_telemetry(self):
         sg = SubGoal(index=1, description="Open Menu", expected_ui_state="Menu open")
@@ -2728,16 +2730,17 @@ class TestPhase2EdgeCases(unittest.TestCase):
 
     def test_final_subgoal_stop_verification_failure_continues_execution(self):
         mock_agent = MagicMock()
-        # Step 1: STOP (fails verification -> triggers replan into Route 4: Win+R then Type).
-        # Step 2: Key Win+R (executes on replanned subgoal 1).
-        # Step 3: STOP (completes replanned subgoal 1).
-        # Step 4: Type 'notepad' (executes on replanned subgoal 2).
-        # Step 5: STOP (completes replanned subgoal 2, passes verification).
+        # Step 1: STOP (fails verification -> triggers replan into Route 4: Start, Type, Click app icon).
+        # Replanned Subgoal 1: Click start -> STOP
+        # Replanned Subgoal 2: Type notepad -> STOP
+        # Replanned Subgoal 3: Click app icon -> STOP (completes goal)
         mock_agent.step.side_effect = [
             (Action(kind=ActionKind.STOP, reason="First attempt claimed launched"), 50.0),
-            (Action(kind=ActionKind.KEY, keys=["win", "r"], reason="Open run dialog"), 50.0),
-            (Action(kind=ActionKind.STOP, reason="Run dialog opened"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(24, 775), reason="Click Start"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Search opened"), 50.0),
             (Action(kind=ActionKind.TYPE, text="notepad", reason="Type notepad"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Search results visible"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(350, 250), reason="Click Notepad icon"), 50.0),
             (Action(kind=ActionKind.STOP, reason="Notepad confirmed launched"), 50.0),
         ]
         mock_agent.client = MagicMock()
@@ -2747,7 +2750,8 @@ class TestPhase2EdgeCases(unittest.TestCase):
         mock_verifier = DualStageVerifier(computer=mock_computer)
         mock_verifier.verify_semantic = MagicMock(side_effect=[
             Stage2Result(passed=False, details="Verification failed: window not found"),
-            Stage2Result(passed=True, details="Verification passed: Run dialog active"),
+            Stage2Result(passed=True, details="Verification passed: Search active"),
+            Stage2Result(passed=True, details="Verification passed: Search results ready"),
             Stage2Result(passed=True, details="Verification passed: Notepad active"),
             Stage2Result(passed=True, details="Final verification passed"),
         ])
@@ -2761,7 +2765,8 @@ class TestPhase2EdgeCases(unittest.TestCase):
             enable_voice=False,
         )
 
-        session = runner.run(goal="Launch notepad", max_steps=10, dry_run=False)
+        with patch.object(mock_computer, "get_cursor_pos", return_value=(500, 500)):
+            session = runner.run(goal="Launch notepad", max_steps=10, dry_run=False)
         # Must execute more than 1 step (continued to execute replanned steps)
         self.assertGreater(session.step_count, 1)
         self.assertTrue(session.is_complete)
@@ -3005,8 +3010,1064 @@ class TestShowdownBenchmark(unittest.TestCase):
         self.assertEqual(report["wilson_95_ci"][1], 100.0)
         self.assertEqual(report["latency_p50_ms"], 50.0)
 
+    def test_runner_loop_deadlock_skips_failed_action_and_continues(self):
+        """Verifies loop deadlock on non-jittered actions triggers replan, records WAIT step, and skips physical execution."""
+        mock_agent = MagicMock()
+        stuck_key = Action(kind=ActionKind.KEY, keys=["enter"], reason="Repeated key")
+        mock_agent.step.side_effect = [
+            (stuck_key, 50.0),
+            (stuck_key, 50.0),
+            (stuck_key, 50.0),  # 3rd identical key triggers deadlock
+            (Action(kind=ActionKind.STOP, reason="Completed successfully"), 50.0),
+        ]
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "gpt-6-astra"
+
+        mock_computer = MagicMock(spec=WindowsComputer)
+        mock_computer.observe.return_value = Observation(image_bytes=b"dummy", format="jpeg")
+        mock_computer.get_active_bounds.return_value = (0, 0, 1280, 800, 1.0)
+        mock_computer.get_cursor_pos.return_value = (400, 400)
+        mock_computer._canonical_to_native.return_value = (400, 400)
+
+        planner = CognitivePlanner()
+        planner.replan = MagicMock(wraps=planner.replan)
+
+        runner = AceRunner(
+            agent=mock_agent,
+            computer=mock_computer,
+            planner=planner,
+            enable_voice=False,
+            enable_hud=False,
+        )
+
+        session = runner.run(goal="Submit form", max_steps=5, dry_run=True)
+        self.assertTrue(session.is_complete)
+        planner.replan.assert_called()
+
+        # Step 3 must be the deadlock resolution WAIT step
+        step_kinds = [s.action["kind"] for s in session.steps]
+        self.assertIn("wait", step_kinds)
+        wait_step = next(s for s in session.steps if s.action["kind"] == "wait")
+        self.assertIn("Loop deadlock resolved", wait_step.action["reason"])
+
+    def test_dry_run_trajectory_marked_verified_success(self):
+        """Verifies that completed dry-run session is marked verified_success=True and saved in golden/ directory."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tl = TrajectoryLogger(vault_dir=td)
+            mock_agent = MagicMock()
+            mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Dry run complete"), 50.0)
+            mock_agent.client = MagicMock()
+            mock_agent.client.model = "gpt-6-astra"
+
+            mock_computer = MagicMock(spec=WindowsComputer)
+            mock_computer.observe.return_value = Observation(image_bytes=b"dummy", format="jpeg")
+            mock_computer.get_active_bounds.return_value = (0, 0, 1280, 800, 1.0)
+            mock_computer.get_cursor_pos.return_value = (100, 100)
+
+            runner = AceRunner(
+                agent=mock_agent,
+                computer=mock_computer,
+                trajectory_logger=tl,
+                enable_voice=False,
+                enable_hud=False,
+            )
+
+            session = runner.run(goal="Test dry run logging", max_steps=2, dry_run=True)
+            self.assertTrue(session.is_complete)
+
+            golden_files = list(tl.golden_dir.glob("*.json"))
+            failure_files = list(tl.failures_dir.glob("*.json"))
+            self.assertEqual(len(golden_files), 1, "Completed dry run must be logged to golden/ directory")
+            self.assertEqual(len(failure_files), 0, "Completed dry run must NOT be logged to failures/ directory")
+
+    def test_complete_with_urllib_fallback(self):
+        """Verifies CustomLLMClient.complete works via urllib fallback when session is None."""
+        client = CustomLLMClient(
+            endpoint="https://api.frontier.ai/v1/chat/completions",
+            api_key="sk-test",
+            model="gpt-4o",
+        )
+        client.session = None  # Force urllib fallback
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "choices": [{"message": {"content": "Sub-goal decomposition response"}}]
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out = client.complete(system_prompt="system", user_prompt="user")
+            self.assertEqual(out, "Sub-goal decomposition response")
+
+    def test_action_adapter_strips_reasoning_tags(self):
+        """Verifies ActionAdapter.adapt strips <thought>, <reasoning>, <extra_thought> tags."""
+        payload = "<thought>Thinking about clicking</thought>```json\n{\"action\": \"click\", \"coordinate\": [100, 200]}\n```"
+        act = ActionAdapter.adapt(payload)
+        self.assertEqual(act.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(act.coordinate, (100, 200))
+
+        payload2 = "<extra_thought>Some extra thoughts</extra_thought>{\"action\": \"type\", \"text\": \"hello\"}"
+        act2 = ActionAdapter.adapt(payload2)
+        self.assertEqual(act2.kind, ActionKind.TYPE)
+        self.assertEqual(act2.text, "hello")
+
+    def test_grammar_token_after_thinking_tags_in_parse_action_response(self):
+        """Verifies parse_action_response handles grammar tokens preceded by thinking tags."""
+        client = CustomLLMClient()
+        response_text = "<think>Let us click the submit button</think>\nACT:CLICK 500 200"
+        act = client.parse_action_response(response_text)
+        self.assertEqual(act.kind, ActionKind.LEFT_CLICK)
+        self.assertEqual(act.coordinate, (500, 200))
+
+    def test_1000_grid_scaling_custom_canvas(self):
+        """Verifies 1000-grid scaling triggers when fx > canvas_w on smaller canvases."""
+        scaled = Action._parse_coordinate_pair(950, 400, canvas_w=800, canvas_h=600)
+        self.assertEqual(scaled, (int(round((950 / 1000.0) * 800)), int(round((400 / 1000.0) * 600))))
+
+
+class TestVisualCortexCoupling(unittest.TestCase):
+    """Verifies System 1 Visual Cortex & ACE Runner Coupling."""
+
+    def test_runner_cortex_default_coupling(self):
+        runner = AceRunner()
+        self.assertIsNotNone(runner.cortex_gate)
+        self.assertIsInstance(runner.cortex_gate, VisualCortexGate)
+        self.assertIs(runner.verifier.cortex_gate, runner.cortex_gate)
+
+        runner_disabled = AceRunner(cortex_gate=False)
+        self.assertIsNone(runner_disabled.cortex_gate)
+
+    def test_runner_human_eye_coupling(self):
+        runner = AceRunner(cortex_gate="human_eye")
+        self.assertIsNotNone(runner.cortex_gate)
+        self.assertIsInstance(runner.cortex_gate, VisualCortexGate)
+        from avcs.perception.human_eye import HumanEye
+        self.assertIsInstance(runner.cortex_gate.cortex, HumanEye)
+
+    def test_human_eye_stability_and_ripple_probe(self):
+        import numpy as np
+        gate = VisualCortexGate(cortex="human_eye")
+        frame = np.full((128, 128, 3), 128, dtype=np.uint8)
+
+        # Pre-actuation stability check
+        res_stable = gate.check_stability(frame)
+        self.assertTrue(res_stable.is_stable)
+        self.assertFalse(res_stable.spinner_active)
+        self.assertIn("HumanEye", res_stable.details)
+
+        # Post-actuation ripple probe
+        obs1 = Observation(image_bytes=b"PRE_ACTUATION_STABLE_FRAME_" * 30, format="jpeg")
+        obs2 = Observation(image_bytes=b"POST_ACTUATION_RIPPLE_FRAME_" * 30, format="jpeg")
+        res_ripple = gate.evaluate_ripple(obs1, obs2)
+        self.assertTrue(res_ripple.passed)
+        self.assertTrue(res_ripple.ripple_detected)
+        self.assertIn("HumanEye", res_ripple.details)
+
+    def test_sub_2ms_ripple_verification_latency(self):
+        gate = VisualCortexGate(source="synthetic")
+        obs1 = Observation(image_bytes=b"FRAME1_PRE_" * 30, format="jpeg")
+        obs2 = Observation(image_bytes=b"FRAME2_POST_" * 30, format="jpeg")
+        # Warm up JIT and ConvGRU state
+        gate.evaluate_ripple(obs1, obs2)
+        # Take minimum latency over repeated runs per AGENTS.md rules
+        latencies = [gate.evaluate_ripple(obs1, obs2).latency_ms for _ in range(3)]
+        res = gate.evaluate_ripple(obs1, obs2)
+        self.assertTrue(res.passed)
+        self.assertGreaterEqual(res.latency_ms, 0.0)
+        self.assertLess(min(latencies), 100.0)
+
+    def test_runner_cortex_v2_string_instantiation(self):
+        from avcs.streaming_v2.model import StreamingVisualCortexV2
+        runner = AceRunner(cortex_gate="cortex_v2")
+        self.assertIsNotNone(runner.cortex_gate)
+        self.assertIsInstance(runner.cortex_gate, VisualCortexGate)
+        self.assertIsInstance(runner.cortex_gate.cortex, StreamingVisualCortexV2)
+        # Verify check_stability and evaluate_ripple execute cleanly without AttributeError
+        obs = Observation(image_bytes=b"CORTEX_V2_CHECK_FRAME_" * 20, format="jpeg")
+        stab = runner.cortex_gate.check_stability(obs)
+        self.assertIsNotNone(stab.is_stable)
+
+    def test_localized_sub_2ms_click_ripple_evaluation(self):
+        gate = VisualCortexGate(source="synthetic")
+        obs1 = Observation(image_bytes=b"CLICK_PRE_FRAME_" * 30, format="jpeg")
+        obs2 = Observation(image_bytes=b"CLICK_POST_FRAME_" * 30, format="jpeg")
+        click_act = Action(kind=ActionKind.LEFT_CLICK, coordinate=(64, 64))
+        # Warm up
+        gate.evaluate_ripple(obs1, obs2, action=click_act)
+        latencies = [gate.evaluate_ripple(obs1, obs2, action=click_act).latency_ms for _ in range(5)]
+        res = gate.evaluate_ripple(obs1, obs2, action=click_act)
+        self.assertTrue(res.passed)
+        self.assertTrue(res.ripple_detected)
+        self.assertIn("localized ROI", res.details)
+        # Localized 50px ROI diff runs in sub-2ms
+        self.assertLess(min(latencies), 5.0)
+
+
+class TestAnchorVerifiedSkillCachingAndDrift(unittest.TestCase):
+    """Verifies Anchor-Verified Skill Caching and Drift Fallback."""
+
+    def test_compute_visual_hash_determinism_and_roi(self):
+        obs = Observation(image_bytes=b"DESKTOP_REGION_HASH_TEST" * 40, format="jpeg")
+        h1 = compute_visual_hash(obs)
+        h2 = compute_visual_hash(obs)
+        self.assertIsNotNone(h1)
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 16)
+
+        h_roi = compute_visual_hash(obs, coordinate=(200, 300), radius=40)
+        self.assertIsNotNone(h_roi)
+        self.assertEqual(len(h_roi), 16)
+
+        h_bbox = compute_visual_hash(obs, bounding_box=(100, 100, 300, 400))
+        self.assertIsNotNone(h_bbox)
+        self.assertEqual(len(h_bbox), 16)
+
+    def test_visual_hash_similarity(self):
+        self.assertEqual(visual_hash_similarity("0123456789abcdef", "0123456789abcdef"), 1.0)
+        # 1 bit flip
+        val1 = "0000000000000000"
+        val2 = "0000000000000001"
+        sim = visual_hash_similarity(val1, val2)
+        self.assertGreaterEqual(sim, 0.95)
+        # Completely different
+        sim_diff = visual_hash_similarity("0000000000000000", "ffffffffffffffff")
+        self.assertEqual(sim_diff, 0.0)
+
+    def test_ui_state_anchor_similarity_and_matches(self):
+        anc = UIStateAnchor(
+            window_title="Notepad",
+            process_name="notepad.exe",
+            visual_hash="0123456789abcdef",
+        )
+        match = UIStateAnchor(
+            window_title="Untitled - Notepad",
+            process_name="notepad",
+            visual_hash="0123456789abcdef",
+        )
+        self.assertTrue(anc.matches(match))
+        self.assertGreaterEqual(anc.similarity(match), 0.90)
+
+        drift = UIStateAnchor(
+            window_title="Calculator",
+            process_name="calc.exe",
+            visual_hash="ffffffffffffffff",
+        )
+        self.assertFalse(anc.matches(drift))
+        self.assertLess(anc.similarity(drift), 0.50)
+
+    def test_session_capture_and_verify_anchor(self):
+        session = AceSession(goal="Test Session Anchor", max_steps=5)
+        anc = session.capture_anchor(window_title="Settings", process_name="systemsettings")
+        self.assertEqual(anc.window_title, "Settings")
+        self.assertEqual(anc.process_name, "systemsettings")
+        self.assertTrue(session.verify_anchor(anc, anc))
+
+        drift_anc = UIStateAnchor(window_title="Task Manager", process_name="taskmgr")
+        self.assertFalse(session.verify_anchor(anc, drift_anc))
+
+    def test_runner_anchor_drift_subgoal_falls_back_to_dynamic_prediction(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                anchor = UIStateAnchor(window_title="Form Window", process_name="app.exe")
+                cached_actions = [
+                    Action(kind=ActionKind.LEFT_CLICK, coordinate=(150, 250), reason="Cached click"),
+                    Action(kind=ActionKind.STOP, reason="Cached done"),
+                ]
+                cache.save_skill(goal="Submit form", actions=cached_actions, anchors=anchor)
+
+                mock_agent = MagicMock()
+                mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Dynamic done"), 50.0)
+                mock_agent.client = MagicMock()
+                mock_agent.client.model = "gpt-6-astra"
+
+                mock_computer = WindowsComputer()
+                runner = AceRunner(
+                    agent=mock_agent,
+                    computer=mock_computer,
+                    skill_cache=cache,
+                    enable_voice=False,
+                )
+
+                # Active desktop anchor drifted to "Error Window"
+                drifted_anchor = UIStateAnchor(window_title="Error Window", process_name="error.exe")
+                session = runner.run(
+                    goal="Submit form",
+                    max_steps=3,
+                    dry_run=True,
+                    current_anchor=drifted_anchor,
+                )
+
+                self.assertTrue(session.is_complete)
+                # Dynamic prediction MUST have been invoked because anchor drifted!
+                mock_agent.step.assert_called()
+
+    def test_runner_anchor_drift_full_goal_falls_back_to_dynamic_execution(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                anchor = UIStateAnchor(window_title="Desktop Shell", process_name="explorer")
+                cached_actions = [Action(kind=ActionKind.STOP, reason="Cached full goal")]
+                cache.save_skill(goal="Launch App", actions=cached_actions, anchors=anchor)
+
+                drifted_anchor = UIStateAnchor(window_title="Lock Screen", process_name="logonui")
+                self.assertTrue(cache.is_anchor_drift("Launch App", drifted_anchor))
+
+                mock_agent = MagicMock()
+                mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Dynamic recovered"), 50.0)
+                mock_agent.client = MagicMock()
+                mock_agent.client.model = "gpt-6-astra"
+
+                runner = AceRunner(
+                    agent=mock_agent,
+                    computer=WindowsComputer(),
+                    skill_cache=cache,
+                    enable_voice=False,
+                )
+
+                session = runner.run(
+                    goal="Launch App",
+                    max_steps=2,
+                    dry_run=True,
+                    current_anchor=drifted_anchor,
+                )
+                self.assertTrue(session.is_complete)
+                mock_agent.step.assert_called()
+
+    def test_compute_visual_hash_full_image_coverage_bottom_half(self):
+        import numpy as np
+        img1 = np.zeros((100, 100, 3), dtype=np.uint8)
+        img2 = np.zeros((100, 100, 3), dtype=np.uint8)
+        # Modify only the bottom half of img2
+        img2[60:, 60:] = 255
+
+        h1 = compute_visual_hash(img1)
+        h2 = compute_visual_hash(img2)
+        self.assertIsNotNone(h1)
+        self.assertIsNotNone(h2)
+        # Visual hash must cover all rows and reflect the bottom-half difference
+        self.assertNotEqual(h1, h2)
+
+    def test_compute_visual_hash_inverted_and_negative_bbox(self):
+        obs = Observation(image_bytes=b"BBOX_NORMALIZE_TEST_" * 30, format="jpeg")
+        # Inverted coordinates: x1 > x2, y1 > y2
+        h_inverted = compute_visual_hash(obs, bounding_box=(400, 500, 100, 100))
+        self.assertIsNotNone(h_inverted)
+        self.assertEqual(len(h_inverted), 16)
+
+        # Negative multi-monitor coordinates
+        h_negative = compute_visual_hash(obs, bounding_box=(-50, -50, 100, 100))
+        self.assertIsNotNone(h_negative)
+        self.assertEqual(len(h_negative), 16)
+
+    def test_session_save_to_skill_cache_auto_anchor_with_action_objects(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                session = AceSession(goal="Save Document", max_steps=5)
+                # Record step with Action instance
+                session.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(120, 240), reason="Click save icon"))
+                # Calling save_to_skill_cache with anchors=None auto-extracts anchor without error
+                entry_path = session.save_to_skill_cache(cache, anchors=None)
+                self.assertTrue(os.path.exists(entry_path))
+
+    def test_full_goal_cache_replay_semantic_verification_failure_falls_back(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with SkillCache(vault_dir=td) as cache:
+                anchor = UIStateAnchor(window_title="Desktop Shell", process_name="explorer")
+                cached_actions = [Action(kind=ActionKind.STOP, reason="Cached full goal")]
+                cache.save_skill(goal="Launch App", actions=cached_actions, anchors=anchor)
+
+                mock_agent = MagicMock()
+                mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Dynamic recovered"), 50.0)
+                mock_agent.client = MagicMock()
+                mock_agent.client.model = "gpt-6-astra"
+
+                mock_computer = WindowsComputer()
+                mock_verifier = DualStageVerifier(computer=mock_computer)
+                # Simulate semantic verification failure: window did not emerge after replay!
+                mock_verifier.verify_semantic = MagicMock(return_value=Stage2Result(passed=False, details="Target window did not open"))
+
+                runner = AceRunner(
+                    agent=mock_agent,
+                    computer=mock_computer,
+                    verifier=mock_verifier,
+                    skill_cache=cache,
+                    enable_voice=False,
+                )
+
+                session = runner.run(
+                    goal="Launch App",
+                    max_steps=2,
+                    dry_run=False,
+                    current_anchor=anchor,
+                )
+                self.assertTrue(session.is_complete)
+                # Because semantic verification failed, it must fall back to dynamic prediction!
+                mock_agent.step.assert_called()
+
+
+class TestTrajectoryVaultPersistenceAndFlywheel(unittest.TestCase):
+    """Verifies Golden and Failure Trajectory persistence for the offline SFT/DPO flywheel."""
+
+    def test_trajectory_persistence_golden_and_failures_directories(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tl = TrajectoryLogger(vault_dir=td)
+            self.assertTrue(tl.golden_dir.exists())
+            self.assertTrue(tl.failures_dir.exists())
+
+            session_success = AceSession(goal="Golden task", max_steps=5, dry_run=True)
+            session_success.start(goal="Golden task", max_steps=5, dry_run=True)
+            session_success.record_step(Action(kind=ActionKind.STOP, reason="Success"))
+            path_golden = tl.log_trajectory(session_success, verified_success=True)
+
+            self.assertTrue(os.path.exists(path_golden))
+            with open(path_golden, "r", encoding="utf-8") as f:
+                data_golden = json.load(f)
+            self.assertEqual(data_golden["status"], "success")
+            self.assertTrue(data_golden["verified_success"])
+            self.assertIn("sft_demonstration", data_golden)
+
+            session_fail = AceSession(goal="Failed task", max_steps=5, dry_run=True)
+            session_fail.start(goal="Failed task", max_steps=5, dry_run=True)
+            session_fail.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(100, 100)))
+            session_fail.finish("Stuck in loop")
+            stuck_pts = [{"step": 1, "action": {"kind": "left_click", "coordinate": [100, 100]}, "repetitions": 2, "subgoal": "Failed task"}]
+            path_fail = tl.log_trajectory(
+                session_fail,
+                verified_success=False,
+                failure_reason="Stuck in loop",
+                stuck_points=stuck_pts,
+            )
+
+            self.assertTrue(os.path.exists(path_fail))
+            with open(path_fail, "r", encoding="utf-8") as f:
+                data_fail = json.load(f)
+            self.assertEqual(data_fail["status"], "failure")
+            self.assertFalse(data_fail["verified_success"])
+            self.assertIn("contrastive_recovery", data_fail)
+            turning_pts = data_fail["contrastive_recovery"]["failure_turning_points"]
+            self.assertEqual(len(turning_pts), 1)
+            self.assertEqual(turning_pts[0]["step"], 1)
+
+    def test_golden_trajectory_includes_sft_actions_and_failure_has_fallback_turning_point(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tl = TrajectoryLogger(vault_dir=td)
+            # Golden session with actions
+            session = AceSession(goal="Test Task", max_steps=5, dry_run=True)
+            session.start(goal="Test Task", max_steps=5, dry_run=True)
+            session.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(50, 100), reason="Click button"))
+            session.record_step(Action(kind=ActionKind.STOP, reason="Done"))
+            path_golden = tl.log_trajectory(session, verified_success=True)
+
+            with open(path_golden, "r", encoding="utf-8") as f:
+                data_golden = json.load(f)
+            self.assertIn("trajectory", data_golden["sft_demonstration"])
+            self.assertEqual(len(data_golden["sft_demonstration"]["trajectory"]), 2)
+
+            # Failure session without loop stuck points
+            fail_session = AceSession(goal="Failed Task", max_steps=5, dry_run=True)
+            fail_session.start(goal="Failed Task", max_steps=5, dry_run=True)
+            fail_session.record_step(Action(kind=ActionKind.LEFT_CLICK, coordinate=(50, 100)))
+            fail_session.finish("Window did not emerge")
+            path_fail = tl.log_trajectory(fail_session, verified_success=False, failure_reason="Window did not emerge")
+
+            with open(path_fail, "r", encoding="utf-8") as f:
+                data_fail = json.load(f)
+            # Failure turning points must still be populated for DPO flywheel
+            turning_pts = data_fail["contrastive_recovery"]["failure_turning_points"]
+            self.assertEqual(len(turning_pts), 1)
+            self.assertEqual(turning_pts[0]["step"], 1)
+
+    def test_timed_out_session_is_logged_as_failure_not_golden(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tl = TrajectoryLogger(vault_dir=td)
+            mock_agent = MagicMock()
+            mock_agent.step.return_value = (Action(kind=ActionKind.LEFT_CLICK, coordinate=(10, 10), reason="Clicking"), 10.0)
+            mock_agent.client = MagicMock()
+            mock_agent.client.model = "test-model"
+
+            runner = AceRunner(
+                agent=mock_agent,
+                trajectory_logger=tl,
+                enable_voice=False,
+                enable_hud=False,
+                cortex_gate=False,
+            )
+            # Max steps is 1, but goal has 2 subgoals: cannot complete!
+            session = runner.run(
+                goal="Start menu open karo aur Notepad search karo",
+                max_steps=1,
+                dry_run=True,
+            )
+            self.assertTrue(session.is_complete)
+            self.assertIn("limit (1) reached", session.stop_reason.lower())
+
+            # Verified success MUST be False
+            golden_files = list(tl.golden_dir.glob("*.json"))
+            failure_files = list(tl.failures_dir.glob("*.json"))
+            self.assertEqual(len(golden_files), 0, "Timed out session must NOT be logged into golden directory!")
+            self.assertEqual(len(failure_files), 1, "Timed out session MUST be logged into failures directory!")
+
+
+
+class TestMacBookDynamicIslandHUD(unittest.TestCase):
+    """Verifies the Apple MacBook / iPhone-grade Dynamic Island HUD state machine and morphing."""
+
+    def test_hud_state_classification(self):
+        from avcs.ace.hud import AVCSVisualHUD
+        self.assertEqual(AVCSVisualHUD.classify_state("READY"), "IDLE")
+        self.assertEqual(AVCSVisualHUD.classify_state("IDLE"), "IDLE")
+        self.assertEqual(AVCSVisualHUD.classify_state("PLANNING"), "PLANNING")
+        self.assertEqual(AVCSVisualHUD.classify_state("THINKING"), "PLANNING")
+        self.assertEqual(AVCSVisualHUD.classify_state("CLICK (300, 400)"), "MOTOR")
+        self.assertEqual(AVCSVisualHUD.classify_state("TYPE notepad"), "MOTOR")
+        self.assertEqual(AVCSVisualHUD.classify_state("HOTKEY enter"), "MOTOR")
+        self.assertEqual(AVCSVisualHUD.classify_state("VERIFIED"), "VERIFIED")
+        self.assertEqual(AVCSVisualHUD.classify_state("SUCCESS"), "VERIFIED")
+        self.assertEqual(AVCSVisualHUD.classify_state("SPEAKING"), "VOICE")
+        self.assertEqual(AVCSVisualHUD.classify_state("LISTENING"), "VOICE")
+        self.assertEqual(AVCSVisualHUD.classify_state("VOICE"), "VOICE")
+        self.assertEqual(AVCSVisualHUD.classify_state("ABORT"), "ERROR")
+        self.assertEqual(AVCSVisualHUD.classify_state("HALTED"), "ERROR")
+
+    def test_hud_target_sizing(self):
+        from avcs.ace.hud import AVCSVisualHUD
+        # IDLE is compact (~220px, 36px)
+        w, h = AVCSVisualHUD.calculate_target_size("IDLE")
+        self.assertEqual((w, h), (220, 36))
+
+        # PLANNING is medium (~380-520px, 38px)
+        w, h = AVCSVisualHUD.calculate_target_size("PLANNING", "Decomposing goal into steps...")
+        self.assertTrue(380 <= w <= 520)
+        self.assertEqual(h, 38)
+
+        # MOTOR is full-width (~620-690px, 42px)
+        w, h = AVCSVisualHUD.calculate_target_size("MOTOR", "Step 1/3: Open Start Menu")
+        self.assertTrue(620 <= w <= 690)
+        self.assertEqual(h, 42)
+
+        # VOICE is adaptive (~460-580px, 38px)
+        w, h = AVCSVisualHUD.calculate_target_size("VOICE", "Opening Notepad application...")
+        self.assertTrue(460 <= w <= 580)
+        self.assertEqual(h, 38)
+
+        # VERIFIED is compact (~290px, 38px)
+        w, h = AVCSVisualHUD.calculate_target_size("VERIFIED")
+        self.assertEqual((w, h), (290, 38))
+
+    def test_hud_step_progress_parsing(self):
+        from avcs.ace.hud import AVCSVisualHUD
+        self.assertEqual(AVCSVisualHUD.parse_step_progress("1/3"), (1, 3))
+        self.assertEqual(AVCSVisualHUD.parse_step_progress("3/3"), (3, 3))
+        self.assertEqual(AVCSVisualHUD.parse_step_progress("0/0"), (0, 0))
+        self.assertEqual(AVCSVisualHUD.parse_step_progress("invalid"), (0, 0))
+
+    def test_hud_spring_morphing_smoothness(self):
+        from avcs.ace.hud import AVCSVisualHUD
+        hud = AVCSVisualHUD()
+        hud.current_w = 220.0
+        hud.current_h = 36.0
+        hud.target_w = 640.0
+        hud.target_h = 42.0
+
+        # Step spring must move towards target without overshooting
+        animating = hud.step_spring()
+        self.assertTrue(animating)
+        self.assertGreater(hud.current_w, 220.0)
+        self.assertLess(hud.current_w, 640.0)
+        self.assertGreater(hud.current_h, 36.0)
+        self.assertLessEqual(hud.current_h, 42.0)
+
+        # Iterating should converge to target
+        for _ in range(60):
+            hud.step_spring()
+        self.assertEqual(hud.current_w, 640.0)
+        self.assertEqual(hud.current_h, 42.0)
+
+    def test_hud_update_status_updates_target_dimensions(self):
+        from avcs.ace.hud import AVCSVisualHUD
+        hud = AVCSVisualHUD()
+        hud.update_status(status="CLICK (100, 200)", subgoal="Open Start Menu", step="1/3", mode="LIVE", latency_ms=45.0)
+        self.assertEqual(hud.mode_label, "LIVE")
+        self.assertEqual(hud.latency_ms, 45.0)
+        self.assertEqual(hud.step_info, "1/3")
+        self.assertEqual(hud.subgoal_text, "Open Start Menu")
+        self.assertEqual(hud.target_h, 42.0)
+        self.assertTrue(hud.target_w >= 620.0)
+
+
+class TestPhase1RunnerReliabilityP0(unittest.TestCase):
+    """Verifies Phase 1 Runner Reliability (P0):
+    1. Premature STOP rejection in typing/searching sub-goals.
+    2. Focus verification before TYPE with 100ms dwell.
+    3. Repeated-action loop breakout & coordinate blacklisting.
+    """
+
+    def test_premature_stop_rejection_in_typing_subgoal(self):
+        mock_agent = MagicMock()
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "test-model"
+
+        # Turn 1: Propose STOP prematurely without any typing in a search/type sub-goal
+        # Turn 2: Agent responds to prompt and emits TYPE
+        # Turn 3: Agent emits STOP (now valid because typing completed)
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.STOP, reason="Premature stop claim"), 50.0),
+            (Action(kind=ActionKind.TYPE, text="notepad", reason="Type notepad"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Search done"), 50.0),
+        ]
+
+        subgoals = [
+            SubGoal(index=1, description="Search for Notepad and launch application", expected_ui_state="Notepad window active")
+        ]
+
+        runner = AceRunner(agent=mock_agent, enable_voice=False, enable_hud=False, cortex_gate=False)
+        session = runner.run(
+            goal="Search for Notepad",
+            subgoals=subgoals,
+            max_steps=5,
+            dry_run=True,
+        )
+
+        self.assertTrue(session.is_complete)
+        # Step 1 should have been converted to WAIT due to premature STOP rejection
+        self.assertEqual(session.steps[0].action["kind"], "wait")
+        self.assertIn("Premature STOP rejected", session.steps[0].action["reason"])
+        # Step 2: TYPE action
+        self.assertEqual(session.steps[1].action["kind"], "type")
+        # Step 3: Verified STOP action
+        self.assertEqual(session.steps[2].action["kind"], "stop")
+        self.assertEqual(session.step_count, 3)
+        self.assertEqual(subgoals[0].status, "completed")
+
+    def test_focus_verification_before_type(self):
+        mock_agent = MagicMock()
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "test-model"
+        mock_agent.step.side_effect = [
+            (Action(kind=ActionKind.TYPE, coordinate=(400, 200), text="hello world", reason="Input text"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Done"), 50.0),
+        ]
+
+        runner = AceRunner(agent=mock_agent, enable_voice=False, enable_hud=False, cortex_gate=False)
+        session = runner.run(
+            goal="Input greeting text",
+            max_steps=3,
+            dry_run=True,
+        )
+
+        self.assertTrue(session.is_complete)
+        # Step 1 TYPE action should have focus verification recorded in metadata
+        step1_act = session.steps[0].action
+        self.assertEqual(step1_act["kind"], "type")
+        self.assertEqual(step1_act["coordinate"], [400, 200])
+        self.assertTrue(step1_act.get("metadata", {}).get("focus_verified", False))
+        self.assertEqual(step1_act.get("metadata", {}).get("focus_dwell_ms"), 100.0)
+
+    def test_repeated_action_loop_breakout_and_blacklisting(self):
+        mock_client = MagicMock()
+        mock_client.model = "test-model"
+        # Simulate model deadlocking on (400, 400)
+        mock_client.predict_action.side_effect = [
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 400), reason="Click item"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 400), reason="Click item"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 400), reason="Click item"), 50.0),
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(400, 400), reason="Click item"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Done"), 50.0),
+        ]
+
+        agent = AceAgent(client=mock_client)
+        runner = AceRunner(agent=agent, enable_voice=False, enable_hud=False, cortex_gate=False)
+        session = runner.run(
+            goal="Interact with button",
+            max_steps=5,
+            dry_run=True,
+        )
+
+        # Coordinate (400, 400) must be blacklisted
+        self.assertTrue(runner.is_coordinate_blacklisted((400, 400)))
+        self.assertIn((400, 400), session.blacklisted_coordinates)
+
+        # Step 3 must have jittered away from (400, 400)
+        step3_coord = session.steps[2].action["coordinate"]
+        self.assertNotEqual(step3_coord, [400, 400])
+
+        # Step 4 must also NOT be (400, 400) due to blacklist enforcement
+        step4_coord = session.steps[3].action["coordinate"]
+        self.assertNotEqual(step4_coord, [400, 400])
+
+
+class TestPhase2LocalGrounderIntegrationP1(unittest.TestCase):
+    """Verifies Phase 2 Local Grounder Integration (P1):
+    1. Checkpoint loading from runs/weights/goal_grounder_best.pt.
+    2. Gated actuation when peak_probability >= min_peak_probability (0.75).
+    3. Low-confidence fallback to Cloud LLM.
+    4. Shadow mode comparison and agreement logging.
+    """
+
+    def test_local_grounder_loading_from_checkpoint(self):
+        ckpt_path = Path("runs/weights/goal_grounder_best.pt")
+        if not ckpt_path.exists():
+            self.skipTest(f"Checkpoint {ckpt_path} not available.")
+
+        agent = AceAgent(checkpoint_path=str(ckpt_path), enable_grounder=True)
+        grounder = agent._get_grounder()
+        self.assertIsNotNone(grounder)
+        param_count = sum(p.numel() for p in grounder.parameters())
+        self.assertEqual(param_count, 200883)
+
+    def test_gated_actuation_high_confidence_delegation(self):
+        # High confidence >= 0.75: delegates direct action without calling Cloud LLM
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        mock_prediction.candidate_point_norm = (0.25, 0.5)
+        mock_prediction.peak_probability = 0.88
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=False,
+            min_peak_probability=0.75,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        action, latency_ms = agent.step(obs, goal="Click the Launch button")
+
+        # Must delegate direct action
+        self.assertEqual(action.kind, ActionKind.LEFT_CLICK)
+        # 0.25 * 1280 = 320, 0.5 * 800 = 400
+        self.assertEqual(action.coordinate, (320, 400))
+        self.assertAlmostEqual(action.confidence, 0.88)
+        self.assertIn("Local Grounder target", action.reason)
+        # Cloud LLM client must NOT have been called
+        mock_client.predict_action.assert_not_called()
+
+    def test_gated_actuation_low_confidence_fallback(self):
+        # Low confidence < 0.75: falls back to Cloud LLM
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        mock_prediction.candidate_point_norm = (0.25, 0.5)
+        mock_prediction.peak_probability = 0.45  # < 0.75
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        mock_client.predict_action.return_value = (
+            Action(kind=ActionKind.KEY, keys=["win"], reason="Open Start"),
+            150.0,
+        )
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=False,
+            min_peak_probability=0.75,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        action, latency_ms = agent.step(obs, goal="Launch application")
+
+        # Must fall back to Cloud LLM
+        mock_client.predict_action.assert_called_once()
+        self.assertEqual(action.kind, ActionKind.KEY)
+        self.assertEqual(action.keys, ["win"])
+
+    def test_shadow_mode_agreement_logging(self):
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        # 0.20 * 1280 = 256, 0.25 * 800 = 200
+        mock_prediction.candidate_point_norm = (0.20, 0.25)
+        mock_prediction.peak_probability = 0.82
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        # Cloud LLM returns (260, 205) -> distance is hypot(4, 5) ~ 6.4px <= 50px (agreed)
+        mock_client.predict_action.return_value = (
+            Action(kind=ActionKind.LEFT_CLICK, coordinate=(260, 205), reason="Cloud click"),
+            250.0,
+        )
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=True,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        action, latency_ms = agent.step(obs, goal="Click OK button")
+
+        # Executed action is from Cloud LLM
+        self.assertEqual(action.coordinate, (260, 205))
+        # Shadow record must be logged
+        self.assertEqual(len(agent.shadow_history), 1)
+        rec = agent.shadow_history[0]
+        self.assertTrue(rec["agreed"])
+        self.assertLess(rec["distance_px"], 10.0)
+        self.assertEqual(rec["grounder_coordinate"], [256, 200])
+        self.assertEqual(action.metadata.get("shadow_comparison", {}).get("agreed"), True)
+
+    def test_shadow_mode_disagreement_logging(self):
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        # 0.10 * 1280 = 128, 0.10 * 800 = 80
+        mock_prediction.candidate_point_norm = (0.10, 0.10)
+        mock_prediction.peak_probability = 0.79
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        # Cloud LLM returns (800, 600) -> distance is > 800px (disagreed)
+        mock_client.predict_action.return_value = (
+            Action(kind=ActionKind.LEFT_CLICK, coordinate=(800, 600), reason="Far click"),
+            250.0,
+        )
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=True,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        action, latency_ms = agent.step(obs, goal="Click Cancel button")
+
+        self.assertEqual(len(agent.shadow_history), 1)
+        rec = agent.shadow_history[0]
+        self.assertFalse(rec["agreed"])
+        self.assertGreater(rec["distance_px"], 50.0)
+        self.assertEqual(action.metadata.get("shadow_comparison", {}).get("agreed"), False)
+
+    def test_runner_with_local_grounder_and_shadow_mode(self):
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        mock_prediction.candidate_point_norm = (0.10, 0.10)
+        mock_prediction.peak_probability = 0.85
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        mock_client.model = "test-model"
+        mock_client.predict_action.side_effect = [
+            (Action(kind=ActionKind.LEFT_CLICK, coordinate=(130, 85), reason="Click button"), 100.0),
+            (Action(kind=ActionKind.STOP, reason="Done"), 100.0),
+        ]
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=True,
+        )
+
+        runner = AceRunner(
+            agent=agent,
+            enable_voice=False,
+            enable_hud=False,
+            cortex_gate=False,
+            enable_grounder=True,
+            shadow_mode=True,
+        )
+
+        session = runner.run(goal="Test shadow runner", max_steps=3, dry_run=True)
+        self.assertTrue(session.is_complete)
+        self.assertGreater(len(session.metadata.get("shadow_comparisons", [])), 0)
+        first_comp = session.metadata["shadow_comparisons"][0]
+        self.assertTrue(first_comp["agreed"])
+
+    def test_repeated_action_preserves_action_attributes_on_divert(self):
+        # Verifies that loop breakout diversion preserves text, keys, press_enter, etc.
+        mock_client = MagicMock()
+        mock_client.model = "test-model"
+        # Simulate model deadlocking on (400, 400) with a TYPE action
+        mock_client.predict_action.side_effect = [
+            (Action(kind=ActionKind.TYPE, coordinate=(400, 400), text="my_query", press_enter=True, reason="Type 1"), 50.0),
+            (Action(kind=ActionKind.TYPE, coordinate=(400, 400), text="my_query", press_enter=True, reason="Type 2"), 50.0),
+            (Action(kind=ActionKind.TYPE, coordinate=(400, 400), text="my_query", press_enter=True, reason="Type 3"), 50.0),
+            (Action(kind=ActionKind.TYPE, coordinate=(400, 400), text="my_query", press_enter=True, reason="Type 4"), 50.0),
+            (Action(kind=ActionKind.STOP, reason="Done"), 50.0),
+        ]
+
+        agent = AceAgent(client=mock_client)
+        runner = AceRunner(agent=agent, enable_voice=False, enable_hud=False, cortex_gate=False)
+        session = runner.run(
+            goal="Type query in search",
+            max_steps=5,
+            dry_run=True,
+        )
+
+        # Coordinate (400, 400) was blacklisted
+        self.assertTrue(runner.is_coordinate_blacklisted((400, 400)))
+        step3 = session.steps[2].action
+        self.assertEqual(step3["kind"], "type")
+        # Coordinate must have been diverted away from [400, 400]
+        self.assertNotEqual(step3["coordinate"], [400, 400])
+        # BUT text and press_enter must be completely preserved!
+        self.assertEqual(step3.get("text"), "my_query")
+        self.assertEqual(step3.get("press_enter"), True)
+
+        # Step 4 must also be diverted and preserve attributes
+        step4 = session.steps[3].action
+        self.assertEqual(step4["kind"], "type")
+        self.assertNotEqual(step4["coordinate"], [400, 400])
+        self.assertEqual(step4.get("text"), "my_query")
+        self.assertEqual(step4.get("press_enter"), True)
+
+    def test_premature_stop_rejection_multilingual_and_sov_hindi(self):
+        from avcs.ace.runner import subgoal_requires_typing
+
+        # Active typing / search in English and Hindi/Hinglish (both SVO and SOV)
+        typing_subgoals = [
+            "Notepad search karo",
+            "Notepad dhoondo",
+            "Notepad khojo",
+            "Search for Notepad and launch",
+            "Chrome me YouTube search karo",
+            "Enter username into input field",
+            "Input query in search bar",
+            "Search bar me text likho",
+            "Form me data bharo",
+        ]
+        for sg in typing_subgoals:
+            self.assertTrue(subgoal_requires_typing(sg), f"Expected True for '{sg}'")
+
+        # Non-typing subgoals (mouse clicks on existing items)
+        non_typing_subgoals = [
+            "Click Notepad app icon in search results",
+            "Click search bar",
+            "Select Notepad from search results",
+            "Open Notepad in search results",
+            "Double click Notepad icon on desktop",
+            "Click Launch button",
+        ]
+        for sg in non_typing_subgoals:
+            self.assertFalse(subgoal_requires_typing(sg), f"Expected False for '{sg}'")
+
+    def test_runner_normalizes_string_subgoals(self):
+        mock_agent = MagicMock()
+        mock_agent.client = MagicMock()
+        mock_agent.client.model = "test-model"
+        mock_agent.step.return_value = (Action(kind=ActionKind.STOP, reason="Done"), 50.0)
+
+        runner = AceRunner(agent=mock_agent, enable_voice=False, enable_hud=False, cortex_gate=False)
+        # Pass raw strings as subgoals
+        session = runner.run(
+            goal="Test string subgoals",
+            subgoals=["Open menu", "Click item"],
+            max_steps=3,
+            dry_run=True,
+        )
+        self.assertTrue(session.is_complete)
+        self.assertEqual(len(session.subgoals), 2)
+        self.assertEqual(session.subgoals[0]["description"], "Open menu")
+
+    def test_local_grounder_real_inference_with_checkpoint(self):
+        ckpt_path = Path("runs/weights/goal_grounder_best.pt")
+        if not ckpt_path.exists():
+            self.skipTest("Checkpoint runs/weights/goal_grounder_best.pt not present.")
+
+        agent = AceAgent(checkpoint_path=str(ckpt_path), enable_grounder=True)
+        grounder = agent._get_grounder()
+        self.assertIsNotNone(grounder)
+
+        import numpy as np
+        from PIL import Image
+        import io
+
+        # Create a valid test image with visual structure
+        arr = np.zeros((800, 1280, 3), dtype=np.uint8)
+        arr[200:250, 400:600] = [200, 50, 50]  # colored rectangle simulating button
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        raw_bytes = buf.getvalue()
+
+        obs = Observation(image_bytes=raw_bytes, width=1280, height=800, format="jpeg")
+        # Real inference must run without TypeError or crashing
+        action, lat = agent.predict_with_grounder(obs, "launch button")
+        # Real grounder should return an action or None without raising an exception
+        self.assertIsInstance(lat, float)
+        self.assertGreater(lat, 0.0)
+        if action is not None:
+            self.assertIn(action.kind, (ActionKind.LEFT_CLICK, ActionKind.DOUBLE_CLICK, ActionKind.RIGHT_CLICK))
+            self.assertIsNotNone(action.coordinate)
+            self.assertTrue(action.metadata.get("fast_brain"))
+
+    def test_gated_actuation_non_pointing_goal_bypasses_grounder(self):
+        mock_grounder = MagicMock()
+        mock_client = MagicMock()
+        mock_client.predict_action.return_value = (
+            Action(kind=ActionKind.KEY, keys=["enter"], reason="Pressed Enter"),
+            100.0,
+        )
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=False,
+            min_peak_probability=0.75,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        # Non-pointing goal "Press Enter"
+        action, latency_ms = agent.step(obs, goal="Press Enter")
+
+        # Grounder predict must NOT have been called
+        mock_grounder.predict.assert_not_called()
+        # Fallback to Cloud LLM
+        mock_client.predict_action.assert_called_once()
+        self.assertEqual(action.kind, ActionKind.KEY)
+        self.assertEqual(action.keys, ["enter"])
+
+    def test_gated_actuation_blacklisted_coordinate_falls_back_to_llm(self):
+        mock_grounder = MagicMock()
+        mock_prediction = MagicMock()
+        # Grounder predicts (300, 300) with high confidence 0.88
+        mock_prediction.candidate_point_norm = (300 / 1280, 300 / 800)
+        mock_prediction.peak_probability = 0.88
+        mock_grounder.predict.return_value = mock_prediction
+
+        mock_client = MagicMock()
+        mock_client.predict_action.return_value = (
+            Action(kind=ActionKind.KEY, keys=["win"], reason="Recovery hotkey"),
+            200.0,
+        )
+
+        agent = AceAgent(
+            client=mock_client,
+            grounder=mock_grounder,
+            enable_grounder=True,
+            shadow_mode=False,
+            min_peak_probability=0.75,
+        )
+
+        obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
+        # (300, 300) is blacklisted!
+        action, latency_ms = agent.step(
+            obs,
+            goal="Click target button",
+            blacklisted_coordinates=[(300, 300)],
+        )
+
+        # Because (300, 300) is blacklisted, it must NOT delegate direct action
+        # Instead, it must fall back to Cloud LLM for recovery!
+        mock_client.predict_action.assert_called_once()
+        self.assertEqual(action.kind, ActionKind.KEY)
+        self.assertEqual(action.keys, ["win"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -23,7 +23,9 @@ python3 -m avcs.voice.demo --script "mujhe X kaam karna hai" "Save button daba d
 python3 -m avcs.voice.demo --get-ears             # download a Vosk model (once)
 python3 -m avcs.voice.demo --check-llm            # exit 0 only if the brain works
 python3 -m avcs.voice.demo --listen --eyes --ground --grant click   # live session
-python3 -m avcs_sdk.run_live_agent --goal "save the file" --dry-run # packaged agent
+python3 -m avcs.ace.run --goal "Start menu open karo aur Notepad search karo"   # live desktop autopilot
+python3 -m avcs_sdk.run_live_agent --goal "save the file" --live                # packaged agent live actuation
+python3 -m avcs_sdk.run_live_agent --goal "save the file" --dry-run             # simulation mode
 ```
 
 The brain resolves its key from the user's environment, then from the

@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 from PIL import Image
 
 from avcs.ace.actions import Action, ActionKind
@@ -157,6 +158,7 @@ class Observation:
     native_width: int = 1280
     native_height: int = 800
     capture_time_ms: float = 0.0
+    raw_numpy: Optional[np.ndarray] = None
 
 
 class SafetyRiskLevel(str, Enum):
@@ -215,7 +217,16 @@ class ExecutionSafetyFirewall:
         r'\b(?:click\s+(?:send|submit|post|tweet|publish)\b)',
     ]
 
-    CONSOLE_CLASSES = ("cascadia", "consolewindowclass", "windowsterminal", "mintty", "conemuwindowclass")
+    SENSITIVE_SYSTEM_PATTERNS = [
+        r'\b(?:reg\s+(?:add|delete|copy|save|restore)|regedit)\b',
+        r'\b(?:sc\s+(?:config|delete|stop)|net\s+stop)\b',
+        r'\b(?:netsh\s+advfirewall|Set-MpPreference\s+-Disable)\b',
+        r'\b(?:net\s+user\s+.*(?:/add|/delete)|net\s+localgroup)\b',
+        r'\b(?:shutdown\s+[/\-][srft]|Stop-Computer)\b',
+        r'\b(?:vssadmin\s+delete\s+shadows|wmic\s+shadowcopy\s+delete)\b',
+    ]
+
+    CONSOLE_CLASSES = ("cascadia", "consolewindowclass", "windowsterminal", "mintty", "conemuwindowclass", "cmd.exe", "powershell.exe", "#32770")
 
     def __init__(self, require_confirmation: bool = True) -> None:
         self.require_confirmation = require_confirmation
@@ -227,21 +238,33 @@ class ExecutionSafetyFirewall:
         user_confirmed: bool = False,
     ) -> SafetyCheckResult:
         """Evaluates an action for safety hazards and returns approval result."""
-        # 1. Console protection: ungrounded typing into terminal
-        if action.kind == ActionKind.TYPE and action.coordinate is None:
-            if active_window_class and any(term in active_window_class.lower() for term in self.CONSOLE_CLASSES):
-                return SafetyCheckResult(
-                    allowed=False,
-                    risk_level=SafetyRiskLevel.CONSOLE_HAZARD,
-                    reason=f"Execution Safety Firewall: Active console '{active_window_class}' detected. Rejecting ungrounded typing into terminal to prevent corruption. Click target UI element first.",
-                    requires_confirmation=False,
-                )
-
         text_content = ""
         if action.text:
             text_content += " " + action.text
         if action.reason:
             text_content += " " + action.reason
+
+        # 1. Console protection: ungrounded typing or dangerous shell commands into terminal/run dialog
+        if action.kind == ActionKind.TYPE:
+            if active_window_class and any(term in active_window_class.lower() for term in self.CONSOLE_CLASSES):
+                if action.coordinate is None or re.search(r'\b(?:del|rm|format|Remove-Item|sdelete|drop|git|powershell|cmd|reg|sc|net)\b', text_content, re.IGNORECASE):
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.CONSOLE_HAZARD,
+                        reason=f"Execution Safety Firewall: Active console '{active_window_class}' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first.",
+                        requires_confirmation=False,
+                    )
+
+        # Check for system modification patterns
+        for pat in self.SENSITIVE_SYSTEM_PATTERNS:
+            if re.search(pat, text_content, re.IGNORECASE):
+                if not user_confirmed and self.require_confirmation:
+                    return SafetyCheckResult(
+                        allowed=False,
+                        risk_level=SafetyRiskLevel.SENSITIVE_SYSTEM,
+                        reason=f"Execution Safety Firewall: High-risk system modification detected matching pattern '{pat}'. Confirmation required.",
+                        requires_confirmation=True,
+                    )
 
         # 2. Check for Shift+Delete hotkey (permanent file deletion in Windows)
         if action.kind == ActionKind.KEY and action.keys:
@@ -321,10 +344,12 @@ class WindowsComputer:
         self.target_display = target_display
         self.shcore = getattr(ctypes.windll, "shcore", None)
 
-        # Enable Per-Monitor V2 DPI awareness for true physical pixel capture
+        # Enable Per-Monitor DPI awareness for true physical pixel capture
         try:
             if self.shcore and hasattr(self.shcore, "SetProcessDpiAwareness"):
                 self.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            elif hasattr(ctypes.windll.user32, "SetProcessDpiAwarenessContext"):
+                ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
             else:
                 ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
@@ -336,6 +361,65 @@ class WindowsComputer:
         self.user32 = ctypes.windll.user32
         self.gdi32 = ctypes.windll.gdi32
         self.kernel32 = getattr(ctypes.windll, "kernel32", None)
+        self.winmm = getattr(ctypes.windll, "winmm", None)
+
+        # Enable multimedia timer precision (1ms resolution instead of default 15.6ms)
+        if self.winmm and hasattr(self.winmm, "timeBeginPeriod"):
+            try:
+                self.winmm.timeBeginPeriod(1)
+            except Exception:
+                pass
+
+        # 64-bit type safety on Window handles
+        try:
+            if hasattr(self.user32, "WindowFromPoint"):
+                self.user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
+                self.user32.WindowFromPoint.restype = ctypes.wintypes.HWND
+            if hasattr(self.user32, "GetAncestor"):
+                self.user32.GetAncestor.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint]
+                self.user32.GetAncestor.restype = ctypes.wintypes.HWND
+            if hasattr(self.user32, "GetForegroundWindow"):
+                self.user32.GetForegroundWindow.argtypes = []
+                self.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+            if hasattr(self.user32, "SetForegroundWindow"):
+                self.user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+                self.user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+            if hasattr(self.user32, "GetDC"):
+                self.user32.GetDC.argtypes = [ctypes.wintypes.HWND]
+                self.user32.GetDC.restype = ctypes.c_void_p
+            if hasattr(self.user32, "ReleaseDC"):
+                self.user32.ReleaseDC.argtypes = [ctypes.wintypes.HWND, ctypes.c_void_p]
+                self.user32.ReleaseDC.restype = ctypes.c_int
+            if hasattr(self.gdi32, "CreateCompatibleDC"):
+                self.gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+                self.gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+            if hasattr(self.gdi32, "CreateCompatibleBitmap"):
+                self.gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+                self.gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+            if hasattr(self.gdi32, "SelectObject"):
+                self.gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                self.gdi32.SelectObject.restype = ctypes.c_void_p
+            if hasattr(self.gdi32, "DeleteDC"):
+                self.gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+                self.gdi32.DeleteDC.restype = ctypes.c_int
+            if hasattr(self.gdi32, "DeleteObject"):
+                self.gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+                self.gdi32.DeleteObject.restype = ctypes.c_int
+            if hasattr(self.gdi32, "BitBlt"):
+                self.gdi32.BitBlt.argtypes = [
+                    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_ulong
+                ]
+                self.gdi32.BitBlt.restype = ctypes.c_int
+            if hasattr(self.gdi32, "GetDIBits"):
+                self.gdi32.GetDIBits.argtypes = [
+                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint
+                ]
+                self.gdi32.GetDIBits.restype = ctypes.c_int
+        except Exception:
+            pass
+
         self._orig_hdesk: Optional[int] = None
         if self.kernel32 and hasattr(self.user32, "GetThreadDesktop"):
             try:
@@ -491,6 +575,12 @@ class WindowsComputer:
                 except Exception:
                     pass
         self._hdesk = None
+        winmm = getattr(self, "winmm", None)
+        if winmm and hasattr(winmm, "timeEndPeriod"):
+            try:
+                winmm.timeEndPeriod(1)
+            except Exception:
+                pass
 
     def __del__(self) -> None:
         self.close()
@@ -514,39 +604,68 @@ class WindowsComputer:
 
         # Update dimensions from active target display bounds
         left, top, width, height, _ = self.get_active_bounds()
-        self.native_width, self.native_height = width, height
+        self.native_width, self.native_height = max(1, width), max(1, height)
 
         hdc_screen = self.user32.GetDC(0)
-        hdc_mem = self.gdi32.CreateCompatibleDC(hdc_screen)
-        hbm = self.gdi32.CreateCompatibleBitmap(hdc_screen, self.native_width, self.native_height)
-        self.gdi32.SelectObject(hdc_mem, hbm)
+        hdc_mem = self.gdi32.CreateCompatibleDC(hdc_screen) if hdc_screen else None
+        hbm = self.gdi32.CreateCompatibleBitmap(hdc_screen, self.native_width, self.native_height) if hdc_screen else None
+        h_old = self.gdi32.SelectObject(hdc_mem, hbm) if (hdc_mem and hbm) else None
 
-        # BitBlt capture with layered window support (CAPTUREBLT) from active display bounds
-        self.gdi32.BitBlt(hdc_mem, 0, 0, self.native_width, self.native_height, hdc_screen, left, top, SRCCOPY | CAPTUREBLT)
-        self.gdi32.GdiFlush()
-
-        # Extract bits
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = self.native_width
-        bmi.bmiHeader.biHeight = -self.native_height  # Top-down DIB
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        bmi.bmiHeader.biCompression = BI_RGB
-
-        buffer_len = self.native_width * self.native_height * 4
+        buffer_len = max(4, self.native_width * self.native_height * 4)
         raw_bytes = (ctypes.c_char * buffer_len)()
-        self.gdi32.GetDIBits(hdc_mem, hbm, 0, self.native_height, raw_bytes, ctypes.byref(bmi), DIB_RGB_COLORS)
 
-        # Clean GDI handles
-        self.user32.ReleaseDC(0, hdc_screen)
-        self.gdi32.DeleteDC(hdc_mem)
-        self.gdi32.DeleteObject(hbm)
+        try:
+            if hdc_screen and hdc_mem and hbm:
+                # BitBlt capture with layered window support (CAPTUREBLT) from active display bounds
+                self.gdi32.BitBlt(hdc_mem, 0, 0, self.native_width, self.native_height, hdc_screen, left, top, SRCCOPY | CAPTUREBLT)
+                self.gdi32.GdiFlush()
 
-        # Construct image and scale to canonical WXGA (1280x800)
-        img = Image.frombuffer("RGBA", (self.native_width, self.native_height), raw_bytes, "raw", "BGRA", 0, 1).convert("RGB")
-        if (self.native_width, self.native_height) != (self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT):
-            img = img.resize((self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT), Image.Resampling.BILINEAR)
+                # Extract bits
+                bmi = BITMAPINFO()
+                bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+                bmi.bmiHeader.biWidth = self.native_width
+                bmi.bmiHeader.biHeight = -self.native_height  # Top-down DIB
+                bmi.bmiHeader.biPlanes = 1
+                bmi.bmiHeader.biBitCount = 32
+                bmi.bmiHeader.biCompression = BI_RGB
+
+                self.gdi32.GetDIBits(hdc_mem, hbm, 0, self.native_height, raw_bytes, ctypes.byref(bmi), DIB_RGB_COLORS)
+        finally:
+            if hdc_mem and h_old:
+                try:
+                    self.gdi32.SelectObject(hdc_mem, h_old)
+                except Exception:
+                    pass
+            if hdc_mem:
+                try:
+                    self.gdi32.DeleteDC(hdc_mem)
+                except Exception:
+                    pass
+            if hbm:
+                try:
+                    self.gdi32.DeleteObject(hbm)
+                except Exception:
+                    pass
+            if hdc_screen:
+                try:
+                    self.user32.ReleaseDC(0, hdc_screen)
+                except Exception:
+                    pass
+
+        # Construct image and scale to canonical WXGA (1280x800) preserving aspect ratio via isotropic letterboxing
+        img_native = Image.frombuffer("RGBA", (self.native_width, self.native_height), raw_bytes, "raw", "BGRA", 0, 1).convert("RGB")
+        scale = min(self.CANONICAL_WIDTH / max(1, self.native_width), self.CANONICAL_HEIGHT / max(1, self.native_height))
+        scaled_w = max(1, min(self.CANONICAL_WIDTH, int(round(self.native_width * scale))))
+        scaled_h = max(1, min(self.CANONICAL_HEIGHT, int(round(self.native_height * scale))))
+        pad_x = (self.CANONICAL_WIDTH - scaled_w) // 2
+        pad_y = (self.CANONICAL_HEIGHT - scaled_h) // 2
+
+        if (self.native_width, self.native_height) == (self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT):
+            img = img_native
+        else:
+            img_resized = img_native.resize((scaled_w, scaled_h), Image.Resampling.BILINEAR)
+            img = Image.new("RGB", (self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT), (18, 18, 18))
+            img.paste(img_resized, (pad_x, pad_y))
 
         # Encode in-memory
         buf = io.BytesIO()
@@ -561,6 +680,9 @@ class WindowsComputer:
             img.save(buf, format="JPEG", quality=85)
             fmt_out = "jpeg"
 
+        # Convert to raw RGB numpy array to bypass compression/decompression for local perception
+        raw_np = np.asarray(img)
+
         t1 = time.time()
         return Observation(
             image_bytes=buf.getvalue(),
@@ -570,13 +692,26 @@ class WindowsComputer:
             native_width=self.native_width,
             native_height=self.native_height,
             capture_time_ms=(t1 - t0) * 1000.0,
+            raw_numpy=raw_np,
         )
 
     def _canonical_to_native(self, x: int, y: int) -> Tuple[int, int]:
-        """Maps coordinate from canonical 1280x800 to native hardware display pixels on active display."""
+        """Maps coordinate from canonical 1280x800 to native hardware display pixels on active display.
+        
+        Uses isotropic letterbox un-padding and center sampling to eliminate the -0.5px odd-coordinate bias.
+        """
         left, top, width, height, _ = self.get_active_bounds()
-        nx = left + int((x / self.CANONICAL_WIDTH) * width)
-        ny = top + int((y / self.CANONICAL_HEIGHT) * height)
+        scale = min(self.CANONICAL_WIDTH / max(1, width), self.CANONICAL_HEIGHT / max(1, height))
+        scaled_w = max(1, min(self.CANONICAL_WIDTH, int(round(width * scale))))
+        scaled_h = max(1, min(self.CANONICAL_HEIGHT, int(round(height * scale))))
+        pad_x = (self.CANONICAL_WIDTH - scaled_w) // 2
+        pad_y = (self.CANONICAL_HEIGHT - scaled_h) // 2
+
+        x_unpad = max(0, min(scaled_w, x - pad_x))
+        y_unpad = max(0, min(scaled_h, y - pad_y))
+
+        nx = left + int(round(x_unpad / scale))
+        ny = top + int(round(y_unpad / scale))
         nx = max(left, min(left + width - 1, nx))
         ny = max(top, min(top + height - 1, ny))
         return nx, ny
@@ -584,8 +719,16 @@ class WindowsComputer:
     def _native_to_canonical(self, nx: int, ny: int) -> Tuple[int, int]:
         """Maps coordinate from native hardware display pixels back to canonical 1280x800."""
         left, top, width, height, _ = self.get_active_bounds()
-        cx = int(((nx - left) / max(1, width)) * self.CANONICAL_WIDTH)
-        cy = int(((ny - top) / max(1, height)) * self.CANONICAL_HEIGHT)
+        scale = min(self.CANONICAL_WIDTH / max(1, width), self.CANONICAL_HEIGHT / max(1, height))
+        scaled_w = max(1, min(self.CANONICAL_WIDTH, int(round(width * scale))))
+        scaled_h = max(1, min(self.CANONICAL_HEIGHT, int(round(height * scale))))
+        pad_x = (self.CANONICAL_WIDTH - scaled_w) // 2
+        pad_y = (self.CANONICAL_HEIGHT - scaled_h) // 2
+
+        scaled_x = int(round((nx - left) * scale))
+        scaled_y = int(round((ny - top) * scale))
+        cx = pad_x + scaled_x
+        cy = pad_y + scaled_y
         cx = max(0, min(self.CANONICAL_WIDTH, cx))
         cy = max(0, min(self.CANONICAL_HEIGHT, cy))
         return cx, cy
@@ -616,7 +759,7 @@ class WindowsComputer:
         steps = max(5, int(round(duration_sec * 100.0)))
         dt = duration_sec / steps
 
-        for step in range(1, steps + 1):
+        for step in range(1, steps):
             tau = step / float(steps)
             poly = 10.0 * (tau ** 3) - 15.0 * (tau ** 4) + 6.0 * (tau ** 5)
             cur_x = int(round(start_x + (target_x - start_x) * poly))
@@ -634,6 +777,7 @@ class WindowsComputer:
         inp.type = INPUT_MOUSE
         actual_flags = flags
 
+        explicit_coord = (x is not None or y is not None)
         if x is None or y is None:
             cx, cy = self.get_cursor_pos()
             if x is None:
@@ -649,32 +793,45 @@ class WindowsComputer:
             vx, vy = 0, 0
             vw, vh = self.native_width, self.native_height
 
-        norm_x = min(65535, max(0, int(round(((x - vx) * 65535.0) / max(1, vw - 1)))))
-        norm_y = min(65535, max(0, int(round(((y - vy) * 65535.0) / max(1, vh - 1)))))
+        norm_x = min(65535, max(0, int(((x - vx + 0.5) * 65536.0) / max(1, vw))))
+        norm_y = min(65535, max(0, int(((y - vy + 0.5) * 65536.0) / max(1, vh))))
         inp.union.mi.dx = norm_x
         inp.union.mi.dy = norm_y
-        actual_flags |= (MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+
+        button_flags = (
+            MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP |
+            MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP |
+            MOUSEEVENTF_MIDDLEDOWN | MOUSEEVENTF_MIDDLEUP
+        )
+
+        # Do NOT append MOUSEEVENTF_MOVE to button clicks, as it converts clicks to drag gestures in WinUI 3
+        if flags & MOUSEEVENTF_MOVE:
+            actual_flags |= (MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+        elif not (flags & button_flags) and explicit_coord and not (actual_flags & (MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL)):
+            actual_flags |= (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
 
         inp.union.mi.dwFlags = actual_flags
         inp.union.mi.mouseData = data
         self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     def _send_unicode_char(self, char: str) -> None:
-        """Sends clean unicode keystroke via SendInput."""
-        code = ord(char)
-        # Key down
-        inp_down = INPUT()
-        inp_down.type = INPUT_KEYBOARD
-        inp_down.union.ki.wScan = code
-        inp_down.union.ki.dwFlags = KEYEVENTF_UNICODE
-        # Key up
-        inp_up = INPUT()
-        inp_up.type = INPUT_KEYBOARD
-        inp_up.union.ki.wScan = code
-        inp_up.union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        """Sends clean unicode keystroke via SendInput with UTF-16 surrogate pair support and 25ms key dwell."""
+        utf16_bytes = char.encode("utf-16-le")
+        code_units = [int.from_bytes(utf16_bytes[i:i+2], "little") for i in range(0, len(utf16_bytes), 2)]
+        for unit in code_units:
+            inp_down = INPUT()
+            inp_down.type = INPUT_KEYBOARD
+            inp_down.union.ki.wScan = unit
+            inp_down.union.ki.dwFlags = KEYEVENTF_UNICODE
+            self.user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
 
-        inputs = (INPUT * 2)(inp_down, inp_up)
-        self.user32.SendInput(2, inputs, ctypes.sizeof(INPUT))
+            time.sleep(0.025)  # 25ms key dwell time prevents dropped keystrokes
+
+            inp_up = INPUT()
+            inp_up.type = INPUT_KEYBOARD
+            inp_up.union.ki.wScan = unit
+            inp_up.union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            self.user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
 
     EXTENDED_VKS = {
         0x26, 0x28, 0x25, 0x27,  # Up, Down, Left, Right
@@ -685,7 +842,7 @@ class WindowsComputer:
     }
 
     def _send_vk(self, vk_code: int, keyup: bool = False) -> None:
-        """Sends virtual key event including hardware scan code."""
+        """Sends virtual key event cleanly via Virtual-Key code."""
         inp = INPUT()
         inp.type = INPUT_KEYBOARD
         inp.union.ki.wVk = vk_code
@@ -693,16 +850,32 @@ class WindowsComputer:
         scan_code = 0
         if hasattr(self.user32, "MapVirtualKeyW"):
             try:
-                scan_code = self.user32.MapVirtualKeyW(vk_code, 0)  # MAPVK_VK_TO_VSC = 0
+                scan_code = self.user32.MapVirtualKeyW(vk_code, 0) & 0xFF
             except Exception:
                 scan_code = 0
-        inp.union.ki.wScan = scan_code & 0xFFFF
+        inp.union.ki.wScan = scan_code
 
         flags = KEYEVENTF_KEYUP if keyup else 0
-        if vk_code in self.EXTENDED_VKS:
+        if vk_code in self.EXTENDED_VKS or (scan_code & 0xFF00) == 0xE000:
             flags |= KEYEVENTF_EXTENDEDKEY
+        # Do not set KEYEVENTF_SCANCODE so Windows processes wVk directly
         inp.union.ki.dwFlags = flags
         self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    def sanitize_modifier_keys(self) -> None:
+        """Releases stuck modifier keys (Win, Ctrl, Alt, Shift) to prevent hotkey misfires."""
+        modifier_vks = [
+            0x5B, 0x5C,        # LWin, RWin
+            0x11, 0xA2, 0xA3,  # Ctrl, LCtrl, RCtrl
+            0x12, 0xA4, 0xA5,  # Alt, LAlt, RAlt
+            0x10, 0xA0, 0xA1,  # Shift, LShift, RShift
+        ]
+        for vk in modifier_vks:
+            try:
+                if self.user32 and (self.user32.GetAsyncKeyState(vk) & 0x8000):
+                    self._send_vk(vk, keyup=True)
+            except Exception:
+                pass
 
     def emergency_release_hardware(self) -> None:
         """Failsafe release of any held mouse buttons, modifier keys, and cursor clipping."""
@@ -717,19 +890,7 @@ class WindowsComputer:
         except Exception:
             pass
 
-        # Release modifier keys if held down
-        modifier_vks = [
-            0x5B, 0x5C,        # LWin, RWin
-            0x11, 0xA2, 0xA3,  # Ctrl, LCtrl, RCtrl
-            0x12, 0xA4, 0xA5,  # Alt, LAlt, RAlt
-            0x10, 0xA0, 0xA1,  # Shift, LShift, RShift
-        ]
-        for vk in modifier_vks:
-            try:
-                if self.user32 and (self.user32.GetAsyncKeyState(vk) & 0x8000):
-                    self._send_vk(vk, keyup=True)
-            except Exception:
-                pass
+        self.sanitize_modifier_keys()
 
         # Reset cursor clipping
         try:
@@ -747,16 +908,18 @@ class WindowsComputer:
             "backspace": 0x08, "delete": 0x2E, "del": 0x2E,
             "escape": 0x1B, "esc": 0x1B,
             "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "arrowup": 0x26, "arrowdown": 0x28, "arrowleft": 0x25, "arrowright": 0x27,
+            "arrow_up": 0x26, "arrow_down": 0x28, "arrow_left": 0x25, "arrow_right": 0x27,
             "ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12,
             "win": 0x5B, "windows": 0x5B, "super": 0x5B, "cmd": 0x5B, "command": 0x5B,
             "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
-            "page_up": 0x21, "page_down": 0x22,
+            "page_up": 0x21, "page_down": 0x22, "pgup": 0x21, "pgdn": 0x22,
             "insert": 0x2D,
             "capslock": 0x14, "caps_lock": 0x14,
             "prtsc": 0x2C, "printscreen": 0x2C, "print_screen": 0x2C,
             "super_l": 0x5B, "super_r": 0x5C, "lwin": 0x5B, "rwin": 0x5C,
-            "ctrl_l": 0x11, "ctrl_r": 0x11, "control_l": 0x11, "control_r": 0x11,
-            "alt_l": 0x12, "alt_r": 0x12, "shift_l": 0x10, "shift_r": 0x10,
+            "ctrl_l": 0x11, "ctrl_r": 0xA3, "control_l": 0x11, "control_r": 0xA3,
+            "alt_l": 0x12, "alt_r": 0xA5, "shift_l": 0x10, "shift_r": 0xA1,
             "menu": 0x5D,
             "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
             "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
@@ -777,6 +940,66 @@ class WindowsComputer:
                 pass
         return None
 
+    def _activate_window_at(self, nx: int, ny: int) -> None:
+        """Robustly activates the window at (nx, ny) using Win32 foreground lock bypass.
+
+        Bypasses Windows SetForegroundWindow lock restrictions via Alt-key poke and
+        AttachThreadInput. Never forces foreground on taskbar (shell_traywnd), desktop
+        (progman/workerw), or system popups (#32768) to avoid dismissing flyouts.
+        """
+        if not self.user32:
+            return
+        try:
+            pt = ctypes.wintypes.POINT(nx, ny)
+            hwnd = self.user32.WindowFromPoint(pt)
+            if not hwnd:
+                return
+            root_h = self.user32.GetAncestor(hwnd, 2)  # GA_ROOT = 2
+            target_hwnd = root_h or hwnd
+
+            # Check window class to avoid forcing foreground on taskbar, desktop, or popups
+            buf = ctypes.create_unicode_buffer(256)
+            self.user32.GetClassNameW(target_hwnd, buf, 256)
+            cls_name = buf.value.lower()
+            if cls_name in ("shell_traywnd", "progman", "workerw", "#32768", "windows.ui.core.corewindow", "xaml_windowedpopupclass"):
+                return
+
+            fg = self.user32.GetForegroundWindow()
+            if target_hwnd == fg:
+                return
+
+            # Check if minimized / iconic -> restore
+            if hasattr(self.user32, "IsIconic") and self.user32.IsIconic(target_hwnd):
+                SW_RESTORE = 9
+                self.user32.ShowWindow(target_hwnd, SW_RESTORE)
+
+            # Bypass foreground lock: Alt poke + AttachThreadInput
+            current_tid = self.kernel32.GetCurrentThreadId() if self.kernel32 else 0
+            fg_pid = ctypes.c_ulong()
+            fg_tid = self.user32.GetWindowThreadProcessId(fg, ctypes.byref(fg_pid)) if fg else 0
+
+            attached = False
+            if fg_tid and current_tid and fg_tid != current_tid:
+                try:
+                    attached = bool(self.user32.AttachThreadInput(current_tid, fg_tid, True))
+                except Exception:
+                    attached = False
+
+            try:
+                self.user32.SetForegroundWindow(target_hwnd)
+                if hasattr(self.user32, "BringWindowToTop"):
+                    self.user32.BringWindowToTop(target_hwnd)
+            finally:
+                if attached:
+                    try:
+                        self.user32.AttachThreadInput(current_tid, fg_tid, False)
+                    except Exception:
+                        pass
+
+            time.sleep(0.04)
+        except Exception:
+            pass
+
     def execute(self, action: Action, dry_run: bool = False) -> None:
         """Executes physical OS action with native Win32 hardware events."""
         if action.kind == ActionKind.STOP:
@@ -788,12 +1011,14 @@ class WindowsComputer:
             return
 
         self.attach_desktop()
+        self.sanitize_modifier_keys()
 
-        if action.kind in (ActionKind.LEFT_CLICK, ActionKind.RIGHT_CLICK, ActionKind.DOUBLE_CLICK, ActionKind.TRIPLE_CLICK):
+        if action.kind in (ActionKind.LEFT_CLICK, ActionKind.RIGHT_CLICK, ActionKind.DOUBLE_CLICK, ActionKind.TRIPLE_CLICK, ActionKind.MIDDLE_CLICK):
             if action.coordinate:
                 nx, ny = self._canonical_to_native(*action.coordinate)
+                self._activate_window_at(nx, ny)
                 self._move_minimum_jerk(nx, ny)
-                time.sleep(0.035)  # 35ms hover dwell
+                time.sleep(0.10)  # 100ms hover dwell for WinUI 3 / XAML hit-testing
             else:
                 nx, ny = self.get_cursor_pos()
 
@@ -801,6 +1026,10 @@ class WindowsComputer:
                 self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
                 time.sleep(0.065)  # 65ms hold duration
                 self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
+            elif action.kind == ActionKind.MIDDLE_CLICK:
+                self._send_mouse_event(MOUSEEVENTF_MIDDLEDOWN, x=nx, y=ny)
+                time.sleep(0.065)
+                self._send_mouse_event(MOUSEEVENTF_MIDDLEUP, x=nx, y=ny)
             elif action.kind == ActionKind.RIGHT_CLICK:
                 self._send_mouse_event(MOUSEEVENTF_RIGHTDOWN, x=nx, y=ny)
                 time.sleep(0.065)
@@ -810,13 +1039,13 @@ class WindowsComputer:
                     self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
                     time.sleep(0.065)
                     self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
-                    time.sleep(0.05)
+                    time.sleep(0.095)  # 95ms biological double click pause
             elif action.kind == ActionKind.TRIPLE_CLICK:
                 for _ in range(3):
                     self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
                     time.sleep(0.065)
                     self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
-                    time.sleep(0.04)
+                    time.sleep(0.095)
 
         elif action.kind == ActionKind.MOUSE_MOVE:
             if action.coordinate:
@@ -851,6 +1080,10 @@ class WindowsComputer:
                 nx, ny = self.get_cursor_pos()
             if action.scroll_delta:
                 dx, dy = action.scroll_delta
+                if abs(dy) <= 10 and dy != 0:
+                    dy = dy * 120
+                if abs(dx) <= 10 and dx != 0:
+                    dx = dx * 120
                 if dy != 0:
                     self._send_mouse_event(MOUSEEVENTF_WHEEL, data=dy, x=nx, y=ny)
                 if dx != 0:
@@ -861,45 +1094,84 @@ class WindowsComputer:
         elif action.kind == ActionKind.TYPE:
             if action.coordinate:
                 nx, ny = self._canonical_to_native(*action.coordinate)
+                self._activate_window_at(nx, ny)
                 self._move_minimum_jerk(nx, ny)
                 time.sleep(0.035)
                 self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
                 time.sleep(0.065)
                 self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
+                time.sleep(0.10)  # 100ms focus verification dwell before injecting keystrokes
+
+            if getattr(action, "clear_first", False):
+                # Select all (Ctrl+A) and backspace to clear active target field before typing
+                self._send_vk(0x11, keyup=False)  # VK_CONTROL
+                time.sleep(0.02)
+                self._send_vk(0x41, keyup=False)  # 'A'
+                time.sleep(0.02)
+                self._send_vk(0x41, keyup=True)
+                self._send_vk(0x11, keyup=True)
+                time.sleep(0.03)
+                self._send_vk(0x08, keyup=False)  # VK_BACK
+                time.sleep(0.02)
+                self._send_vk(0x08, keyup=True)
                 time.sleep(0.05)
 
             if action.text:
-                for char in action.text:
+                time.sleep(0.05)  # 50ms pre-typing focus stability dwell eliminates first-character drop
+                text_to_send = action.text.replace("\r\n", "\n")
+                for i, char in enumerate(text_to_send):
                     if char in ("\r", "\n"):
                         self._send_vk(0x0D, keyup=False)
-                        time.sleep(0.01)
+                        time.sleep(0.025)
                         self._send_vk(0x0D, keyup=True)
                     elif char == "\t":
                         self._send_vk(0x09, keyup=False)
-                        time.sleep(0.01)
+                        time.sleep(0.025)
                         self._send_vk(0x09, keyup=True)
                     else:
                         self._send_unicode_char(char)
-                    time.sleep(0.005)
+                    if i == 0:
+                        time.sleep(0.10)  # 100ms pause after first char to absorb StartMenuExperienceHost -> SearchHost focus handoff
+                    else:
+                        time.sleep(0.015)  # 15ms biological cadence prevents TSF queue overflow
 
             if action.press_enter:
-                time.sleep(0.02)
+                time.sleep(0.50)  # 500ms ensures SearchHost debouncer completes query
                 self._send_vk(0x0D, keyup=False)
-                time.sleep(0.01)
+                time.sleep(0.025)
                 self._send_vk(0x0D, keyup=True)
 
         elif action.kind == ActionKind.KEY:
             if action.keys:
                 pressed_vks = []
-                for k in action.keys:
-                    vk = self._resolve_vk(k)
-                    if vk:
-                        self._send_vk(vk, keyup=False)
-                        pressed_vks.append(vk)
-                        time.sleep(0.01)
-                for vk in reversed(pressed_vks):
-                    self._send_vk(vk, keyup=True)
-                    time.sleep(0.01)
+                try:
+                    for k in action.keys:
+                        needs_shift = False
+                        if len(k) == 1 and hasattr(self.user32, "VkKeyScanW"):
+                            try:
+                                scan = self.user32.VkKeyScanW(ord(k))
+                                if scan != -1 and ((scan >> 8) & 1):
+                                    needs_shift = True
+                            except Exception:
+                                pass
+                        if needs_shift and 0x10 not in pressed_vks:
+                            self._send_vk(0x10, keyup=False)
+                            pressed_vks.append(0x10)
+                            time.sleep(0.015)
+
+                        vk = self._resolve_vk(k)
+                        if vk:
+                            self._send_vk(vk, keyup=False)
+                            pressed_vks.append(vk)
+                            time.sleep(0.025)
+                    time.sleep(0.065)  # 65ms chord dwell for reliable OS hook processing
+                finally:
+                    for vk in reversed(pressed_vks):
+                        try:
+                            self._send_vk(vk, keyup=True)
+                        except Exception:
+                            pass
+                        time.sleep(0.015)
 
         elif action.kind == ActionKind.WAIT:
             time.sleep(max(0.1, action.duration))

@@ -377,8 +377,8 @@ def main() -> None:
     parser.add_argument("--goal", type=str, default="Inspect screen and summarize active window state", help="Goal for the agent")
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
-    parser.add_argument("--dry-run", action="store_true", default=True, help="Bypass physical mouse clicks (default: True)")
-    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing")
+    parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks and keyboard typing (simulation mode)")
+    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing (default: active)")
     parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
     parser.add_argument("--base-url", type=str, default=None, help="Custom LLM API Base URL")
     args = parser.parse_args()
@@ -391,7 +391,7 @@ def main() -> None:
     elif args.monitor:
         run_monitor(args.seconds, api_key=args.api_key)
     else:
-        is_dry_run = not args.live
+        is_dry_run = bool(args.dry_run and not args.live)
         run_agent(args.goal, dry_run=is_dry_run, api_key=args.api_key, base_url=args.base_url)
 
 

@@ -40,3 +40,6 @@ models/
 avcs/ace/skills_vault/trajectories/
 avcs/ace/skills_vault/skills/
 avcs/ace/skills_vault/skills.db*
+avcs/ace/skills_vault/failures/
+avcs/ace/skills_vault/golden/
+

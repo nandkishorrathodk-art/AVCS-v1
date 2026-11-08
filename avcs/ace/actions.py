@@ -19,6 +19,7 @@ class ActionKind(str, Enum):
     RIGHT_CLICK = "right_click"
     DOUBLE_CLICK = "double_click"
     TRIPLE_CLICK = "triple_click"
+    MIDDLE_CLICK = "middle_click"
     MOUSE_MOVE = "mouse_move"
     LEFT_CLICK_DRAG = "left_click_drag"
     SCROLL = "scroll"
@@ -42,6 +43,9 @@ class Action:
     duration: float = 0.0
     reason: str = ""
     press_enter: bool = False
+    confidence: float = 1.0
+    clear_first: bool = False
+    metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"kind": self.kind.value}
@@ -57,17 +61,27 @@ class Action:
             d["keys"] = list(self.keys)
         if self.scroll_delta is not None:
             d["scroll_delta"] = list(self.scroll_delta)
-        if self.duration:
-            d["duration"] = self.duration
+        d["duration"] = self.duration
         if self.reason:
             d["reason"] = self.reason
         if self.press_enter:
             d["press_enter"] = self.press_enter
+        d["confidence"] = self.confidence
+        if self.clear_first:
+            d["clear_first"] = self.clear_first
+        if self.metadata:
+            d["metadata"] = dict(self.metadata)
         return d
 
     @staticmethod
-    def _parse_coordinate_pair(val_x: Any, val_y: Any, canvas_w: int = 1280, canvas_h: int = 800) -> Optional[Tuple[int, int]]:
-        """Parses coordinates, automatically converting normalized [0.0, 1.0] floats to pixels."""
+    def _parse_coordinate_pair(
+        val_x: Any,
+        val_y: Any,
+        canvas_w: int = 1280,
+        canvas_h: int = 800,
+        is_1000_grid: bool = False,
+    ) -> Optional[Tuple[int, int]]:
+        """Parses coordinates, automatically converting normalized [0.0, 1.0] floats or [0, 1000] grid to pixels."""
         if val_x is None or val_y is None:
             return None
         try:
@@ -95,8 +109,16 @@ class Action:
         if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (is_float or 0.0 < fx < 1.0 or 0.0 < fy < 1.0):
             ix = int(round(fx * canvas_w))
             iy = int(round(fy * canvas_h))
-        # 2. Frontier VAM normalized [0, 1000] grid (e.g. Nemotron, Qwen-VL, Molmo emitting fy > canvas_h)
-        elif (canvas_h < fy <= 1000.0 and 0.0 <= fx <= 1000.0):
+        # 2. Frontier VAM normalized [0, 1000] grid (e.g. Nemotron, Qwen-VL, Molmo emitting coordinates on 1000 grid or exceeding canvas bounds)
+        elif (
+            (is_1000_grid and 0.0 <= fx <= 1000.0 and 0.0 <= fy <= 1000.0)
+            or (
+                (fx > 1.0 or fy > 1.0)
+                and (fx > canvas_w or fy > canvas_h or (fx <= 1000.0 and fy <= 1000.0 and is_1000_grid))
+                and 0.0 <= fx <= 1000.0
+                and 0.0 <= fy <= 1000.0
+            )
+        ):
             ix = int(round((fx / 1000.0) * canvas_w))
             iy = int(round((fy / 1000.0) * canvas_h))
         else:
@@ -108,20 +130,20 @@ class Action:
         return ix, iy
 
     @classmethod
-    def _extract_coord(cls, val: Any) -> Optional[Tuple[int, int]]:
+    def _extract_coord(cls, val: Any, is_1000_grid: bool = False) -> Optional[Tuple[int, int]]:
         """Safely extracts coordinate pair from list, tuple, dict, or string."""
         if val is None:
             return None
         if isinstance(val, dict):
             vx = val.get("x", val.get("0", val.get("x1")))
             vy = val.get("y", val.get("1", val.get("y1")))
-            return cls._parse_coordinate_pair(vx, vy)
+            return cls._parse_coordinate_pair(vx, vy, is_1000_grid=is_1000_grid)
         if isinstance(val, (list, tuple)) and len(val) >= 2:
-            return cls._parse_coordinate_pair(val[0], val[1])
+            return cls._parse_coordinate_pair(val[0], val[1], is_1000_grid=is_1000_grid)
         if isinstance(val, str):
             nums = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val)
             if len(nums) >= 2:
-                return cls._parse_coordinate_pair(nums[0], nums[1])
+                return cls._parse_coordinate_pair(nums[0], nums[1], is_1000_grid=is_1000_grid)
         return None
 
     @classmethod
@@ -178,6 +200,7 @@ class Action:
             "secondary_click": ActionKind.RIGHT_CLICK,
             "double_click": ActionKind.DOUBLE_CLICK,
             "triple_click": ActionKind.TRIPLE_CLICK,
+            "middle_click": ActionKind.MIDDLE_CLICK,
             "mouse_move": ActionKind.MOUSE_MOVE,
             "move": ActionKind.MOUSE_MOVE,
             "hover": ActionKind.MOUSE_MOVE,
@@ -193,6 +216,7 @@ class Action:
             "write": ActionKind.TYPE,
             "key": ActionKind.KEY,
             "press": ActionKind.KEY,
+            "press_key": ActionKind.KEY,
             "hotkey": ActionKind.KEY,
             "shortcut": ActionKind.KEY,
             "key_press": ActionKind.KEY,
@@ -207,32 +231,56 @@ class Action:
         }
         kind = alias_map.get(raw_kind, ActionKind.WAIT)
 
+        # Handle button specification and click count overrides (e.g. Anthropic format {"action": "mouse_click", "button": "right"})
+        btn = str(data.get("button", "")).lower().strip()
+        dbl_click = bool(data.get("double_click", False)) or int(data.get("click_count", 0)) == 2
+        trp_click = bool(data.get("triple_click", False)) or int(data.get("click_count", 0)) == 3
+        clear_first_flag = bool(data.get("clear_first", False))
+
+        if kind in (ActionKind.LEFT_CLICK, ActionKind.WAIT) and raw_kind in ("click", "mouse_click", "left_click", "button_click"):
+            if trp_click:
+                kind = ActionKind.TRIPLE_CLICK
+            elif dbl_click:
+                kind = ActionKind.DOUBLE_CLICK
+            elif btn in ("right", "secondary"):
+                kind = ActionKind.RIGHT_CLICK
+            elif btn in ("middle", "wheel"):
+                kind = ActionKind.MIDDLE_CLICK
+            else:
+                kind = ActionKind.LEFT_CLICK
+
+        is_1000 = (
+            data.get("grid") in (1000, "1000")
+            or str(data.get("coordinate_system", "")).lower() in ("1000", "nemotron", "qwen", "molmo")
+            or data.get("scale") in (1000, "1000")
+        )
+
         coord = None
         for key_name in ("coordinate", "coords", "point", "position", "pos", "location", "target"):
             if key_name in data and data[key_name] is not None:
-                coord = cls._extract_coord(data[key_name])
+                coord = cls._extract_coord(data[key_name], is_1000_grid=is_1000)
                 if coord is not None:
                     break
         if coord is None and "x" in data and "y" in data and data["x"] is not None and data["y"] is not None:
-            coord = cls._parse_coordinate_pair(data["x"], data["y"])
+            coord = cls._parse_coordinate_pair(data["x"], data["y"], is_1000_grid=is_1000)
 
         start_c = None
         for s_key in ("start_coordinate", "start_coords", "start_point", "from", "start"):
             if s_key in data and data[s_key] is not None:
-                start_c = cls._extract_coord(data[s_key])
+                start_c = cls._extract_coord(data[s_key], is_1000_grid=is_1000)
                 if start_c is not None:
                     break
         if start_c is None and "x1" in data and "y1" in data:
-            start_c = cls._parse_coordinate_pair(data["x1"], data["y1"])
+            start_c = cls._parse_coordinate_pair(data["x1"], data["y1"], is_1000_grid=is_1000)
 
         end_c = None
         for e_key in ("end_coordinate", "end_coords", "end_point", "to", "end"):
             if e_key in data and data[e_key] is not None:
-                end_c = cls._extract_coord(data[e_key])
+                end_c = cls._extract_coord(data[e_key], is_1000_grid=is_1000)
                 if end_c is not None:
                     break
         if end_c is None and "x2" in data and "y2" in data:
-            end_c = cls._parse_coordinate_pair(data["x2"], data["y2"])
+            end_c = cls._parse_coordinate_pair(data["x2"], data["y2"], is_1000_grid=is_1000)
 
         # Fallback for left_click_drag when destination coordinate is passed as 'coordinate'
         if kind == ActionKind.LEFT_CLICK_DRAG and end_c is None and coord is not None:
@@ -278,22 +326,30 @@ class Action:
                 keys = [s] if s else None
 
         scroll_d = None
-        if "scroll_delta" in data and data["scroll_delta"] and len(data["scroll_delta"]) >= 2:
-            sd = data["scroll_delta"]
-            scroll_d = (int(float(sd[0])), int(float(sd[1])))
-        elif "delta_y" in data or "delta_x" in data:
-            scroll_d = (int(float(data.get("delta_x", 0))), int(float(data.get("delta_y", 0))))
-        elif "direction" in data:
-            direction = str(data["direction"]).lower().strip()
-            amount_val = int(float(data.get("amount", data.get("clicks", 1)))) * 120
-            if direction == "up":
-                scroll_d = (0, amount_val)
-            elif direction == "down":
-                scroll_d = (0, -amount_val)
-            elif direction == "right":
-                scroll_d = (amount_val, 0)
-            elif direction == "left":
-                scroll_d = (-amount_val, 0)
+        try:
+            if "scroll_delta" in data and data["scroll_delta"] is not None:
+                sd = data["scroll_delta"]
+                if isinstance(sd, (list, tuple)) and len(sd) >= 2:
+                    scroll_d = (int(float(sd[0])), int(float(sd[1])))
+                elif isinstance(sd, str):
+                    nums = re.findall(r'[-+]?\d*\.?\d+', sd)
+                    if len(nums) >= 2:
+                        scroll_d = (int(float(nums[0])), int(float(nums[1])))
+            elif "delta_y" in data or "delta_x" in data:
+                scroll_d = (int(float(data.get("delta_x", 0))), int(float(data.get("delta_y", 0))))
+            elif "direction" in data:
+                direction = str(data["direction"]).lower().strip()
+                amount_val = int(float(data.get("amount", data.get("clicks", 1)))) * 120
+                if direction == "up":
+                    scroll_d = (0, amount_val)
+                elif direction == "down":
+                    scroll_d = (0, -amount_val)
+                elif direction == "right":
+                    scroll_d = (amount_val, 0)
+                elif direction == "left":
+                    scroll_d = (-amount_val, 0)
+        except (ValueError, TypeError):
+            scroll_d = None
 
         # Text alias normalization (text, value, content, input, query, string, search, text_to_type)
         text_val = None
@@ -306,7 +362,14 @@ class Action:
                 text_val = data[t_alias]
                 break
 
-        duration_val = float(data.get("duration", data.get("seconds", data.get("time", 0.0))))
+        duration_val = 0.0
+        try:
+            raw_dur = data.get("duration", data.get("seconds", data.get("time", 0.0)))
+            if isinstance(raw_dur, str):
+                raw_dur = re.sub(r"[^\d\.]", "", raw_dur)
+            duration_val = float(raw_dur) if raw_dur else 0.0
+        except (ValueError, TypeError):
+            duration_val = 0.0
         press_enter_val = bool(data.get("press_enter", data.get("enter", False)))
         reason_str = str(data.get("reason", "")).strip()
 
@@ -351,7 +414,11 @@ class Action:
                             text_val = word_match.group(1)
 
         if kind == ActionKind.TYPE and not press_enter_val and reason_str:
-            if "press enter" in reason_str.lower() or "hit enter" in reason_str.lower():
+            r_low = reason_str.lower()
+            if any(term in r_low for term in (
+                "press enter", "hit enter", "with enter", "launch", "run", "search",
+                "open", "execute", "dialog", "command", "find", "kholo", "chalao"
+            )):
                 press_enter_val = True
 
         # Guard against empty no-op actions
@@ -373,6 +440,15 @@ class Action:
         elif kind == ActionKind.WAIT and duration_val <= 0.0:
             duration_val = 0.5
 
+        conf_val = 1.0
+        try:
+            if "confidence" in data and data["confidence"] is not None:
+                conf_val = float(data["confidence"])
+        except (ValueError, TypeError):
+            conf_val = 1.0
+
+        meta_val = dict(data.get("metadata", {})) if isinstance(data.get("metadata"), dict) else {}
+
         return cls(
             kind=kind,
             coordinate=coord,
@@ -384,6 +460,9 @@ class Action:
             duration=duration_val,
             reason=reason_str,
             press_enter=press_enter_val,
+            confidence=conf_val,
+            clear_first=clear_first_flag,
+            metadata=meta_val,
         )
 
 
@@ -576,14 +655,12 @@ class ActionAdapter:
             return Action(kind=ActionKind.KEY, keys=["backspace"], reason=r)
 
         # 3. Type intent
-        quote_match = re.search(r'''(?:type|search|input|write|enter)\s+(?:for\s+|:\s*)?['"]([^'"]+)['"]''', r, re.IGNORECASE)
-        if not quote_match:
-            quote_match = re.search(r'''['"]([^'"]+)['"]''', r)
+        quote_match = re.search(r'''(?:type|search|input|write|enter|likho)\s+(?:for\s+|:\s*)?['"]([^'"]+)['"]''', r, re.IGNORECASE)
         if quote_match:
             return Action(kind=ActionKind.TYPE, text=quote_match.group(1), reason=r)
         
         # Hinglish and standard sentence typing
-        type_word_match = re.search(r'(?:type|search|input|write)\s+(?:for\s+|karo\s+|kijiye\s+)?([a-zA-Z0-9_\-\.\s]+?)(?:\s+(?:in|into|to|on|with|aur|and)\s+|\s*$)', r, re.IGNORECASE)
+        type_word_match = re.search(r'(?:type|search|input|write|likho)\s+(?:for\s+|karo\s+|kijiye\s+)?([a-zA-Z0-9_\-\.\s]+?)(?:\s+(?:in|into|to|on|with|aur|and)\s+|\s*$)', r, re.IGNORECASE)
         if type_word_match:
             candidate = type_word_match.group(1).strip()
             if candidate.lower() not in ("karo", "kijiye", "kar", "the", "a", "an", "on", "in", "it"):
@@ -619,11 +696,41 @@ class ActionAdapter:
             if grammar_action is not None:
                 return grammar_action
 
-            # Try parsing as JSON string
-            if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            # Strip reasoning tags and markdown codeblocks if present
+            s_clean = re.sub(r'<(?:think|thought|reasoning|extra_thought)>[\s\S]*?</(?:think|thought|reasoning|extra_thought)>', '', s, flags=re.IGNORECASE).strip()
+            if "```" in s_clean:
+                code_m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s_clean, re.IGNORECASE)
+                if code_m:
+                    s_clean = code_m.group(1).strip()
+
+            # Try parsing as JSON string (exact or nested object)
+            first_brace = s_clean.find("{")
+            last_brace = s_clean.rfind("}")
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                cand = s_clean[first_brace : last_brace + 1]
+                clean_cand = re.sub(r",\s*([}\]])", r"\1", cand)
                 try:
-                    data = json.loads(s)
-                    return cls.adapt(data)
+                    data = json.loads(clean_cand)
+                    if isinstance(data, dict):
+                        return cls.adapt(data)
+                except Exception:
+                    try:
+                        clean_cand_q = clean_cand.replace("'", '"')
+                        data = json.loads(clean_cand_q)
+                        if isinstance(data, dict):
+                            return cls.adapt(data)
+                    except Exception:
+                        pass
+
+            first_bracket = s_clean.find("[")
+            last_bracket = s_clean.rfind("]")
+            if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+                cand_arr = s_clean[first_bracket : last_bracket + 1]
+                clean_arr = re.sub(r",\s*([}\]])", r"\1", cand_arr)
+                try:
+                    data = json.loads(clean_arr)
+                    if isinstance(data, list):
+                        return cls.adapt(data)
                 except Exception:
                     pass
 
@@ -715,10 +822,15 @@ class ActionAdapter:
             action = Action.from_dict(raw)
 
             # Fallback intent recovery: if kind is WAIT but reason specifies clear intent
-            if action.kind == ActionKind.WAIT and action.reason and action.reason not in (
-                "Guarded against empty key action",
-                "Guarded against empty type action",
-                "Guarded against empty mouse_move action",
+            if (
+                action.kind == ActionKind.WAIT
+                and action.reason
+                and action.reason not in (
+                    "Guarded against empty key action",
+                    "Guarded against empty type action",
+                    "Guarded against empty mouse_move action",
+                )
+                and not re.search(r'\b(?:wait|waiting|awaiting|settle|settling|pause|delay)\b', action.reason, re.IGNORECASE)
             ):
                 recovered = cls.from_reason_fallback(action.reason)
                 if recovered is not None:

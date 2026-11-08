@@ -14,9 +14,12 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
-from avcs.ace.actions import Action, ActionKind
+from avcs.ace.actions import Action, ActionKind, ActionAdapter
 
 logger = logging.getLogger("avcs.ace.client")
 
@@ -302,7 +305,20 @@ class CustomLLMClient:
         env_max_tokens = os.environ.get("AVCS_ACE_MAX_TOKENS")
         self.max_tokens = int(env_max_tokens) if env_max_tokens else (max_tokens if max_tokens is not None else 1024)
 
-        self.session = requests.Session()
+        self.vision_detail = os.environ.get("AVCS_VISION_DETAIL", "low").lower().strip()
+
+        if requests is not None:
+            self.session = requests.Session()
+            try:
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+                retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504], raise_on_status=False)
+                self.session.mount("https://", HTTPAdapter(max_retries=retries))
+                self.session.mount("http://", HTTPAdapter(max_retries=retries))
+            except Exception:
+                pass
+        else:
+            self.session = None
 
     def _normalize_endpoint(self, url: str) -> str:
         """Ensures endpoint points to the proper protocol route if only base URL is provided."""
@@ -434,6 +450,16 @@ class CustomLLMClient:
                     "shortcut keys [\"enter\"], or click a different coordinate.]\n"
                 )
 
+        if recent_actions:
+            last_item = recent_actions[-1]
+            last_reason = str(last_item.get("reason", ""))
+            if "Premature STOP rejected" in last_reason:
+                contract_alert = (
+                    f"\n[CONTRACT ENFORCEMENT ALERT: {last_reason} "
+                    "Do NOT emit 'stop'. You MUST execute a 'type' action first to complete typing/searching.]\n"
+                )
+                alert_str = f"{alert_str}\n{contract_alert}" if alert_str else contract_alert
+
         return (
             f"Goal: {goal}\n"
             f"Step: {step_index}\n"
@@ -485,7 +511,7 @@ class CustomLLMClient:
                         "role": "user",
                         "parts": [
                             {"text": f"{system_prompt}\n\n{user_prompt}"},
-                            {"inline_data": {"mime_type": mime, "data": b64_str}},
+                            {"inlineData": {"mimeType": mime, "data": b64_str}},
                         ],
                     }
                 ],
@@ -506,7 +532,7 @@ class CustomLLMClient:
                             {"type": "text", "text": user_prompt},
                             {
                                 "type": "image_url",
-                                "image_url": {"url": data_uri, "detail": "high"},
+                                "image_url": {"url": data_uri, "detail": self.vision_detail},
                             },
                         ],
                     },
@@ -517,7 +543,10 @@ class CustomLLMClient:
 
     def _build_headers(self) -> Dict[str, str]:
         """Builds headers for the request."""
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "AVCS-FrontierClient/1.0",
+        }
         if self.protocol == "anthropic":
             if self.api_key:
                 headers["x-api-key"] = self.api_key
@@ -542,6 +571,11 @@ class CustomLLMClient:
         if not text:
             return Action(kind=ActionKind.WAIT, duration=0.5, reason="Empty LLM response received")
 
+        # Fast path: Check for AVCS ACT: grammar tokens directly
+        grammar_act = ActionAdapter.parse_grammar_token(text)
+        if grammar_act is not None:
+            return grammar_act
+
         # Strip internal reasoning blocks from frontier reasoning models (<think>, <thought>, <reasoning>, <extra_thought>)
         for tag in ("think", "thought", "reasoning", "extra_thought"):
             text = re.sub(rf"<{tag}>[\s\S]*?</{tag}>", "", text, flags=re.IGNORECASE).strip()
@@ -557,6 +591,11 @@ class CustomLLMClient:
                     text = rest[rest.find("{"):].strip()
                 else:
                     text = ""
+
+        # Re-check grammar token after stripping reasoning tags
+        grammar_act = ActionAdapter.parse_grammar_token(text)
+        if grammar_act is not None:
+            return grammar_act
 
         # Strip markdown code blocks if present
         if "```" in text:
@@ -677,6 +716,62 @@ class CustomLLMClient:
 
         return action
 
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """Text completion method for Cognitive Planner sub-goal decomposition and replanning."""
+        if not self.endpoint:
+            return ""
+
+        headers = self._build_headers()
+        tokens = max_tokens or self.max_tokens
+
+        if self.protocol == "anthropic":
+            payload = {
+                "model": self.model,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
+                "max_tokens": tokens,
+                "temperature": temperature,
+            }
+        elif self.protocol == "gemini":
+            payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}
+                ],
+                "generationConfig": {"temperature": temperature, "maxOutputTokens": tokens},
+            }
+        else:
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": tokens,
+            }
+
+        try:
+            if self.session is not None:
+                resp = self.session.post(self.endpoint, headers=headers, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+            else:
+                import urllib.request
+                req_data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(self.endpoint, data=req_data, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            return self._extract_content_from_response(data)
+        except Exception as e:
+            logger.debug(f"CustomLLMClient.complete call notice: {e}")
+            return ""
+
     def _extract_content_from_response(self, resp_json: Dict[str, Any]) -> str:
         """Extracts text content string based on protocol with fallback for reasoning models."""
         if self.protocol == "anthropic":
@@ -685,6 +780,16 @@ class CustomLLMClient:
             for c in contents:
                 if isinstance(c, dict) and c.get("type") == "text":
                     texts.append(c.get("text", ""))
+                elif isinstance(c, dict) and c.get("type") == "tool_use":
+                    inp = c.get("input", {})
+                    name = c.get("name")
+                    if isinstance(inp, dict):
+                        inp_dict = dict(inp)
+                        if name and name != "computer" and "action" not in inp_dict and "kind" not in inp_dict:
+                            inp_dict["action"] = name
+                        texts.append(json.dumps(inp_dict))
+                    else:
+                        texts.append(str(inp))
                 elif isinstance(c, str):
                     texts.append(c)
             return "\n".join(texts).strip()
@@ -712,6 +817,22 @@ class CustomLLMClient:
                 texts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
                 if texts:
                     return "\n".join(texts).strip()
+
+            # Tool calls fallback
+            tool_calls = message.get("tool_calls") or []
+            if tool_calls and isinstance(tool_calls, list):
+                fn = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
+                args = fn.get("arguments", "")
+                fn_name = fn.get("name")
+                if args:
+                    try:
+                        parsed_args = json.loads(args)
+                        if isinstance(parsed_args, dict) and fn_name and "kind" not in parsed_args and "action" not in parsed_args:
+                            parsed_args["action"] = fn_name
+                            return json.dumps(parsed_args)
+                    except Exception:
+                        pass
+                    return str(args).strip()
 
             # 2. Reasoning models fallback (DeepSeek-R1, QwQ, o1 style)
             for field in ("reasoning_content", "reasoning", "text"):
@@ -748,14 +869,22 @@ class CustomLLMClient:
 
         t0 = time.time()
         try:
-            resp = self.session.post(
-                self.endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            resp_json = resp.json()
+            if self.session is not None:
+                resp = self.session.post(
+                    self.endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                resp_json = resp.json()
+            else:
+                import urllib.request
+                import urllib.error
+                req_data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(self.endpoint, data=req_data, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    resp_json = json.loads(response.read().decode("utf-8"))
         except Exception as e:
             latency_ms = (time.time() - t0) * 1000.0
             logger.error(f"HTTP request to LLM endpoint ({self.endpoint}) failed: {e}")

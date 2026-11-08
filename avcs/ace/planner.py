@@ -27,15 +27,15 @@ def _validate_no_coordinates(text: str) -> None:
 
     # Prohibited coordinate patterns
     coord_patterns = [
-        r'[\(\[<]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>]',  # (100, 200), [100, 200], <100, 200>
+        r'[\(\[<\{]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>\}]',  # (100, 200), [100, 200], <100, 200>, {100, 200}
         r'\{\s*[\'"]?[xy][\'"]?\s*[:=]\s*-?\d+',                                      # {"x": 100} or {x: 100}
         r'\b(?:x|y)\s*[:=]\s*-?\d+',                                                   # x=100, x: 100, y=200, y: 200
         r'\bx\s*=\s*\d+\s+y\s*=\s*\d+',                                               # x=500 y=400
-        r'ACT:(?:CLICK|MOVE|PRESS)\s+\d+',                                             # ACT:CLICK 100 200
-        r'\b(?:point|loc|location|pixel|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<]?\s*-?\d+', # point: 500, 400
-        r'\d+\s*px\s*,\s*\d+\s*px',                                                   # 500px, 400px
-        r'\b(?:click|tap|press|move|mouse)\s+(?:at\s+)?[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+', # click at 100, 200
-        r'\bat\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:\.\d+)?(?:px)?[\)\]>]?', # at (100, 200) or at 100, 200
+        r'ACT:(?:[A-Z_]+)\s+\d+',                                                      # ACT:CLICK 100 200, ACT:LEFT_CLICK 100 200
+        r'\b(?:point|loc|location|pixel|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<\{]?\s*-?\d+', # point: 500, 400
+        r'\d+\s*px(?:\s*,\s*|\s+)\d+\s*px',                                           # 500px, 400px or 500px 400px
+        r'\b(?:click|tap|press|move|mouse)\s+(?:at\s+)?[\(\[<\{]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+', # click at 100, 200
+        r'\bat\s+[\(\[<\{]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:\.\d+)?(?:px)?[\)\]>\}]?', # at (100, 200) or at 100, 200
     ]
 
     for pat in coord_patterns:
@@ -63,20 +63,20 @@ def _sanitize_coordinates(text: str) -> str:
         return text
 
     s = text
-    # Replace tuple/bracket/angle coords like (100, 200) or [100, 200] or <100, 200>
-    s = re.sub(r'[\(\[<]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>]', 'target element', s)
+    # Replace tuple/bracket/angle/brace coords like (100, 200) or [100, 200] or <100, 200> or {100, 200}
+    s = re.sub(r'[\(\[<\{]\s*-?\d+(?:\.\d+)?(?:px)?\s*,\s*-?\d+(?:\.\d+)?(?:px)?\s*[\)\]>\}]', 'target element', s)
     # Replace point: 500, 400 or location: 500, 400 or coords: [100, 200]
-    s = re.sub(r'\b(?:point|loc|location|pixel|px|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<]?\s*-?\d+.*?(?:[\)\]>]|$)', 'target element', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b(?:point|loc|location|pixel|px|pos|position|coord(?:inate)?s?)\s*[:=]?\s*[\(\[<\{]?\s*-?\d+.*?(?:[\)\]>\}]|$)', 'target element', s, flags=re.IGNORECASE)
     # Replace explicit x=..., y=... or x: ..., y: ... or x=500 y=400
     s = re.sub(r'\bx\s*=\s*\d+\s+y\s*=\s*\d+', 'target element', s, flags=re.IGNORECASE)
     s = re.sub(r'\b[xy]\s*[:=]\s*-?\d+(?:\.\d+)?', 'target element', s, flags=re.IGNORECASE)
-    # Replace 500px, 400px
-    s = re.sub(r'\d+\s*px\s*,\s*\d+\s*px', 'target element', s, flags=re.IGNORECASE)
-    # Replace ACT:CLICK 100 200
-    s = re.sub(r'ACT:(?:CLICK|MOVE|PRESS)\s+\d+(?:\s+\d+)?', 'interact with element', s, flags=re.IGNORECASE)
+    # Replace 500px, 400px or 500px 400px
+    s = re.sub(r'\d+\s*px(?:\s*,\s*|\s+)\d+\s*px', 'target element', s, flags=re.IGNORECASE)
+    # Replace ACT:CLICK 100 200 or ACT:LEFT_CLICK 100 200
+    s = re.sub(r'ACT:(?:[A-Z_]+)\s+\d+(?:\s+\d+)?', 'interact with element', s, flags=re.IGNORECASE)
     # Replace click at 100, 200
-    s = re.sub(r'\b(?:click|tap|press|move)\s+at\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>]?', 'click target element', s, flags=re.IGNORECASE)
-    s = re.sub(r'\bat\s+[\(\[<]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>]?', 'at target element', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b(?:click|tap|press|move)\s+at\s+[\(\[<\{]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>\}]?', 'click target element', s, flags=re.IGNORECASE)
+    s = re.sub(r'\bat\s+[\(\[<\{]?\s*-?\d+(?:\.\d+)?(?:px)?\s*[,x\s]\s*-?\d+(?:px)?[\)\]>\}]?', 'at target element', s, flags=re.IGNORECASE)
     # Clean up excess spaces
     s = re.sub(r'\s+', ' ', s).strip()
     return s
@@ -85,26 +85,26 @@ def _sanitize_coordinates(text: str) -> str:
 def _translate_to_english_directive(text: str) -> Tuple[str, str]:
     """Translates arbitrary Hindi/Hinglish text to clean English description and expected UI state."""
     translations = [
-        (r'\bchrome\s+(?:band\s*karo|close\s*karo|khatam\s*karo)\b', 'Close Google Chrome application'),
-        (r'\bnotepad\s+(?:band\s*karo|close\s*karo)\b', 'Close Notepad application'),
-        (r'\b(?:band\s*karo|band\s*kar\s*do|close\s*karo|हटाओ|बंद\s*करो|बंद\s*करें)\b', 'close active window'),
-        (r'\b(?:kholo|khol\s*do|kholiye|खोलो|खोलें|खोलिए)\b', 'open application'),
-        (r'\b(?:chalao|chalaayein|start\s*karo|चलाओ|शुरू\s*करो)\b', 'launch application'),
-        (r'\b(?:dhoondo|khojo|search\s*karo|ढूंढो|खोजो|सर्च\s*करो)\b', 'search query'),
-        (r'\b(?:likho|darj\s*karo|type\s*karo|लिखो|टाइप\s*करो|दर्ज\s*करो)\b', 'type text'),
-        (r'\b(?:dabao|press\s*karo|click\s*karo|दबाओ|क्लिक\s*करो)\b', 'interact with element'),
-        (r'\b(?:bajaao|play\s*karo|बजाओ)\b', 'play media'),
-        (r'\b(?:save\s*karo|seve\s*karo|सेव\s*करो|सहेजें)\b', 'save file'),
-        (r'\b(?:refresh\s*karo|taaza\s*karo|रिफ्रेश)\b', 'refresh view'),
-        (r'\b(?:gaana|music|song|गाना|संगीत)\b', 'music'),
-        (r'\b(?:video|वीडियो)\b', 'video'),
-        (r'\b(?:tasveer|photo|image|तस्वीर|फोटो)\b', 'image'),
-        (r'\b(?:file|document|फ़ाइल|फाइल|दस्तावेज़)\b', 'document'),
-        (r'\b(?:panna|page|पेज|पन्ना)\b', 'page'),
-        (r'\b(?:karo|kijiye|करो|करें|कीजिए)\b', ''),
-        (r'\b(?:par|me|पर|में)\b', 'on'),
-        (r'\b(?:aur|और)\b', 'and'),
-        (r'\b(?:fir|phir|फिर)\b', 'then'),
+        (r'(?<!\S)chrome\s+(?:band\s*karo|close\s*karo|khatam\s*karo)(?!\S)', 'Close Google Chrome application'),
+        (r'(?<!\S)notepad\s+(?:band\s*karo|close\s*karo)(?!\S)', 'Close Notepad application'),
+        (r'(?<!\S)(?:band\s*karo|band\s*kar\s*do|close\s*karo|हटाओ|बंद\s*करो|बंद\s*करें)(?!\S)', 'close active window'),
+        (r'(?<!\S)(?:kholo|khol\s*do|kholiye|खोलो|खोलें|खोलिए)(?!\S)', 'open application'),
+        (r'(?<!\S)(?:chalao|chalaayein|start\s*karo|चलाओ|शुरू\s*करो)(?!\S)', 'launch application'),
+        (r'(?<!\S)(?:dhoondo|khojo|search\s*karo|ढूंढो|खोजो|सर्च\s*करो)(?!\S)', 'search query'),
+        (r'(?<!\S)(?:likho|darj\s*karo|type\s*karo|लिखो|टाइप\s*करो|दर्ज\s*करो)(?!\S)', 'type text'),
+        (r'(?<!\S)(?:dabao|press\s*karo|click\s*karo|दबाओ|क्लिक\s*करो)(?!\S)', 'interact with element'),
+        (r'(?<!\S)(?:bajaao|play\s*karo|बजाओ)(?!\S)', 'play media'),
+        (r'(?<!\S)(?:save\s*karo|seve\s*karo|सेव\s*करो|सहेजें)(?!\S)', 'save file'),
+        (r'(?<!\S)(?:refresh\s*karo|taaza\s*karo|रिफ्रेश)(?!\S)', 'refresh view'),
+        (r'(?<!\S)(?:gaana|music|song|गाना|संगीत)(?!\S)', 'music'),
+        (r'(?<!\S)(?:video|वीडियो)(?!\S)', 'video'),
+        (r'(?<!\S)(?:tasveer|photo|image|तस्वीर|फोटो)(?!\S)', 'image'),
+        (r'(?<!\S)(?:file|document|फ़ाइल|फाइल|दस्तावेज़)(?!\S)', 'document'),
+        (r'(?<!\S)(?:panna|page|पेज|पन्ना)(?!\S)', 'page'),
+        (r'(?<!\S)(?:karo|kijiye|करो|करें|कीजिए)(?!\S)', ''),
+        (r'(?<!\S)(?:par|me|पर|में)(?!\S)', 'on'),
+        (r'(?<!\S)(?:aur|और)(?!\S)', 'and'),
+        (r'(?<!\S)(?:fir|phir|फिर)(?!\S)', 'then'),
     ]
     s = text
     for pat, repl in translations:
@@ -250,6 +250,7 @@ class CognitivePlanner:
         goal = (goal or "").strip()
         if not goal:
             return []
+        goal = _sanitize_coordinates(goal)
 
         # 1. Attempt LLM-assisted decomposition if client is provided and online
         if self.client is not None:
@@ -313,6 +314,7 @@ class CognitivePlanner:
         # Delimiters across Hindi (Devanagari), Hinglish (Latin), and English:
         pattern = (
             r'\s*(?:'
+            r'[,\u0964]|(?<=[a-zA-Z0-9\u0900-\u097F])\.\s+|'
             r';|\->|\||'
             r'\band\s+then\b|\bafter\s+that\b|\band\b|\bthen\b|'
             r'\baur\s+phir\b|\baur\s+fir\b|\baur\b|\bphir\b|\bfir\b|'
@@ -429,7 +431,7 @@ class CognitivePlanner:
             # Pattern B: Search query in search engine or app
             # e.g., "Google par OpenAI search karo", "search for OpenAI on Google", "गूगल पर OpenAI सर्च करो"
             search_match = re.search(
-                r'(?:search|dhoondo|find)\s+(?:for\s+)?([a-zA-Z0-9_\-\.\s\u0900-\u097F]+?)(?:\s+(?:on|in|par|me|पर|में)\s+([a-zA-Z0-9_\-\.\s\u0900-\u097F]+))?$',
+                r'^\s*(?:search|dhoondo|find)\s+(?:for\s+)?([a-zA-Z0-9_\-\.\s\u0900-\u097F]+?)(?:\s+(?:on|in|par|me|पर|में)\s+([a-zA-Z0-9_\-\.\s\u0900-\u097F]+))?$',
                 clean,
                 re.IGNORECASE,
             )
@@ -465,9 +467,9 @@ class CognitivePlanner:
                 idx += 1
                 continue
 
-            # Pattern B2: Direct search: e.g. "Notepad search karo", "नोटपैड सर्च करो"
+            # Pattern B2: Direct search: e.g. "Notepad search karo", "नोटपैड सर्च करो", "Notepad search karo open karo"
             direct_search = re.search(
-                r'([a-zA-Z0-9_\-\.\s\u0900-\u097F]+?)\s+(?:search|dhoondo|सर्च|खोज|ढूंढो)\s*(?:karo|kijiye|करो|करें|कीजिए)?$',
+                r'([a-zA-Z0-9_\-\.\s\u0900-\u097F]+?)\s+(?:search|dhoondo|khojo|सर्च|खोज|ढूंढो)\s*(?:karo|kar\s*do|kijiye|chalayein|करो|करें|कीजिए)?(?:\s+(?:open\s*karo|khol\s*do|kholo|chalao|chalayein|launch\s*karo|open))?$',
                 clean,
                 re.IGNORECASE,
             )
@@ -503,7 +505,7 @@ class CognitivePlanner:
                     matched_app = (app_name, expected_ui)
                     break
 
-            launch_verbs = ["open", "launch", "start", "run", "kholo", "khol do", "kholiye", "chalao", "खोलो", "खोलें", "खोलिए", "चलाओ", "शुरू"]
+            launch_verbs = ["open", "launch", "start", "run", "kholo", "khol do", "kholiye", "chalao", "chalayein", "chalaayein", "kar do", "खोलो", "खोलें", "खोलिए", "चलाओ", "चलाएं", "शुरू"]
             is_standalone_app = lower in app_catalog or any(lower == k for k in app_catalog)
             if matched_app and (any(act in lower for act in launch_verbs) or is_standalone_app):
                 app_name, expected_ui = matched_app
@@ -515,10 +517,36 @@ class CognitivePlanner:
                 idx += 1
                 continue
 
-            # Pattern D: Typing text (Latin & Devanagari)
-            type_m = re.search(r'(?:type|write|likho|enter|टाइप|लिखो|दर्ज)\s+(?:करो|करें)?\s*(.+)', clean, re.IGNORECASE)
+            # Pattern D1: SOV Typing text (Hindi/Hinglish: [payload] [type karo/likho/दर्ज करो])
+            sov_type_m = re.search(
+                r'^\s*(.+?)\s+(?:type\s*karo|type\s*kar\s*do|type\s*kijiye|type\s*karein|type|likho|likh\s*do|likhein|darj\s*karo|enter\s*karo|टाइप\s*करो|टाइप\s*करें|लिखो|लिखें|दर्ज\s*करो)\s*$',
+                clean,
+                re.IGNORECASE,
+            )
+            if sov_type_m and sov_type_m.group(1).strip().lower() not in ("aur", "and", "fir", "phir", "open", "kholo", "start", "close", "band"):
+                text_to_type = sov_type_m.group(1).strip()
+                if (text_to_type.startswith('"') and text_to_type.endswith('"')) or (text_to_type.startswith("'") and text_to_type.endswith("'")):
+                    text_to_type = text_to_type[1:-1].strip()
+                clean_type_text = re.sub(r'[\u0900-\u097F]+', 'target text', text_to_type)
+                subgoals.append(SubGoal(
+                    index=idx,
+                    description=f"Type text '{clean_type_text}' into active target field",
+                    expected_ui_state=f"Text '{clean_type_text}' visible in target field",
+                ))
+                idx += 1
+                continue
+
+            # Pattern D2: SVO Typing text (English: type [payload])
+            type_m = re.search(
+                r'^\s*(?:type|write|likho|enter|टाइप\s*करो|टाइप|लिखो|दर्ज)\s+(?:karo|kar\s*do|kijiye|chalayein|करो|करें|कीजिए)?\s*(.+)',
+                clean,
+                re.IGNORECASE,
+            )
             if type_m:
                 text_to_type = type_m.group(1).strip()
+                text_to_type = re.sub(r'\s+(?:karo|kar\s*do|kijiye|chalayein|करो|करें|कीजिए)$', '', text_to_type, flags=re.IGNORECASE).strip()
+                if (text_to_type.startswith('"') and text_to_type.endswith('"')) or (text_to_type.startswith("'") and text_to_type.endswith("'")):
+                    text_to_type = text_to_type[1:-1].strip()
                 clean_type_text = re.sub(r'[\u0900-\u097F]+', 'target text', text_to_type)
                 subgoals.append(SubGoal(
                     index=idx,
@@ -712,33 +740,22 @@ class CognitivePlanner:
 
         # Route 1: Loop deadlock or modal alert blocking UI (repetition >= 2)
         if stuck_reps >= 2 or "loop" in reason_lower or "stuck" in reason_lower:
-            # If already attempted Escape, break out via Alt+Tab / Win+D
-            if "escape" in desc_lower:
-                replanned.append(SubGoal(
-                    index=idx,
-                    description="Press Win+D hotkey to clear desktop focus and dismiss modal overlay",
-                    expected_ui_state="Desktop cleared and ready for strategic retry",
-                ))
-                replanned.append(SubGoal(
-                    index=idx + 1,
-                    description="Resume target task via keyboard shortcut navigation",
-                    expected_ui_state=failed_subgoal.expected_ui_state,
-                ))
-                return replanned
-
             clean_desc = failed_subgoal.description
-            retry_m = re.match(r"^Retry\s*['\"](.*?)['\"]\s*using.*", clean_desc, re.IGNORECASE)
-            if retry_m:
-                clean_desc = retry_m.group(1).strip()
+            while True:
+                m = re.match(r"^Retry\s*['\"](.*?)['\"](?:\s+(?:visually|using\s+[\w\s]+))?$", clean_desc, re.IGNORECASE)
+                if m:
+                    clean_desc = m.group(1).strip()
+                else:
+                    break
 
             replanned.append(SubGoal(
                 index=idx,
-                description="Press Escape key to dismiss any blocking modal dialog or menu dropdown",
-                expected_ui_state="Blocking UI dialog dismissed and screen stabilized",
+                description="Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+                expected_ui_state="Screen stabilized and active workspace refocused",
             ))
             replanned.append(SubGoal(
                 index=idx + 1,
-                description=f"Retry '{clean_desc}' using alternative keyboard shortcut navigation",
+                description=f"Retry '{clean_desc}' visually",
                 expected_ui_state=failed_subgoal.expected_ui_state,
             ))
             return replanned
@@ -747,8 +764,8 @@ class CognitivePlanner:
         if "start menu" in desc_lower or "start" in desc_lower:
             replanned.append(SubGoal(
                 index=idx,
-                description="Press Windows key (Win hotkey) to toggle Start Menu directly",
-                expected_ui_state="Start menu opened and search input focused",
+                description="Click Windows Start icon on taskbar to open Start Menu",
+                expected_ui_state="Start menu opened and search input visible",
             ))
             replanned.append(SubGoal(
                 index=idx + 1,
@@ -757,34 +774,50 @@ class CognitivePlanner:
             ))
             return replanned
 
-        # Route 3: Search bar focus / ungrounded typing blocked by firewall / console hazard
+        # Route 3: Search bar focus / ungrounded typing blocked
         if "search" in desc_lower or "type" in desc_lower or "console" in reason_lower:
             replanned.append(SubGoal(
                 index=idx,
-                description="Use keyboard navigation shortcut (Ctrl+L / Ctrl+E / Tab) to focus input field",
+                description="Click active search or text field directly to focus input caret",
                 expected_ui_state="Target search field focused with active caret",
             ))
             replanned.append(SubGoal(
                 index=idx + 1,
-                description="Type query into focused input and submit with Enter key",
-                expected_ui_state="Search results loaded and displayed",
+                description="Type query into focused input and select target result",
+                expected_ui_state="Target result opened and displayed",
             ))
             return replanned
 
         # Route 4: Application launch / focus failed (e.g. icon click didn't trigger launch)
-        app_candidates = ["notepad", "calculator", "calc", "chrome", "edge", "paint", "explorer", "cmd", "terminal"]
+        app_candidates = ["notepad", "calculator", "calc", "chrome", "edge", "paint", "explorer", "cmd", "terminal", "powershell", "settings", "spotify", "slack", "vlc", "word", "excel"]
         found_app = next((a for a in app_candidates if a in desc_lower or a in reason_lower), None)
+        if not found_app:
+            m_app = re.search(r'(?:launch|open)\s+([a-zA-Z0-9_\-\.]+)(?:\s+application|\s+app)?', desc_lower, re.IGNORECASE)
+            if m_app and m_app.group(1).lower() not in ("target", "the", "a", "an", "windows", "active"):
+                found_app = m_app.group(1)
+            else:
+                m_goal = re.search(r'(?:open|launch|kholo|chalao|start)\s+([a-zA-Z0-9_\-\.]+)', goal, re.IGNORECASE)
+                if not m_goal:
+                    m_goal = re.search(r'([a-zA-Z0-9_\-\.]+)\s+(?:open|launch|kholo|chalao|start)', goal, re.IGNORECASE)
+                if m_goal and m_goal.group(1).lower() not in ("start", "menu", "karo", "do", "kijiye", "aur", "and"):
+                    found_app = m_goal.group(1)
+
         if found_app or "launch" in desc_lower or "open" in desc_lower:
-            target_cmd = found_app or "target application"
+            target_cmd = (found_app or "target application").title()
             replanned.append(SubGoal(
                 index=idx,
-                description="Open Windows Run dialog using Win+R shortcut",
-                expected_ui_state="Run dialog box active with text input focused",
+                description="Click Windows Start icon on taskbar to open Start Menu",
+                expected_ui_state="Start menu opened and search input visible",
             ))
             replanned.append(SubGoal(
                 index=idx + 1,
-                description=f"Type '{target_cmd}' executable name and press Enter to launch",
-                expected_ui_state=f"{target_cmd.title()} application process active",
+                description=f"Type '{target_cmd}' into search",
+                expected_ui_state=f"Search results for {target_cmd} displayed",
+            ))
+            replanned.append(SubGoal(
+                index=idx + 2,
+                description=f"Click {target_cmd} app icon in search results to launch application",
+                expected_ui_state=f"{target_cmd} application window active",
             ))
             return replanned
 
@@ -792,7 +825,7 @@ class CognitivePlanner:
         clean_fallback = _sanitize_coordinates(failed_subgoal.description)
         replanned.append(SubGoal(
             index=idx,
-            description=f"Alternative route: Attempt '{clean_fallback}' via keyboard shortcut navigation",
+            description=f"Visually locate and click target element for '{clean_fallback}'",
             expected_ui_state=failed_subgoal.expected_ui_state,
         ))
         return replanned

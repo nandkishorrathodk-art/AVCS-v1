@@ -11,6 +11,7 @@ Measures:
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
 import logging
@@ -322,3 +323,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,17 +1,17 @@
 {
   "benchmark": "generalagents/showdown-clicks",
-  "sample_count": 10,
+  "sample_count": 5,
   "tolerance_px": 15.0,
   "hits": 0,
   "accuracy": 0.0,
   "wilson_95_ci": [
     0.0,
-    27.75
+    43.45
   ],
-  "latency_p50_ms": 2035.8,
-  "latency_p90_ms": 2056.8,
-  "latency_p99_ms": 2066.7,
-  "latency_mean_ms": 2041.6,
+  "latency_p50_ms": 2069.8,
+  "latency_p90_ms": 4328.4,
+  "latency_p99_ms": 5682.3,
+  "latency_mean_ms": 2810.5,
   "results": [
     {
       "id": "synth_0001",
@@ -24,7 +24,7 @@
       "action_kind": "key",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2055.5241107940674
+      "latency_ms": 2028.7532806396484
     },
     {
       "id": "synth_0002",
@@ -37,7 +37,7 @@
       "action_kind": "wait",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2055.5386543273926
+      "latency_ms": 5832.694530487061
     },
     {
       "id": "synth_0003",
@@ -50,7 +50,7 @@
       "action_kind": "wait",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2031.618356704712
+      "latency_ms": 2069.8366165161133
     },
     {
       "id": "synth_0004",
@@ -63,7 +63,7 @@
       "action_kind": "wait",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2025.8314609527588
+      "latency_ms": 2049.2489337921143
     },
     {
       "id": "synth_0005",
@@ -76,72 +76,7 @@
       "action_kind": "wait",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2035.5770587921143
-    },
-    {
-      "id": "synth_0006",
-      "instruction": "Select File in Explorer (sample #6)",
-      "target_center": [
-        375,
-        265
-      ],
-      "predicted_coord": null,
-      "action_kind": "wait",
-      "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2050.3242015838623
-    },
-    {
-      "id": "synth_0007",
-      "instruction": "Submit Form Button (sample #7)",
-      "target_center": [
-        650,
-        517
-      ],
-      "predicted_coord": null,
-      "action_kind": "wait",
-      "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2035.9642505645752
-    },
-    {
-      "id": "synth_0008",
-      "instruction": "Click Settings Gear Icon (sample #8)",
-      "target_center": [
-        1250,
-        777
-      ],
-      "predicted_coord": null,
-      "action_kind": "wait",
-      "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2029.6356678009033
-    },
-    {
-      "id": "synth_0009",
-      "instruction": "Click Tab 2 (sample #9)",
-      "target_center": [
-        260,
-        25
-      ],
-      "predicted_coord": null,
-      "action_kind": "wait",
-      "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2027.928113937378
-    },
-    {
-      "id": "synth_0010",
-      "instruction": "Select OK in Confirmation Dialog (sample #10)",
-      "target_center": [
-        580,
-        437
-      ],
-      "predicted_coord": null,
-      "action_kind": "wait",
-      "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2067.8281784057617
+      "latency_ms": 2071.949005126953
     }
   ]
 }

@@ -14,12 +14,127 @@ import logging
 import os
 import re
 import time
+import io
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
 
 from avcs.ace.actions import Action
 
 logger = logging.getLogger("avcs.ace.skills_vault")
+
+
+def visual_hash_similarity(hash1: Optional[str], hash2: Optional[str]) -> float:
+    """Computes similarity in [0.0, 1.0] between two hexadecimal visual hashes."""
+    if not hash1 or not hash2:
+        return 0.0
+    if hash1 == hash2:
+        return 1.0
+    try:
+        val1 = int(hash1, 16)
+        val2 = int(hash2, 16)
+        xor = val1 ^ val2
+        bit_dist = bin(xor).count("1")
+        total_bits = max(len(hash1), len(hash2)) * 4
+        return max(0.0, 1.0 - (bit_dist / float(max(1, total_bits))))
+    except Exception:
+        return 1.0 if hash1 == hash2 else 0.0
+
+
+def compute_visual_hash(
+    image_or_obs: Any,
+    coordinate: Optional[Tuple[int, int]] = None,
+    bounding_box: Optional[Tuple[int, int, int, int]] = None,
+    radius: int = 50,
+) -> Optional[str]:
+    """Computes a structural regional visual hash (dHash) from an observation or image."""
+    if image_or_obs is None:
+        return None
+
+    raw_rgb: Optional[np.ndarray] = None
+    if hasattr(image_or_obs, "image_bytes") and image_or_obs.image_bytes:
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(image_or_obs.image_bytes)).convert("RGB")
+            raw_rgb = np.asarray(img)
+        except Exception:
+            raw_rgb = None
+    elif isinstance(image_or_obs, bytes) and image_or_obs:
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(image_or_obs)).convert("RGB")
+            raw_rgb = np.asarray(img)
+        except Exception:
+            raw_rgb = None
+    elif isinstance(image_or_obs, np.ndarray):
+        raw_rgb = image_or_obs
+
+    if raw_rgb is None:
+        b = getattr(image_or_obs, "image_bytes", None) or (image_or_obs if isinstance(image_or_obs, bytes) else None)
+        if b:
+            return hashlib.sha256(b[:512]).hexdigest()[:16]
+        return None
+
+    h, w = raw_rgb.shape[:2]
+    if h == 0 or w == 0:
+        return None
+
+    # Determine region of interest (ROI)
+    if bounding_box and len(bounding_box) == 4:
+        x1, y1, x2, y2 = bounding_box
+        nx1, nx2 = min(x1, x2), max(x1, x2)
+        ny1, ny2 = min(y1, y2), max(y1, y2)
+        bx1 = max(0, min(w - 1, int(nx1)))
+        by1 = max(0, min(h - 1, int(ny1)))
+        bx2 = max(bx1 + 1, min(w, int(nx2)))
+        by2 = max(by1 + 1, min(h, int(ny2)))
+        if bx2 <= bx1 or by2 <= by1:
+            crop = raw_rgb
+        else:
+            crop = raw_rgb[by1:by2, bx1:bx2]
+    elif coordinate and len(coordinate) == 2:
+        cx, cy = int(coordinate[0]), int(coordinate[1])
+        bx1 = max(0, cx - radius)
+        by1 = max(0, cy - radius)
+        bx2 = min(w, cx + radius)
+        by2 = min(h, cy + radius)
+        if bx2 <= bx1 or by2 <= by1:
+            crop = raw_rgb
+        else:
+            crop = raw_rgb[by1:by2, bx1:bx2]
+    else:
+        crop = raw_rgb
+
+    # Convert crop to grayscale
+    if crop.ndim == 3:
+        gray = (crop[:, :, 0].astype(np.uint16) * 2 +
+                crop[:, :, 1].astype(np.uint16) * 5 +
+                crop[:, :, 2].astype(np.uint16)) >> 3
+    else:
+        gray = crop
+
+    # Downsample to 8 rows, 9 columns for difference hash (full 64-bit hex coverage)
+    try:
+        from PIL import Image
+        img_gray = Image.fromarray(gray.astype(np.uint8))
+        resized = np.asarray(img_gray.resize((9, 8), Image.Resampling.BILINEAR))
+    except Exception:
+        ch, cw = gray.shape[:2]
+        if ch < 8 or cw < 9:
+            sy = np.clip(np.linspace(0, max(0, ch - 1), 8, dtype=int), 0, max(0, ch - 1))
+            sx = np.clip(np.linspace(0, max(0, cw - 1), 9, dtype=int), 0, max(0, cw - 1))
+        else:
+            sy = np.linspace(0, ch - 1, 8, dtype=int)
+            sx = np.linspace(0, cw - 1, 9, dtype=int)
+        resized = gray[sy[:, None], sx]
+
+    diff = resized[:, 1:] > resized[:, :-1]
+    flat_diff = diff.flatten()
+    val = 0
+    for bit in flat_diff[:64]:
+        val = (val << 1) | int(bit)
+    return f"{val:016x}"
 
 
 @dataclasses.dataclass
@@ -62,21 +177,105 @@ class UIStateAnchor:
             visual_hash=data.get("visual_hash"),
         )
 
+    @classmethod
+    def create_from_desktop(
+        cls,
+        computer: Optional[Any] = None,
+        verifier: Optional[Any] = None,
+        observation: Optional[Any] = None,
+        target_coord: Optional[Tuple[int, int]] = None,
+        bounding_box: Optional[Tuple[int, int, int, int]] = None,
+    ) -> UIStateAnchor:
+        """Factory method constructing a UIStateAnchor capturing live desktop state."""
+        title = None
+        proc = None
+        if verifier is not None:
+            title = verifier.get_active_window_title() or None
+            proc = verifier.get_foreground_process_name() or None
+        v_hash = None
+        if observation is not None:
+            v_hash = compute_visual_hash(observation, coordinate=target_coord, bounding_box=bounding_box)
+        return cls(
+            window_title=title,
+            process_name=proc,
+            bounding_box=bounding_box,
+            visual_hash=v_hash,
+        )
+
     def is_empty(self) -> bool:
         """Returns True if this anchor specifies zero constraints."""
         return (
-            self.window_title is None
-            and self.process_name is None
-            and self.class_name is None
+            not (self.window_title and self.window_title.strip())
+            and not (self.process_name and self.process_name.strip())
+            and not (self.class_name and self.class_name.strip())
             and self.bounding_box is None
-            and self.aspect is None
-            and self.visual_hash is None
+            and not (self.aspect and self.aspect.strip())
+            and not (self.visual_hash and self.visual_hash.strip())
         )
 
-    def matches(self, current: Optional[UIStateAnchor], tolerance_px: int = 15) -> bool:
+    def similarity(self, current: Optional[UIStateAnchor], tolerance_px: int = 15) -> float:
+        """Calculates matching similarity score in [0.0, 1.0] between this anchor and live state."""
+        if current is None or self.is_empty():
+            return 0.0
+
+        scores: List[float] = []
+
+        if self.window_title is not None:
+            if not current.window_title:
+                scores.append(0.0)
+            else:
+                wt_self = self.window_title.lower().strip()
+                wt_curr = current.window_title.lower().strip()
+                if wt_self in wt_curr or (len(wt_curr) >= 3 and wt_curr in wt_self):
+                    scores.append(1.0)
+                else:
+                    scores.append(0.0)
+
+        if self.process_name is not None:
+            if not current.process_name:
+                scores.append(0.0)
+            else:
+                p_self = os.path.basename(self.process_name).lower().replace(".exe", "").strip()
+                p_curr = os.path.basename(current.process_name).lower().replace(".exe", "").strip()
+                scores.append(1.0 if p_self == p_curr else 0.0)
+
+        if self.class_name is not None:
+            if not current.class_name:
+                scores.append(0.0)
+            else:
+                scores.append(1.0 if self.class_name.lower().strip() == current.class_name.lower().strip() else 0.0)
+
+        if self.bounding_box is not None:
+            if not current.bounding_box or len(current.bounding_box) < 4:
+                scores.append(0.0)
+            else:
+                x1, y1, x2, y2 = self.bounding_box
+                cx1, cy1, cx2, cy2 = current.bounding_box
+                err = max(abs(x1 - cx1), abs(y1 - cy1), abs(x2 - cx2), abs(y2 - cy2))
+                scores.append(1.0 if err <= tolerance_px else max(0.0, 1.0 - (err - tolerance_px) / 100.0))
+
+        if self.aspect is not None:
+            if not current.aspect:
+                scores.append(0.0)
+            else:
+                scores.append(1.0 if self.aspect.lower().strip() == current.aspect.lower().strip() else 0.0)
+
+        if self.visual_hash is not None:
+            if not current.visual_hash:
+                scores.append(0.0)
+            else:
+                sim = visual_hash_similarity(self.visual_hash, current.visual_hash)
+                scores.append(sim)
+
+        if not scores:
+            return 0.0
+        return sum(scores) / float(len(scores))
+
+    def matches(self, current: Optional[UIStateAnchor], tolerance_px: int = 15, min_score: float = 0.90) -> bool:
         """Verifies if current live UI state satisfies all constraints defined in this anchor.
 
         Enforces P0: an empty anchor with no constraints cannot approve a cache hit.
+        Applies >= 90% structural match rule for visual hashes and overall state anchors.
         """
         if current is None or self.is_empty():
             return False
@@ -127,11 +326,12 @@ class UIStateAnchor:
             if self.aspect.lower().strip() != current.aspect.lower().strip():
                 return False
 
-        # 6. Visual Hash check
-        if self.visual_hash is not None:
-            if not current.visual_hash:
+        # 6. Visual Hash check (>= 90% match threshold or exact match)
+        if self.visual_hash and self.visual_hash.strip():
+            if not current.visual_hash or not current.visual_hash.strip():
                 return False
-            if self.visual_hash != current.visual_hash:
+            sim = visual_hash_similarity(self.visual_hash, current.visual_hash)
+            if sim < min_score and self.visual_hash != current.visual_hash:
                 return False
 
         return True
@@ -383,6 +583,25 @@ class SkillCache:
             reason=f"Cache miss: UI State Anchor mismatch for goal '{goal}'. Live desktop state differs from cached anchor. Fallback to dynamic execution.",
             entry=entries[0],
         )
+
+    def is_anchor_drift(
+        self,
+        goal: str,
+        current_anchor: Optional[UIStateAnchor] = None,
+        tolerance_px: int = 15,
+    ) -> bool:
+        """Returns True if the goal exists in cache but the UI State Anchor diverges (anchor drift)."""
+        g_hash = self.hash_goal(goal)
+        entries = self._entries.get(g_hash, [])
+        if not entries:
+            return False
+        if current_anchor is None or current_anchor.is_empty():
+            return True
+        for entry in entries:
+            for anchor in entry.anchors:
+                if anchor.matches(current_anchor, tolerance_px=tolerance_px):
+                    return False
+        return True
 
     def get_trajectory(
         self,

@@ -22,7 +22,7 @@ class ScreenStreamer:
     def __init__(
         self,
         computer: WindowsComputer,
-        target_fps: float = 30.0,
+        target_fps: float = 15.0,
         image_format: str = "jpeg",
     ) -> None:
         self.computer = computer

@@ -80,7 +80,7 @@ class VisualCortexGate:
 
     def __init__(
         self,
-        cortex: Optional[Union[StreamingVisualCortexV2, EyeStream]] = None,
+        cortex: Optional[Union[StreamingVisualCortexV2, EyeStream, Any]] = None,
         device: str = "cpu",
         stability_threshold: float = 0.015,
         spinner_threshold: float = 0.50,
@@ -94,7 +94,22 @@ class VisualCortexGate:
         self.change_threshold = change_threshold
         self.source = source
 
-        if cortex is not None:
+        if cortex in ("human_eye", "humaneye"):
+            try:
+                from avcs.perception.human_eye import HumanEye
+                self.cortex = HumanEye(source=source, load_weights=load_weights, device=str(self.device))
+            except Exception:
+                self.cortex = StreamingVisualCortexV2()
+        elif cortex in ("cortex_v2", "streaming_cortex", "streaming_visual_cortex"):
+            if source != "synthetic" and load_weights:
+                try:
+                    from avcs.eye_stream import EyeStream
+                    self.cortex = EyeStream(source=source, load_weights=load_weights, device=str(self.device))
+                except Exception:
+                    self.cortex = StreamingVisualCortexV2()
+            else:
+                self.cortex = StreamingVisualCortexV2()
+        elif cortex is not None and not isinstance(cortex, str):
             self.cortex = cortex
         elif source != "synthetic" and load_weights:
             try:
@@ -105,8 +120,10 @@ class VisualCortexGate:
         else:
             self.cortex = StreamingVisualCortexV2()
 
-        self.cortex.to(self.device)
-        self.cortex.eval()
+        if hasattr(self.cortex, "to"):
+            self.cortex.to(self.device)
+        if hasattr(self.cortex, "eval"):
+            self.cortex.eval()
 
         self.preprocessor = EdgeLuminancePreprocessor().to(self.device)
         self.preprocessor.eval()
@@ -119,8 +136,12 @@ class VisualCortexGate:
         self.temporal_state = None
         self.prev_features = None
 
-    def _convert_to_tensor_4ch(self, input_data: Any) -> torch.Tensor:
-        """Converts observation bytes, numpy arrays, or EyeFrames into 4-channel tensor (1, 4, 128, 128)."""
+    def _convert_to_numpy_rgb(self, input_data: Any) -> np.ndarray:
+        """Converts observation bytes, PIL Image, numpy array, or EyeFrame into RGB numpy array (H, W, 3)."""
+        # Zero-copy fast-path: directly reuse pre-extracted in-memory RGB array if available (<0.01 ms)
+        if hasattr(input_data, "raw_numpy") and isinstance(input_data.raw_numpy, np.ndarray):
+            return input_data.raw_numpy
+
         raw_rgb: Optional[np.ndarray] = None
 
         if hasattr(input_data, "image_bytes") and input_data.image_bytes:
@@ -160,11 +181,16 @@ class VisualCortexGate:
         if raw_rgb is None:
             raw_rgb = np.full((128, 128, 3), 128, dtype=np.uint8)
 
-        # Standardize shape to (128, 128, 3)
         if raw_rgb.ndim == 2:
             raw_rgb = np.stack([raw_rgb] * 3, axis=-1)
         elif raw_rgb.shape[-1] > 3:
             raw_rgb = raw_rgb[:, :, :3]
+
+        return raw_rgb
+
+    def _convert_to_tensor_4ch(self, input_data: Any) -> torch.Tensor:
+        """Converts observation bytes, numpy arrays, or EyeFrames into 4-channel tensor (1, 4, 128, 128)."""
+        raw_rgb = self._convert_to_numpy_rgb(input_data)
 
         H, W = raw_rgb.shape[:2]
         if (H, W) != (128, 128):
@@ -217,6 +243,24 @@ class VisualCortexGate:
                 logger.debug(f"EyeStream step fallback: {e}")
 
         def _eval_frame(obs: Any) -> StabilityGateResult:
+            if hasattr(self.cortex, "observe") and not hasattr(self.cortex, "temporal_cell"):
+                t_f0 = time.perf_counter()
+                raw_rgb = self._convert_to_numpy_rgb(obs)
+                eye_state = self.cortex.observe(frame=raw_rgb)
+                dt_ms = (time.perf_counter() - t_f0) * 1000.0
+                is_stable = bool(eye_state.is_stable and (eye_state.motion_magnitude < self.stability_threshold))
+                spinner_active = eye_state.stability in ("busy", "tracking", "dynamic_video")
+                details = f"HumanEye sensory gate: stability={eye_state.stability}, motion={eye_state.motion_magnitude:.4f}, surprise={eye_state.surprise_score:.4f}"
+                return StabilityGateResult(
+                    is_stable=is_stable,
+                    surprise_score=round(eye_state.surprise_score, 4),
+                    spinner_active=spinner_active,
+                    spatial_delta=round(eye_state.motion_magnitude, 5),
+                    latency_ms=round(dt_ms, 2),
+                    details=details,
+                    has_popup=getattr(eye_state, "overlay_suspected", False),
+                )
+
             t_f0 = time.perf_counter()
             x_4ch = self._convert_to_tensor_4ch(obs)
             now = time.time()
@@ -305,6 +349,59 @@ class VisualCortexGate:
                 latency_ms=round(latency, 2),
                 ripple_detected=False,
                 details="Zero optical change detected between pre- and post-actuation frames.",
+            )
+
+        # Localized ROI around action.coordinate (50px radius) for rapid sub-2ms click ripple verification
+        coord = getattr(action, "coordinate", None) or getattr(action, "start_coordinate", None)
+        if coord and len(coord) == 2:
+            cx, cy = int(coord[0]), int(coord[1])
+            arr1 = self._convert_to_numpy_rgb(pre_obs)
+            arr2 = self._convert_to_numpy_rgb(post_obs)
+            h, w = arr1.shape[:2]
+            r = 50
+            bx1, by1 = max(0, cx - r), max(0, cy - r)
+            bx2, by2 = min(w, cx + r), min(h, cy + r)
+            if bx2 > bx1 and by2 > by1:
+                crop1 = arr1[by1:by2, bx1:bx2]
+                crop2 = arr2[by1:by2, bx1:bx2]
+                diff = np.abs(crop2.astype(np.int16) - crop1.astype(np.int16))
+                changed_pixels = int(np.count_nonzero(diff > 5))
+                delta_score = changed_pixels / float(crop1.size)
+                has_ripple = changed_pixels > 0
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                details = (
+                    f"Visual cortex localized ROI ripple probe (50px ROI at ({cx}, {cy})): "
+                    f"delta={delta_score:.4f} (ripple {'detected' if has_ripple else 'not detected'}) in {dt_ms:.2f}ms."
+                )
+                return Stage1Result(
+                    passed=has_ripple,
+                    optical_delta=round(delta_score, 4),
+                    latency_ms=round(dt_ms, 2),
+                    ripple_detected=has_ripple,
+                    details=details,
+                )
+
+        # HumanEye visual cortex branch
+        if hasattr(self.cortex, "observe") and not hasattr(self.cortex, "temporal_cell"):
+            arr1 = self._convert_to_numpy_rgb(pre_obs)
+            arr2 = self._convert_to_numpy_rgb(post_obs)
+            state1 = self.cortex.observe(frame=arr1)
+            state2 = self.cortex.observe(frame=arr2)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            motion_delta = float(abs(state2.motion_magnitude - state1.motion_magnitude))
+            surprise = float(state2.surprise_score)
+            has_ripple = (motion_delta >= 0.0005) or (surprise >= 0.005) or (state2.motion_magnitude > 0.001) or (state2.stability != "stable")
+            details = (
+                f"HumanEye ripple probe {'confirmed' if has_ripple else 'not detected'} "
+                f"(motion_delta={motion_delta:.4f}, surprise={surprise:.4f}, stability={state2.stability}) "
+                f"in {dt_ms:.2f}ms."
+            )
+            return Stage1Result(
+                passed=has_ripple,
+                optical_delta=round(max(motion_delta, surprise), 4),
+                latency_ms=round(dt_ms, 2),
+                ripple_detected=has_ripple,
+                details=details,
             )
 
         # 1. Forward pass on pre-observation
