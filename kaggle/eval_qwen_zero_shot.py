@@ -43,15 +43,72 @@ def wilson_score(hits: int, total: int, z: float = 1.95996) -> Tuple[float, floa
     return round(max(0.0, (c - s) / d) * 100.0, 2), round(min(1.0, (c + s) / d) * 100.0, 2)
 
 
-def parse_prediction(text: str, w: int, h: int) -> Optional[Tuple[int, int]]:
-    """Extracts absolute pixel coordinates [0 to w, 0 to h] from Qwen2.5-VL output."""
-    # 1. Canonical JSON coordinate
-    m = re.search(r'"coordinate"\s*:\s*\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]', text)
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 56 * 56,
+    max_pixels: int = 14 * 14 * 4 * 1280,
+) -> Tuple[int, int]:
+    """Rescales the image dimensions to be divisible by factor and within [min_pixels, max_pixels].
+
+    Matches Qwen2.5-VL / qwen_vl_utils smart_resize implementation.
+    """
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return int(h_bar), int(w_bar)
+
+
+def rescale_coordinates_to_native(
+    coord: Optional[Tuple[int, int]],
+    raw_w: int,
+    raw_h: int,
+    resized_w: int,
+    resized_h: int,
+) -> Optional[Tuple[int, int]]:
+    """Maps predicted coordinates from Qwen2.5-VL resized pixel space back to raw native screen pixels."""
+    if coord is None:
+        return None
+    if resized_w <= 0 or resized_h <= 0 or raw_w <= 0 or raw_h <= 0:
+        return coord
+    x, y = coord
+    scale_x = raw_w / float(resized_w)
+    scale_y = raw_h / float(resized_h)
+    native_x = int(round(x * scale_x))
+    native_y = int(round(y * scale_y))
+    return max(0, min(raw_w - 1, native_x)), max(0, min(raw_h - 1, native_y))
+
+
+def parse_prediction(
+    text: str,
+    w: int,
+    h: int,
+    raw_w: Optional[int] = None,
+    raw_h: Optional[int] = None,
+) -> Optional[Tuple[int, int]]:
+    """Extracts coordinates from Qwen2.5-VL output, mapping from resized space to native screen pixels."""
+    target_w = raw_w if raw_w is not None else w
+    target_h = raw_h if raw_h is not None else h
+
+    # 1. Canonical JSON coordinate (tolerates optional missing closing bracket ']')
+    m = re.search(r'"coordinate"\s*:\s*\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]?', text)
     if m:
-        x, y = float(m.group(1)), float(m.group(2))
-        if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and w > 1:
-            x, y = x * w, y * h
-        return max(0, min(w - 1, int(round(x)))), max(0, min(h - 1, int(round(y))))
+        s_x, s_y = m.group(1), m.group(2)
+        is_float = ("." in s_x) or ("." in s_y)
+        x, y = float(s_x), float(s_y)
+        return _normalize_and_bound(x, y, w, h, target_w, target_h, is_float=is_float)
 
     # 2. Qwen2.5-VL native box tokens in absolute pixels
     m_box = re.search(r'<\|box_start\|>\s*\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)\s*<\|box_end\|>', text)
@@ -59,19 +116,45 @@ def parse_prediction(text: str, w: int, h: int) -> Optional[Tuple[int, int]]:
         y1, x1, y2, x2 = [float(v) for v in m_box.groups()]
         cx = (x1 + x2) / 2.0
         cy = (y1 + y2) / 2.0
-        if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0 and w > 1:
-            cx, cy = cx * w, cy * h
-        return max(0, min(w - 1, int(round(cx)))), max(0, min(h - 1, int(round(cy))))
+        return _normalize_and_bound(cx, cy, w, h, target_w, target_h, is_float=False)
 
-    # 3. Plain numeric pair [x, y]
-    m_pair = re.search(r'\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]', text)
+    # 3. Plain numeric pair [x, y] (tolerates optional missing closing bracket ']')
+    m_pair = re.search(r'\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]?', text)
     if m_pair:
-        x, y = float(m_pair.group(1)), float(m_pair.group(2))
-        if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and w > 1:
-            x, y = x * w, y * h
-        return max(0, min(w - 1, int(round(x)))), max(0, min(h - 1, int(round(y))))
+        s_x, s_y = m_pair.group(1), m_pair.group(2)
+        is_float = ("." in s_x) or ("." in s_y)
+        x, y = float(s_x), float(s_y)
+        return _normalize_and_bound(x, y, w, h, target_w, target_h, is_float=is_float)
 
     return None
+
+
+def _normalize_and_bound(
+    x: float,
+    y: float,
+    canvas_w: int,
+    canvas_h: int,
+    target_w: int,
+    target_h: int,
+    is_float: bool = False,
+) -> Tuple[int, int]:
+    is_strictly_fractional = (0.0 < x < 1.0) or (0.0 < y < 1.0)
+    is_normalized_float = is_float and (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0)
+
+    if (is_strictly_fractional or is_normalized_float) and (target_w > 1 and target_h > 1):
+        real_x = int(round(x * target_w))
+        real_y = int(round(y * target_h))
+    else:
+        if (canvas_w != target_w or canvas_h != target_h) and canvas_w > 0 and canvas_h > 0:
+            scale_x = target_w / float(canvas_w)
+            scale_y = target_h / float(canvas_h)
+            real_x = int(round(x * scale_x))
+            real_y = int(round(y * scale_y))
+        else:
+            real_x = int(round(x))
+            real_y = int(round(y))
+
+    return max(0, min(target_w - 1, real_x)), max(0, min(target_h - 1, real_y))
 
 
 def run_benchmark(limit: Optional[int] = None, output_path: str = "showdown_qwen_zero_shot.json"):
@@ -178,7 +261,20 @@ def run_benchmark(limit: Optional[int] = None, output_path: str = "showdown_qwen
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0].strip()
 
-        pred = parse_prediction(raw_output, w, h)
+        # Rescale predicted coordinates from smart_resize space back to native w x h
+        if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "max_pixels"):
+            max_p = processor.image_processor.max_pixels
+            min_p = getattr(processor.image_processor, "min_pixels", 56 * 56)
+        else:
+            max_p = 14 * 14 * 4 * 1280
+            min_p = 56 * 56
+        resized_h, resized_w = smart_resize(h, w, min_pixels=min_p, max_pixels=max_p)
+        if "image_grid_thw" in inputs:
+            grid_thw = inputs["image_grid_thw"]
+            resized_h = int(grid_thw[0, 1].item()) * 28
+            resized_w = int(grid_thw[0, 2].item()) * 28
+
+        pred = parse_prediction(raw_output, canvas_w=resized_w, canvas_h=resized_h, raw_w=w, raw_h=h)
 
         # Debug print for initial samples to monitor raw token distribution
         if idx <= 10:

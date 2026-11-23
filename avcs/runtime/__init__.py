@@ -17,6 +17,8 @@ from avcs.runtime.skills_vault.cache import (
     UIStateAnchor,
 )
 from avcs.runtime.streamer import AceStreamer
+from avcs.runtime.turbo_jpeg import decode_turbo_jpeg, encode_turbo_jpeg
+from avcs.runtime.vla_client import VLAClient
 
 __all__ = [
     "AceAgent",
@@ -28,9 +30,12 @@ __all__ = [
     "AnchorVerifiedSkillCache",
     "CognitivePlanner",
     "CustomLLMClient",
+    "decode_turbo_jpeg",
+    "encode_turbo_jpeg",
     "SkillRecord",
     "StepRecord",
     "UIStateAnchor",
+    "VLAClient",
 ]
 
 AcePlanner = CognitivePlanner

@@ -35,11 +35,26 @@ m8-live-results/
 .gravitas/
 scratch/
 # Downloaded speech-recognition models (see `avcs.voice.demo --get-ears`)
-models/
+/models/
 # Skills Vault runtime trajectories and cache
 avcs/ace/skills_vault/trajectories/
 avcs/ace/skills_vault/skills/
 avcs/ace/skills_vault/skills.db*
 avcs/ace/skills_vault/failures/
 avcs/ace/skills_vault/golden/
+avcs/runtime/skills_vault/trajectories/
+avcs/runtime/skills_vault/skills/
+avcs/runtime/skills_vault/skills.db*
+avcs/runtime/skills_vault/failures/
+avcs/runtime/skills_vault/golden/
+data/showdown-clicks-dev/frames/
+
+# Untracked legacy benchmark and evaluation adapters
+ace_plan.md
+benchmarks/ace_model_suite_adapter.py
+benchmarks/compare_suite_a_human.py
+benchmarks/human_suite_a_adapter.py
+tests/test_ace_model_suite_adapter.py
+tests/test_suite_a_evaluator.py
+tests/test_suite_a_human_comparison.py
 
