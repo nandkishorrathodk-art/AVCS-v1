@@ -1,0 +1,263 @@
+{
+  "session_id": "fedcb7a9",
+  "goal": "Composite workflow",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [
+    {
+      "step": 4,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Click target button"
+    }
+  ],
+  "total_steps": 7,
+  "is_complete": true,
+  "stop_reason": "Save done",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Start opened",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 95.71170806884766,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.4692545,
+      "reason": "Start opened"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 95.71170806884766,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.5361176,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 116.28270149230957,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.658922,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          410,
+          310
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (400, 300) to (410, 310)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 91.19939804077148,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.7767365,
+      "reason": "Loop breakout: Jittering click position from (400, 300) to (410, 310)"
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Escape handled",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 74.2483139038086,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.896515,
+      "reason": "Escape handled"
+    },
+    {
+      "step_index": 6,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Retry handled",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 74.2483139038086,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362928.9409769,
+      "reason": "Retry handled"
+    },
+    {
+      "step_index": 7,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Save done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 88.00625801086426,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795362929.0238163,
+      "reason": "Save done"
+    }
+  ],
+  "metrics": {
+    "session_id": "fedcb7a9",
+    "goal": "Composite workflow",
+    "total_steps": 7,
+    "is_complete": true,
+    "stop_reason": "Save done",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        400,
+        300
+      ]
+    ],
+    "elapsed_seconds": 0.81,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795362929.0402007,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Open Windows Start Menu",
+        "expected_ui_state": "Start menu open",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Retry 'Click target button' visually",
+        "expected_ui_state": "Button clicked",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 4,
+        "description": "Save document or current file",
+        "expected_ui_state": "File saved",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        400,
+        300
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": false,
+    "stage3_failure_type": "hunting_loop",
+    "stage3_intervention_applied": true
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Composite workflow",
+    "verified": true,
+    "action_count": 7,
+    "trajectory": [
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Start opened",
+        "confidence": 0.0
+      },
+      {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      {
+        "kind": "left_click",
+        "coordinate": [
+          410,
+          310
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (400, 300) to (410, 310)",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Escape handled",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Retry handled",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Save done",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "fedcb7a9_1795362929.jpeg"
+}

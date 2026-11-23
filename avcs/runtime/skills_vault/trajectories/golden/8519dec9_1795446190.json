@@ -1,0 +1,142 @@
+{
+  "session_id": "8519dec9",
+  "goal": "Launch notepad",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 3,
+  "is_complete": true,
+  "stop_reason": "Notepad launched",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          100,
+          700
+        ],
+        "duration": 0.0,
+        "reason": "Click taskbar",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 126.77693367004395,
+      "plan_latency_ms": 350.0,
+      "timestamp": 1795446189.6595776,
+      "reason": "Click taskbar"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "type",
+        "coordinate": [
+          100,
+          700
+        ],
+        "text": "notepad",
+        "duration": 0.0,
+        "reason": "Type notepad",
+        "confidence": 0.0,
+        "metadata": {
+          "focus_verified": true,
+          "focus_dwell_ms": 100.0
+        }
+      },
+      "capture_time_ms": 147.17650413513184,
+      "plan_latency_ms": 410.0,
+      "timestamp": 1795446189.79648,
+      "reason": "Type notepad"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Notepad launched",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 147.17650413513184,
+      "plan_latency_ms": 280.0,
+      "timestamp": 1795446189.9664447,
+      "reason": "Notepad launched"
+    }
+  ],
+  "metrics": {
+    "session_id": "8519dec9",
+    "goal": "Launch notepad",
+    "total_steps": 3,
+    "is_complete": true,
+    "stop_reason": "Notepad launched",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.73,
+    "avg_plan_latency_ms": 346.67
+  },
+  "created_at": 1795446190.068186,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Launch Notepad application",
+        "expected_ui_state": "Notepad application window active and editor focused",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Launch notepad",
+    "verified": true,
+    "action_count": 3,
+    "trajectory": [
+      {
+        "kind": "left_click",
+        "coordinate": [
+          100,
+          700
+        ],
+        "duration": 0.0,
+        "reason": "Click taskbar",
+        "confidence": 0.0
+      },
+      {
+        "kind": "type",
+        "coordinate": [
+          100,
+          700
+        ],
+        "text": "notepad",
+        "duration": 0.0,
+        "reason": "Type notepad",
+        "confidence": 0.0,
+        "metadata": {
+          "focus_verified": true,
+          "focus_dwell_ms": 100.0
+        }
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Notepad launched",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "8519dec9_1795446190.jpeg"
+}

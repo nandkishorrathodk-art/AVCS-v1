@@ -1,0 +1,97 @@
+{
+  "session_id": "81c18bae",
+  "goal": "Test console safety",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Done",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "wait",
+        "duration": 0.5,
+        "reason": "Execution Safety Firewall: Active console 'ConsoleWindowClass' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 190.25421142578125,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795364581.6224241,
+      "reason": "Execution Safety Firewall: Active console 'ConsoleWindowClass' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first."
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 190.25421142578125,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795364581.6940808,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "81c18bae",
+    "goal": "Test console safety",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Done",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 16.97,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795364581.7277207,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Test console safety",
+        "expected_ui_state": "Completed 'Test console safety'",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Test console safety",
+    "verified": true,
+    "action_count": 2,
+    "trajectory": [
+      {
+        "kind": "wait",
+        "duration": 0.5,
+        "reason": "Execution Safety Firewall: Active console 'ConsoleWindowClass' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first.",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "81c18bae_1795364581.jpeg"
+}

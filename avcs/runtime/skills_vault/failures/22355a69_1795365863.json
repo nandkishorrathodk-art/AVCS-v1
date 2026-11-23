@@ -1,0 +1,180 @@
+{
+  "session_id": "22355a69",
+  "goal": "Submit form",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (5) reached.",
+  "stuck_points": [
+    {
+      "step": 3,
+      "action": {
+        "kind": "key",
+        "keys": [
+          "enter"
+        ],
+        "duration": 0.0,
+        "reason": "Repeated key",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Submit form"
+    }
+  ],
+  "total_steps": 5,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (5) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "key",
+        "keys": [
+          "enter"
+        ],
+        "duration": 0.0,
+        "reason": "Repeated key",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795365863.504861,
+      "reason": "Repeated key"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "key",
+        "keys": [
+          "enter"
+        ],
+        "duration": 0.0,
+        "reason": "Repeated key",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795365863.6022067,
+      "reason": "Repeated key"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "wait",
+        "duration": 0.2,
+        "reason": "Loop deadlock resolved: Replanned into 2 alternative sub-goals",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795365863.701783,
+      "reason": "Loop deadlock resolved: Replanned into 2 alternative sub-goals"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Completed successfully",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795365863.7197006,
+      "reason": "Completed successfully"
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "wait",
+        "duration": 1.0,
+        "reason": "Planning error: ",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795365863.7367256,
+      "reason": "Planning error: "
+    }
+  ],
+  "metrics": {
+    "session_id": "22355a69",
+    "goal": "Submit form",
+    "total_steps": 5,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (5) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.25,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795365863.8264763,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Retry 'Submit form' visually",
+        "expected_ui_state": "Completed 'Submit form'",
+        "status": "in_progress",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 3,
+        "action": {
+          "kind": "key",
+          "keys": [
+            "enter"
+          ],
+          "duration": 0.0,
+          "reason": "Repeated key",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Submit form"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 3,
+        "rejected_action": {
+          "kind": "key",
+          "keys": [
+            "enter"
+          ],
+          "duration": 0.0,
+          "reason": "Repeated key",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Submit form"
+      }
+    ]
+  },
+  "screenshot_file": "22355a69_1795365863.jpeg"
+}

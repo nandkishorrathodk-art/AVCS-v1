@@ -1,0 +1,431 @@
+{
+  "session_id": "56ed5ad4",
+  "goal": "Start menu open karo aur google chrome search karo and the chrome me hello world likho then close the the crome windonw and then lounch notepad ",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "",
+  "stuck_points": [
+    {
+      "step": 12,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+        "confidence": 0.0
+      },
+      "reason": "No optical ripple detected after click"
+    },
+    {
+      "step": 14,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Close the Google Chrome window"
+    }
+  ],
+  "total_steps": 15,
+  "is_complete": false,
+  "stop_reason": "",
+  "dry_run": false,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          266,
+          776
+        ],
+        "duration": 0.0,
+        "reason": "Click the Windows Start button on the taskbar to open the Start menu.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 141.25299453735352,
+      "plan_latency_ms": 12612.81967163086,
+      "timestamp": 1795364473.05685,
+      "reason": "Click the Windows Start button on the taskbar to open the Start menu."
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 113.24715614318848,
+      "plan_latency_ms": 11911.946058273315,
+      "timestamp": 1795364485.934148,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "wait",
+        "duration": 0.5,
+        "reason": "Premature STOP rejected: Sub-goal 'Search for Google Chrome in the Start menu' requires typing or searching. You must perform a TYPE action before completing this sub-goal.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 150.57826042175293,
+      "plan_latency_ms": 9699.738264083862,
+      "timestamp": 1795364495.8388982,
+      "reason": "Premature STOP rejected: Sub-goal 'Search for Google Chrome in the Start menu' requires typing or searching. You must perform a TYPE action before completing this sub-goal."
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "type",
+        "text": "Google Chrome",
+        "duration": 0.0,
+        "reason": "Type 'Google Chrome' into the Start menu search bar to find the application.",
+        "press_enter": true,
+        "confidence": 0.0
+      },
+      "capture_time_ms": 145.66659927368164,
+      "plan_latency_ms": 11557.138681411743,
+      "timestamp": 1795364507.50398,
+      "reason": "Type 'Google Chrome' into the Start menu search bar to find the application."
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          538,
+          482
+        ],
+        "duration": 0.0,
+        "reason": "Click the Open button to launch Google Chrome from the Start menu search results.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 160.92705726623535,
+      "plan_latency_ms": 4576.281309127808,
+      "timestamp": 1795364514.2758274,
+      "reason": "Click the Open button to launch Google Chrome from the Start menu search results."
+    },
+    {
+      "step_index": 6,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 206.21752738952637,
+      "plan_latency_ms": 1818.3341026306152,
+      "timestamp": 1795364517.2882893,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 7,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 149.69658851623535,
+      "plan_latency_ms": 10212.796926498413,
+      "timestamp": 1795364528.100647,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 8,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          498,
+          470
+        ],
+        "duration": 0.0,
+        "reason": "Click the Google search input field to focus it for typing.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 136.44862174987793,
+      "plan_latency_ms": 18867.43950843811,
+      "timestamp": 1795364547.0866597,
+      "reason": "Click the Google search input field to focus it for typing."
+    },
+    {
+      "step_index": 9,
+      "action": {
+        "kind": "type",
+        "text": "hello world",
+        "duration": 0.0,
+        "reason": "Type 'hello world' into the Google search input field.",
+        "press_enter": true,
+        "confidence": 0.0
+      },
+      "capture_time_ms": 177.2623062133789,
+      "plan_latency_ms": 8834.04541015625,
+      "timestamp": 1795364557.308525,
+      "reason": "Type 'hello world' into the Google search input field."
+    },
+    {
+      "step_index": 10,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 168.3027744293213,
+      "plan_latency_ms": 6185.259103775024,
+      "timestamp": 1795364565.0742092,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 11,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          210,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Close the Google Chrome window by clicking the X button on the tab.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 139.53208923339844,
+      "plan_latency_ms": 8308.172464370728,
+      "timestamp": 1795364573.747664,
+      "reason": "Close the Google Chrome window by clicking the X button on the tab."
+    },
+    {
+      "step_index": 12,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 265.9759521484375,
+      "plan_latency_ms": 6531.06427192688,
+      "timestamp": 1795364581.9920433,
+      "reason": "Click the X button in the top-right corner of the Google Chrome window to close it."
+    },
+    {
+      "step_index": 13,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 232.59711265563965,
+      "plan_latency_ms": 7893.948078155518,
+      "timestamp": 1795364591.1374698,
+      "reason": "Click the X button in the top-right corner of the Google Chrome window to close it."
+    },
+    {
+      "step_index": 14,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          992,
+          34
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 182.32202529907227,
+      "plan_latency_ms": 1714.365005493164,
+      "timestamp": 1795364601.402641,
+      "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)"
+    },
+    {
+      "step_index": 15,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          400,
+          600
+        ],
+        "duration": 0.0,
+        "reason": "Click blank area of the page to dismiss any temporary overlay and refocus the window.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 229.3415069580078,
+      "plan_latency_ms": 7780.114650726318,
+      "timestamp": 1795364610.4867513,
+      "reason": "Click blank area of the page to dismiss any temporary overlay and refocus the window."
+    }
+  ],
+  "metrics": {
+    "session_id": "56ed5ad4",
+    "goal": "Start menu open karo aur google chrome search karo and the chrome me hello world likho then close the the crome windonw and then lounch notepad ",
+    "total_steps": 15,
+    "is_complete": false,
+    "stop_reason": "",
+    "dry_run": false,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        982,
+        24
+      ]
+    ],
+    "elapsed_seconds": 190.5,
+    "avg_plan_latency_ms": 8566.9
+  },
+  "created_at": 1795364641.9612079,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Open the Start menu",
+        "expected_ui_state": "Start menu interface is displayed",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Search for Google Chrome in the Start menu",
+        "expected_ui_state": "Google Chrome appears in search results",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Launch Google Chrome",
+        "expected_ui_state": "Google Chrome browser window is open and focused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 4,
+        "description": "Type \"hello world\" into Chrome's input field",
+        "expected_ui_state": "The text \"hello world\" is entered in Chrome",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 5,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "in_progress",
+        "metadata": {}
+      },
+      {
+        "index": 6,
+        "description": "Retry 'Close the Google Chrome window' visually",
+        "expected_ui_state": "Google Chrome window is terminated",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 7,
+        "description": "Launch Notepad",
+        "expected_ui_state": "Notepad application window is open and focused",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        982,
+        24
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.01,
+    "stage2_passed": true,
+    "stage2_details": "Semantic Verification passed: Application 'chrome' detected in window 'Ace VLA Model Technical Analysis - Google Gemini - Google Chrome'.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 12,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+          "confidence": 0.0
+        },
+        "reason": "No optical ripple detected after click"
+      },
+      {
+        "step": 14,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Close the Google Chrome window"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 12,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+          "confidence": 0.0
+        },
+        "repetitions": null,
+        "subgoal": null
+      },
+      {
+        "step": 14,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the X button in the top-right corner of the Google Chrome window to close it.",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Close the Google Chrome window"
+      }
+    ]
+  },
+  "screenshot_file": "56ed5ad4_1795364641.jpeg"
+}

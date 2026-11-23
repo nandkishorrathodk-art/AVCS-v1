@@ -1,0 +1,522 @@
+{
+  "session_id": "170df65d",
+  "goal": "Start menu open karo aur google chrome search karo and the chrome me hello world likho then close the the crome windonw and then lounch notepad ",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Safety breakout: Mouse pushed to top-right corner (1919, 0). Aborting immediately.",
+  "stuck_points": [
+    {
+      "step": 8,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+        "confidence": 0.0
+      },
+      "reason": "No optical ripple detected after click"
+    },
+    {
+      "step": 9,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+        "confidence": 0.0
+      },
+      "reason": "No optical ripple detected after click"
+    },
+    {
+      "step": 10,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Close active window"
+    },
+    {
+      "step": 10,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          992,
+          34
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)",
+        "confidence": 0.0
+      },
+      "reason": "No optical ripple detected after click"
+    },
+    {
+      "step": 11,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          450,
+          470
+        ],
+        "duration": 0.0,
+        "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "confidence": 0.0
+      },
+      "reason": "No optical ripple detected after click"
+    }
+  ],
+  "total_steps": 12,
+  "is_complete": true,
+  "stop_reason": "Session aborted by exception: Safety breakout: Mouse pushed to top-right corner (1919, 0). Aborting immediately.",
+  "dry_run": false,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "key",
+        "keys": [
+          "win"
+        ],
+        "duration": 0.0,
+        "reason": "Open Start menu",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 79.12945747375488,
+      "plan_latency_ms": 2963.257312774658,
+      "timestamp": 1795362262.8909905,
+      "reason": "Open Start menu"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 62.80374526977539,
+      "plan_latency_ms": 1799.7455596923828,
+      "timestamp": 1795362265.505595,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          320,
+          647
+        ],
+        "duration": 0.0,
+        "reason": "Click on the Google Chrome icon in the Start menu to open the browser.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 56.694984436035156,
+      "plan_latency_ms": 2161.7884635925293,
+      "timestamp": 1795362267.7523582,
+      "reason": "Click on the Google Chrome icon in the Start menu to open the browser."
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          320,
+          645
+        ],
+        "duration": 0.0,
+        "reason": "Click on the Google Chrome icon in the Start menu to open the browser.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 126.42812728881836,
+      "plan_latency_ms": 1698.5070705413818,
+      "timestamp": 1795362270.4217937,
+      "reason": "Click on the Google Chrome icon in the Start menu to open the browser."
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "type",
+        "coordinate": [
+          450,
+          470
+        ],
+        "text": "hello world",
+        "duration": 0.0,
+        "reason": "Type 'hello world' into the Google search bar",
+        "press_enter": true,
+        "confidence": 0.0,
+        "metadata": {
+          "focus_verified": true,
+          "focus_dwell_ms": 100.0
+        }
+      },
+      "capture_time_ms": 72.14140892028809,
+      "plan_latency_ms": 2061.903476715088,
+      "timestamp": 1795362273.2281842,
+      "reason": "Type 'hello world' into the Google search bar"
+    },
+    {
+      "step_index": 6,
+      "action": {
+        "kind": "type",
+        "coordinate": [
+          450,
+          470
+        ],
+        "text": "hello world",
+        "duration": 0.0,
+        "reason": "Type 'hello world' into the Google search bar",
+        "press_enter": true,
+        "confidence": 0.0,
+        "metadata": {
+          "focus_verified": true,
+          "focus_dwell_ms": 100.0
+        }
+      },
+      "capture_time_ms": 105.55291175842285,
+      "plan_latency_ms": 2238.307476043701,
+      "timestamp": 1795362277.2241955,
+      "reason": "Type 'hello world' into the Google search bar"
+    },
+    {
+      "step_index": 7,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Target application is open and visible. Goal complete.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 77.33774185180664,
+      "plan_latency_ms": 2241.137742996216,
+      "timestamp": 1795362281.1443677,
+      "reason": "Target application is open and visible. Goal complete."
+    },
+    {
+      "step_index": 8,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 95.02911567687988,
+      "plan_latency_ms": 5974.698305130005,
+      "timestamp": 1795362287.1903634,
+      "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window."
+    },
+    {
+      "step_index": 9,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          982,
+          24
+        ],
+        "duration": 0.0,
+        "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 85.53290367126465,
+      "plan_latency_ms": 2398.9412784576416,
+      "timestamp": 1795362290.4268796,
+      "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window."
+    },
+    {
+      "step_index": 10,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          992,
+          34
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 59.530019760131836,
+      "plan_latency_ms": 2100.93355178833,
+      "timestamp": 1795362293.5154104,
+      "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)"
+    },
+    {
+      "step_index": 11,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          450,
+          470
+        ],
+        "duration": 0.0,
+        "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 70.30439376831055,
+      "plan_latency_ms": 2121.8202114105225,
+      "timestamp": 1795362296.3484764,
+      "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus"
+    },
+    {
+      "step_index": 12,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          450,
+          470
+        ],
+        "duration": 0.0,
+        "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 66.61510467529297,
+      "plan_latency_ms": 2193.6187744140625,
+      "timestamp": 1795362299.3269923,
+      "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus"
+    }
+  ],
+  "metrics": {
+    "session_id": "170df65d",
+    "goal": "Start menu open karo aur google chrome search karo and the chrome me hello world likho then close the the crome windonw and then lounch notepad ",
+    "total_steps": 12,
+    "is_complete": true,
+    "stop_reason": "Session aborted by exception: Safety breakout: Mouse pushed to top-right corner (1919, 0). Aborting immediately.",
+    "dry_run": false,
+    "is_stuck": true,
+    "blacklisted_coordinates": [
+      [
+        982,
+        24
+      ]
+    ],
+    "elapsed_seconds": 47.82,
+    "avg_plan_latency_ms": 2496.22
+  },
+  "created_at": 1795362299.4477847,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Open Windows Start Menu",
+        "expected_ui_state": "Start menu opened and search input visible",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "The chrome me hello world likho",
+        "expected_ui_state": "Completed 'The chrome me hello world likho'",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "in_progress",
+        "metadata": {}
+      },
+      {
+        "index": 4,
+        "description": "Retry 'Close active window' visually",
+        "expected_ui_state": "Target window closed and desktop returned to foreground",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 5,
+        "description": "Lounch notepad",
+        "expected_ui_state": "Completed 'Lounch notepad'",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        982,
+        24
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": false,
+    "stage1_delta": 0.0,
+    "stage2_passed": true,
+    "stage2_details": "Semantic Verification passed: Application 'chrome' detected in window 'hello world - Google Search - Google Chrome'.",
+    "stage3_passed": false,
+    "stage3_failure_type": "hunting_loop",
+    "stage3_intervention_applied": true
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 8,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "reason": "No optical ripple detected after click"
+      },
+      {
+        "step": 9,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "reason": "No optical ripple detected after click"
+      },
+      {
+        "step": 10,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Close active window"
+      },
+      {
+        "step": 10,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            992,
+            34
+          ],
+          "duration": 0.0,
+          "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)",
+          "confidence": 0.0
+        },
+        "reason": "No optical ripple detected after click"
+      },
+      {
+        "step": 11,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            450,
+            470
+          ],
+          "duration": 0.0,
+          "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+          "confidence": 0.0
+        },
+        "reason": "No optical ripple detected after click"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 8,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "repetitions": null,
+        "subgoal": null
+      },
+      {
+        "step": 9,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "repetitions": null,
+        "subgoal": null
+      },
+      {
+        "step": 10,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            982,
+            24
+          ],
+          "duration": 0.0,
+          "reason": "Click the close button (X) in the top-right corner of the Chrome window to close the active window.",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Close active window"
+      },
+      {
+        "step": 10,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            992,
+            34
+          ],
+          "duration": 0.0,
+          "reason": "Loop breakout: Jittering click position from (982, 24) to (992, 34)",
+          "confidence": 0.0
+        },
+        "repetitions": null,
+        "subgoal": null
+      },
+      {
+        "step": 11,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            450,
+            470
+          ],
+          "duration": 0.0,
+          "reason": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+          "confidence": 0.0
+        },
+        "repetitions": null,
+        "subgoal": null
+      }
+    ]
+  },
+  "screenshot_file": "170df65d_1795362299.jpeg"
+}

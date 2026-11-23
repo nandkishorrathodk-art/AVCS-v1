@@ -1,0 +1,117 @@
+{
+  "session_id": "dc06deb2",
+  "goal": "Launch notepad",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (2) reached.",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (2) reached.",
+  "dry_run": false,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Claimed Notepad launched",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 73.9598274230957,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795360806.150584,
+      "reason": "Claimed Notepad launched"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Claimed Notepad launched",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 73.9598274230957,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795360806.1740034,
+      "reason": "Claimed Notepad launched"
+    }
+  ],
+  "metrics": {
+    "session_id": "dc06deb2",
+    "goal": "Launch notepad",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (2) reached.",
+    "dry_run": false,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.24,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795360806.2161152,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Click Windows Start icon on taskbar to open Start Menu",
+        "expected_ui_state": "Start menu opened and search input visible",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Type target application query into search",
+        "expected_ui_state": "Application search results listed",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Type 'Notepad' into search",
+        "expected_ui_state": "Search results for Notepad displayed",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 4,
+        "description": "Click Notepad app icon in search results to launch application",
+        "expected_ui_state": "Notepad application window active",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic verification failed: Notepad window not detected.",
+    "stage3_passed": false,
+    "stage3_failure_type": "hunting_loop",
+    "stage3_intervention_applied": true
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [],
+    "failure_turning_points": [
+      {
+        "step": 2,
+        "rejected_action": {
+          "kind": "stop",
+          "duration": 0.0,
+          "reason": "Claimed Notepad launched",
+          "confidence": 0.0
+        },
+        "repetitions": 1,
+        "subgoal": "Launch notepad",
+        "failure_reason": "Maximum step limit (2) reached."
+      }
+    ]
+  },
+  "screenshot_file": "dc06deb2_1795360806.jpeg"
+}

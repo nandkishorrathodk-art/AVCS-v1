@@ -1,0 +1,29 @@
+{
+  "dataset_name": "AVCS-VLA-Curated-Mixture",
+  "version": "1.0.0",
+  "total_samples": 4248,
+  "train_samples": 3823,
+  "val_samples": 425,
+  "train_ratio": 0.9,
+  "max_pixels_ceiling": 1024000,
+  "canonical_resolution": [
+    1280,
+    800
+  ],
+  "action_distribution": {
+    "left_click": 1009,
+    "double_click": 681,
+    "right_click": 166,
+    "type_text": 723,
+    "hotkey": 835,
+    "left_click_drag": 334,
+    "scroll": 334,
+    "wait": 0,
+    "stop": 166
+  },
+  "contamination_firewall": {
+    "status": "PASSED",
+    "held_out_benchmark": "generalagents/showdown-clicks-dev",
+    "leakage_count": 0
+  }
+}

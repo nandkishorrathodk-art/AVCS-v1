@@ -1,0 +1,78 @@
+{
+  "session_id": "69d558cd",
+  "goal": "Test stability gate",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 1,
+  "is_complete": true,
+  "stop_reason": "Done",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 112.92457580566406,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795446284.6987963,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "69d558cd",
+    "goal": "Test stability gate",
+    "total_steps": 1,
+    "is_complete": true,
+    "stop_reason": "Done",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.33,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795446284.8095927,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Test stability gate",
+        "expected_ui_state": "Completed 'Test stability gate'",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Test stability gate",
+    "verified": true,
+    "action_count": 1,
+    "trajectory": [
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "69d558cd_1795446284.jpeg"
+}

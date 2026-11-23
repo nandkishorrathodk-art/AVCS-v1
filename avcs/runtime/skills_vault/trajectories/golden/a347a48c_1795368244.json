@@ -1,0 +1,104 @@
+{
+  "session_id": "a347a48c",
+  "goal": "Test string subgoals",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Done",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 105.92842102050781,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795368244.09707,
+      "reason": "Done"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 105.92842102050781,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795368244.1576169,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "a347a48c",
+    "goal": "Test string subgoals",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Done",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.32,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795368244.2206774,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Open menu",
+        "expected_ui_state": "",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Click item",
+        "expected_ui_state": "",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": false,
+    "stage3_failure_type": "hunting_loop",
+    "stage3_intervention_applied": true
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Test string subgoals",
+    "verified": true,
+    "action_count": 2,
+    "trajectory": [
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "a347a48c_1795368244.jpeg"
+}

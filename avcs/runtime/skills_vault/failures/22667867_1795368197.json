@@ -1,0 +1,199 @@
+{
+  "session_id": "22667867",
+  "goal": "Submit form",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (5) reached.",
+  "stuck_points": [
+    {
+      "step": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Submit form"
+    }
+  ],
+  "total_steps": 5,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (5) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 71.16842269897461,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368196.5782855,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 91.77398681640625,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368196.6806571,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          310,
+          310
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (300, 300) to (310, 310)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 80.78694343566895,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368196.7833762,
+      "reason": "Loop breakout: Jittering click position from (300, 300) to (310, 310)"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 90.3463363647461,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368196.8873954,
+      "reason": "Done"
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "wait",
+        "duration": 1.0,
+        "reason": "Planning error: ",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 90.3463363647461,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795368196.9185996,
+      "reason": "Planning error: "
+    }
+  ],
+  "metrics": {
+    "session_id": "22667867",
+    "goal": "Submit form",
+    "total_steps": 5,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (5) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        300,
+        300
+      ]
+    ],
+    "elapsed_seconds": 0.53,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795368197.0181253,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Press Escape to dismiss modal dialogs and switch focus with Alt+Tab",
+        "expected_ui_state": "Active dialog dismissed and primary window refocused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Alternative approach: reopen 'Submit form' directly",
+        "expected_ui_state": "Fresh session for 'Submit form' initialized",
+        "status": "in_progress",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        300,
+        300
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 3,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            300,
+            300
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Submit form"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 3,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            300,
+            300
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Submit form"
+      }
+    ]
+  },
+  "screenshot_file": "22667867_1795368197.jpeg"
+}

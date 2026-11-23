@@ -1,0 +1,201 @@
+{
+  "session_id": "76cba2b6",
+  "goal": "Test shadow runner",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Done",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          130,
+          85
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0,
+        "metadata": {
+          "shadow_comparison": {
+            "goal": "Test shadow runner",
+            "llm_action": "left_click",
+            "llm_coordinate": [
+              130,
+              85
+            ],
+            "grounder_coordinate": [
+              128,
+              80
+            ],
+            "grounder_peak_prob": 0.85,
+            "distance_px": 5.39,
+            "agreed": true,
+            "grounder_latency_ms": 0.25
+          }
+        }
+      },
+      "capture_time_ms": 175.59361457824707,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795365689.7474382,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0,
+        "metadata": {
+          "shadow_comparison": {
+            "goal": "Test shadow runner",
+            "llm_action": "stop",
+            "llm_coordinate": null,
+            "grounder_coordinate": [
+              128,
+              80
+            ],
+            "grounder_peak_prob": 0.85,
+            "distance_px": null,
+            "agreed": false,
+            "grounder_latency_ms": 0.49
+          }
+        }
+      },
+      "capture_time_ms": 175.59361457824707,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795365689.8737261,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "76cba2b6",
+    "goal": "Test shadow runner",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Done",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.56,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795365689.9310615,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Test shadow runner",
+        "expected_ui_state": "Completed 'Test shadow runner'",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [
+      {
+        "goal": "Test shadow runner",
+        "llm_action": "left_click",
+        "llm_coordinate": [
+          130,
+          85
+        ],
+        "grounder_coordinate": [
+          128,
+          80
+        ],
+        "grounder_peak_prob": 0.85,
+        "distance_px": 5.39,
+        "agreed": true,
+        "grounder_latency_ms": 0.25
+      },
+      {
+        "goal": "Test shadow runner",
+        "llm_action": "stop",
+        "llm_coordinate": null,
+        "grounder_coordinate": [
+          128,
+          80
+        ],
+        "grounder_peak_prob": 0.85,
+        "distance_px": null,
+        "agreed": false,
+        "grounder_latency_ms": 0.49
+      }
+    ],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Test shadow runner",
+    "verified": true,
+    "action_count": 2,
+    "trajectory": [
+      {
+        "kind": "left_click",
+        "coordinate": [
+          130,
+          85
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0,
+        "metadata": {
+          "shadow_comparison": {
+            "goal": "Test shadow runner",
+            "llm_action": "left_click",
+            "llm_coordinate": [
+              130,
+              85
+            ],
+            "grounder_coordinate": [
+              128,
+              80
+            ],
+            "grounder_peak_prob": 0.85,
+            "distance_px": 5.39,
+            "agreed": true,
+            "grounder_latency_ms": 0.25
+          }
+        }
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0,
+        "metadata": {
+          "shadow_comparison": {
+            "goal": "Test shadow runner",
+            "llm_action": "stop",
+            "llm_coordinate": null,
+            "grounder_coordinate": [
+              128,
+              80
+            ],
+            "grounder_peak_prob": 0.85,
+            "distance_px": null,
+            "agreed": false,
+            "grounder_latency_ms": 0.49
+          }
+        }
+      }
+    ]
+  },
+  "screenshot_file": "76cba2b6_1795365689.jpeg"
+}

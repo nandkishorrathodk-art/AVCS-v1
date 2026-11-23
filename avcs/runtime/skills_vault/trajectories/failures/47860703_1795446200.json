@@ -1,0 +1,206 @@
+{
+  "session_id": "47860703",
+  "goal": "Open Start menu and search for Notepad",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (5) reached.",
+  "stuck_points": [
+    {
+      "step": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          260,
+          800
+        ],
+        "duration": 0.0,
+        "reason": "Click Start",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Open Windows Start Menu"
+    }
+  ],
+  "total_steps": 5,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (5) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          260,
+          800
+        ],
+        "duration": 0.0,
+        "reason": "Click Start",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 138.48280906677246,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795446199.4463563,
+      "reason": "Click Start"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          260,
+          800
+        ],
+        "duration": 0.0,
+        "reason": "Click Start",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 138.48280906677246,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795446199.5957506,
+      "reason": "Click Start"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          270,
+          790
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (260, 800) to (270, 790)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 155.84182739257812,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795446199.7413275,
+      "reason": "Loop breakout: Jittering click position from (260, 800) to (270, 790)"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 167.0851707458496,
+      "plan_latency_ms": 200.0,
+      "timestamp": 1795446199.8882883,
+      "reason": "Done"
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "wait",
+        "duration": 1.0,
+        "reason": "Planning error: ",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 158.46967697143555,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795446199.941814,
+      "reason": "Planning error: "
+    }
+  ],
+  "metrics": {
+    "session_id": "47860703",
+    "goal": "Open Start menu and search for Notepad",
+    "total_steps": 5,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (5) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        260,
+        800
+      ]
+    ],
+    "elapsed_seconds": 0.86,
+    "avg_plan_latency_ms": 275.0
+  },
+  "created_at": 1795446200.0510876,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Press Escape to dismiss modal dialogs and switch focus with Alt+Tab",
+        "expected_ui_state": "Active dialog dismissed and primary window refocused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Alternative approach: reopen 'Open Start menu and search for Notepad' directly",
+        "expected_ui_state": "Fresh session for 'Open Start menu and search for Notepad' initialized",
+        "status": "in_progress",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Search for Notepad and launch application",
+        "expected_ui_state": "Notepad application window active and editor focused",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        260,
+        800
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 3,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            260,
+            800
+          ],
+          "duration": 0.0,
+          "reason": "Click Start",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Open Windows Start Menu"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 3,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            260,
+            800
+          ],
+          "duration": 0.0,
+          "reason": "Click Start",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Open Windows Start Menu"
+      }
+    ]
+  },
+  "screenshot_file": "47860703_1795446200.jpeg"
+}

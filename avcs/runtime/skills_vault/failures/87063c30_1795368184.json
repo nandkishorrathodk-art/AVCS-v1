@@ -1,0 +1,131 @@
+{
+  "session_id": "87063c30",
+  "goal": "Test console safety",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (2) reached.",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (2) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "wait",
+        "duration": 0.5,
+        "reason": "Execution Safety Firewall: Active console 'ConsoleWindowClass' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first.",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 67.52300262451172,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368184.9137614,
+      "reason": "Execution Safety Firewall: Active console 'ConsoleWindowClass' detected with hazardous input. Rejecting typing into terminal to prevent corruption. Click target UI element first."
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 67.52300262451172,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795368184.941284,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "87063c30",
+    "goal": "Test console safety",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (2) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 11.44,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795368184.968732,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Launch the system console application.",
+        "expected_ui_state": "Console window is open and focused on the desktop.",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Navigate to the safety diagnostics section.",
+        "expected_ui_state": "Safety settings or diagnostic menu is visible within the console interface.",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Execute the console safety test command.",
+        "expected_ui_state": "Test execution has started and a progress indicator is visible.",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 4,
+        "description": "Monitor the safety test output for errors or warnings.",
+        "expected_ui_state": "Real-time test logs are scrolling in the console output pane.",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 5,
+        "description": "Review the final safety test report.",
+        "expected_ui_state": "Test completion summary is displayed with pass/fail status.",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 6,
+        "description": "Close the console application.",
+        "expected_ui_state": "Console window is closed and no longer visible.",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [],
+    "failure_turning_points": [
+      {
+        "step": 2,
+        "rejected_action": {
+          "kind": "stop",
+          "duration": 0.0,
+          "reason": "Done",
+          "confidence": 0.0
+        },
+        "repetitions": 1,
+        "subgoal": "Test console safety",
+        "failure_reason": "Maximum step limit (2) reached."
+      }
+    ]
+  },
+  "screenshot_file": "87063c30_1795368184.jpeg"
+}

@@ -1,0 +1,78 @@
+{
+  "session_id": "cef08fcd",
+  "goal": "Launch App",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 1,
+  "is_complete": true,
+  "stop_reason": "Dynamic recovered",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Dynamic recovered",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 123.3065128326416,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795354464.883439,
+      "reason": "Dynamic recovered"
+    }
+  ],
+  "metrics": {
+    "session_id": "cef08fcd",
+    "goal": "Launch App",
+    "total_steps": 1,
+    "is_complete": true,
+    "stop_reason": "Dynamic recovered",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.18,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795354464.991882,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Launch App",
+        "expected_ui_state": "Completed 'Launch App'",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Launch App",
+    "verified": true,
+    "action_count": 1,
+    "trajectory": [
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Dynamic recovered",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "cef08fcd_1795354464.jpeg"
+}

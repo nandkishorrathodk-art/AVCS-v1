@@ -1,0 +1,81 @@
+{
+  "session_id": "9ef51184",
+  "goal": "Replay goal",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Skill cache execution completed successfully.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          260,
+          780
+        ],
+        "duration": 0.0,
+        "reason": "Click start",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795364596.1212492,
+      "reason": "Click start"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795364596.1217618,
+      "reason": "Done"
+    }
+  ],
+  "metrics": {
+    "session_id": "9ef51184",
+    "goal": "Replay goal",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Skill cache execution completed successfully.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 11.9,
+    "avg_plan_latency_ms": 0.0
+  },
+  "created_at": 1795364596.1249812,
+  "metadata": {},
+  "sft_demonstration": {
+    "goal": "Replay goal",
+    "verified": true,
+    "action_count": 2,
+    "trajectory": [
+      {
+        "kind": "left_click",
+        "coordinate": [
+          260,
+          780
+        ],
+        "duration": 0.0,
+        "reason": "Click start",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      }
+    ]
+  }
+}

@@ -8,10 +8,10 @@
     0.0,
     43.45
   ],
-  "latency_p50_ms": 2069.8,
-  "latency_p90_ms": 4328.4,
-  "latency_p99_ms": 5682.3,
-  "latency_mean_ms": 2810.5,
+  "latency_p50_ms": 55.7,
+  "latency_p90_ms": 1294.0,
+  "latency_p99_ms": 1965.4,
+  "latency_mean_ms": 472.7,
   "results": [
     {
       "id": "synth_0001",
@@ -24,7 +24,7 @@
       "action_kind": "key",
       "hit": false,
       "distance_error": -1.0,
-      "latency_ms": 2028.7532806396484
+      "latency_ms": 2039.9458408355713
     },
     {
       "id": "synth_0002",
@@ -33,11 +33,14 @@
         140,
         777
       ],
-      "predicted_coord": null,
-      "action_kind": "wait",
+      "predicted_coord": [
+        240,
+        0
+      ],
+      "action_kind": "left_click",
       "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 5832.694530487061
+      "distance_error": 783.4085779463995,
+      "latency_ms": 175.11320114135742
     },
     {
       "id": "synth_0003",
@@ -46,11 +49,14 @@
         1257,
         20
       ],
-      "predicted_coord": null,
-      "action_kind": "wait",
+      "predicted_coord": [
+        1260,
+        0
+      ],
+      "action_kind": "left_click",
       "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2069.8366165161133
+      "distance_error": 20.223748416156685,
+      "latency_ms": 49.97134208679199
     },
     {
       "id": "synth_0004",
@@ -59,11 +65,14 @@
         52,
         60
       ],
-      "predicted_coord": null,
-      "action_kind": "wait",
+      "predicted_coord": [
+        240,
+        0
+      ],
+      "action_kind": "left_click",
       "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2049.2489337921143
+      "distance_error": 197.34234213670416,
+      "latency_ms": 42.58370399475098
     },
     {
       "id": "synth_0005",
@@ -72,11 +81,14 @@
         825,
         312
       ],
-      "predicted_coord": null,
-      "action_kind": "wait",
+      "predicted_coord": [
+        260,
+        28
+      ],
+      "action_kind": "left_click",
       "hit": false,
-      "distance_error": -1.0,
-      "latency_ms": 2071.949005126953
+      "distance_error": 632.3614472752114,
+      "latency_ms": 55.69767951965332
     }
   ]
 }

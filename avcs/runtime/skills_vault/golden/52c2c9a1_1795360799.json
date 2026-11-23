@@ -1,0 +1,152 @@
+{
+  "session_id": "52c2c9a1",
+  "goal": "Open Start menu and search for Notepad",
+  "status": "success",
+  "verified_success": true,
+  "failure_reason": "",
+  "stuck_points": [],
+  "total_steps": 4,
+  "is_complete": true,
+  "stop_reason": "Notepad launched",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          100,
+          700
+        ],
+        "duration": 0.0,
+        "reason": "Click start",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 94.34008598327637,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795360799.461383,
+      "reason": "Click start"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Start opened",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 102.55193710327148,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795360799.5744243,
+      "reason": "Start opened"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "type",
+        "text": "Notepad",
+        "duration": 0.0,
+        "reason": "Type Notepad",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 102.55193710327148,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795360799.6073666,
+      "reason": "Type Notepad"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Notepad launched",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 90.61408042907715,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795360799.7304175,
+      "reason": "Notepad launched"
+    }
+  ],
+  "metrics": {
+    "session_id": "52c2c9a1",
+    "goal": "Open Start menu and search for Notepad",
+    "total_steps": 4,
+    "is_complete": true,
+    "stop_reason": "Notepad launched",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.54,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795360799.8232665,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Open Windows Start Menu",
+        "expected_ui_state": "Start menu opened and search input visible",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Search for Notepad and launch application",
+        "expected_ui_state": "Notepad application window active and editor focused",
+        "status": "completed",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "sft_demonstration": {
+    "goal": "Open Start menu and search for Notepad",
+    "verified": true,
+    "action_count": 4,
+    "trajectory": [
+      {
+        "kind": "left_click",
+        "coordinate": [
+          100,
+          700
+        ],
+        "duration": 0.0,
+        "reason": "Click start",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Start opened",
+        "confidence": 0.0
+      },
+      {
+        "kind": "type",
+        "text": "Notepad",
+        "duration": 0.0,
+        "reason": "Type Notepad",
+        "confidence": 0.0
+      },
+      {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Notepad launched",
+        "confidence": 0.0
+      }
+    ]
+  },
+  "screenshot_file": "52c2c9a1_1795360799.jpeg"
+}

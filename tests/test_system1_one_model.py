@@ -132,16 +132,35 @@ def test_query_token_ids_are_stable_across_processes():
     to between training and inference, so a checkpoint's grounding head would
     read a different embedding for the same word.
     """
+    import os
+    from pathlib import Path
     import subprocess
     import sys
+    import tempfile
 
+    repo = Path(__file__).resolve().parents[1]
     code = (
         "from avcs.system1.model import _QueryEncoder as Q;"
         "print(Q.word_id('Save', 4096), Q.word_id('click', 4096), Q.word_id('Stop', 4096))"
     )
-    env = {"PYTHONPATH": "/workspace/project/AVCS-v1", "PATH": "/usr/local/bin:/usr/bin:/bin"}
-    a = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env).stdout.strip()
-    b = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env).stdout.strip()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo)
+
+    def _run_isolated() -> str:
+        with tempfile.TemporaryFile() as tmp:
+            p = subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                stdout=tmp,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            p.wait()
+            tmp.seek(0)
+            return tmp.read().decode("utf-8", errors="ignore").strip()
+
+    a = _run_isolated()
+    b = _run_isolated()
     assert a and a == b, f"token ids differ between processes: {a!r} vs {b!r}"
 
 

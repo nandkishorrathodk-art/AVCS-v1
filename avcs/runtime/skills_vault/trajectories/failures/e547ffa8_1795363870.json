@@ -1,0 +1,199 @@
+{
+  "session_id": "e547ffa8",
+  "goal": "Select option B",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (5) reached.",
+  "stuck_points": [
+    {
+      "step": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          500,
+          400
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Select option B"
+    }
+  ],
+  "total_steps": 5,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (5) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          500,
+          400
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 139.32275772094727,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795363869.7175272,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          500,
+          400
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 152.29535102844238,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795363869.8736718,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          510,
+          410
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (500, 400) to (510, 410)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 152.29535102844238,
+      "plan_latency_ms": 300.0,
+      "timestamp": 1795363870.0399845,
+      "reason": "Loop breakout: Jittering click position from (500, 400) to (510, 410)"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Done",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 166.69511795043945,
+      "plan_latency_ms": 200.0,
+      "timestamp": 1795363870.1995306,
+      "reason": "Done"
+    },
+    {
+      "step_index": 5,
+      "action": {
+        "kind": "wait",
+        "duration": 1.0,
+        "reason": "Planning error: ",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 169.2361831665039,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795363870.277078,
+      "reason": "Planning error: "
+    }
+  ],
+  "metrics": {
+    "session_id": "e547ffa8",
+    "goal": "Select option B",
+    "total_steps": 5,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (5) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        500,
+        400
+      ]
+    ],
+    "elapsed_seconds": 0.99,
+    "avg_plan_latency_ms": 275.0
+  },
+  "created_at": 1795363870.4781592,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "completed",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Retry 'Select option B' visually",
+        "expected_ui_state": "Completed 'Select option B'",
+        "status": "in_progress",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        500,
+        400
+      ]
+    ],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": true,
+    "stage2_details": "Semantic Verification passed: Non-app atomic sub-goal 'Select option B' executed successfully.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 3,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            500,
+            400
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Select option B"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 3,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            500,
+            400
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Select option B"
+      }
+    ]
+  },
+  "screenshot_file": "e547ffa8_1795363870.jpeg"
+}

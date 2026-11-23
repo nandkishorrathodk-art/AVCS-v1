@@ -416,6 +416,14 @@ def main() -> None:
         description="AVCS Live Desktop Stream - Real-Time Biological Eyes + Hands Engine"
     )
     parser.add_argument("--gui", action="store_true", help="Launch native Desktop HUD workstation")
+    parser.add_argument(
+        "--allow-capture",
+        "--no-exclude",
+        dest="allow_capture",
+        action="store_true",
+        default=False,
+        help="Allow desktop screen capture / screenshots of the GUI window (disables WDA_EXCLUDEFROMCAPTURE)",
+    )
     parser.add_argument("--seconds", type=float, default=0.0, help="Stream duration in seconds (0 for full video or indefinite)")
     parser.add_argument("--fps", type=int, default=30, help="Perception stream frame rate (default: 30)")
     parser.add_argument("--auto-servo", action="store_true", help="Periodically steer hand to detected affordances")
@@ -431,8 +439,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.gui:
-        print("Launching AVCS Real-Time Desktop Cortex HUD...")
-        launch_gui()
+        print("Launching AVCS Real-Time Desktop Cortex HUD...", flush=True)
+        source = None
+        if args.synthetic:
+            from forge.vision.capture import SyntheticScreen
+
+            source = SyntheticScreen()
+        launch_gui(fps=args.fps, source=source, allow_capture=args.allow_capture)
     else:
         capture_mode = "synthetic" if args.synthetic else "desktop"
         run_eyes_and_hands_stream(

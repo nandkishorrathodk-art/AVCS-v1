@@ -1,0 +1,222 @@
+{
+  "session_id": "a186cabc",
+  "goal": "Test DAgger intervention",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Maximum step limit (4) reached.",
+  "stuck_points": [
+    {
+      "step": 4,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "repetitions": 2,
+      "subgoal": "Test DAgger intervention"
+    }
+  ],
+  "total_steps": 4,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (4) reached.",
+  "dry_run": true,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 173.3992099761963,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795364161.2416384,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          300,
+          300
+        ],
+        "duration": 0.0,
+        "reason": "Click button",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 185.7008934020996,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795364161.574135,
+      "reason": "Click button"
+    },
+    {
+      "step_index": 3,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          807,
+          492
+        ],
+        "duration": 0.0,
+        "reason": "Stage 3 DAgger intervention: Break out of hunting loop (782, 467) -> (807, 492)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 174.51047897338867,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795364162.1929908,
+      "reason": "Stage 3 DAgger intervention: Break out of hunting loop (782, 467) -> (807, 492)"
+    },
+    {
+      "step_index": 4,
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          310,
+          310
+        ],
+        "duration": 0.0,
+        "reason": "Loop breakout: Jittering click position from (300, 300) to (310, 310)",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 180.9701919555664,
+      "plan_latency_ms": 100.0,
+      "timestamp": 1795364162.4066532,
+      "reason": "Loop breakout: Jittering click position from (300, 300) to (310, 310)"
+    }
+  ],
+  "metrics": {
+    "session_id": "a186cabc",
+    "goal": "Test DAgger intervention",
+    "total_steps": 4,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (4) reached.",
+    "dry_run": true,
+    "is_stuck": false,
+    "blacklisted_coordinates": [
+      [
+        300,
+        300
+      ]
+    ],
+    "elapsed_seconds": 2.03,
+    "avg_plan_latency_ms": 100.0
+  },
+  "created_at": 1795364162.6605573,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Click blank area of desktop or active window to dismiss temporary overlay and refocus",
+        "expected_ui_state": "Screen stabilized and active workspace refocused",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Retry 'Test DAgger intervention' visually",
+        "expected_ui_state": "Completed 'Test DAgger intervention'",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [
+      [
+        300,
+        300
+      ]
+    ],
+    "dagger_interventions": [
+      {
+        "step": 3,
+        "failure_type": "hunting_loop",
+        "details": "Stage 3 DAgger detected hunting loop (reps=2). Intervened with breakout action.",
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            807,
+            492
+          ],
+          "duration": 0.0,
+          "reason": "Stage 3 DAgger intervention: Break out of hunting loop (782, 467) -> (807, 492)",
+          "confidence": 0.0
+        }
+      }
+    ]
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Semantic Verification failed: Target window or process did not emerge on desktop.",
+    "stage3_passed": true,
+    "stage3_failure_type": "none",
+    "stage3_intervention_applied": false
+  },
+  "dagger_interventions": [
+    {
+      "step": 3,
+      "failure_type": "hunting_loop",
+      "details": "Stage 3 DAgger detected hunting loop (reps=2). Intervened with breakout action.",
+      "action": {
+        "kind": "left_click",
+        "coordinate": [
+          807,
+          492
+        ],
+        "duration": 0.0,
+        "reason": "Stage 3 DAgger intervention: Break out of hunting loop (782, 467) -> (807, 492)",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [
+      {
+        "step": 4,
+        "action": {
+          "kind": "left_click",
+          "coordinate": [
+            300,
+            300
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Test DAgger intervention"
+      }
+    ],
+    "failure_turning_points": [
+      {
+        "step": 4,
+        "rejected_action": {
+          "kind": "left_click",
+          "coordinate": [
+            300,
+            300
+          ],
+          "duration": 0.0,
+          "reason": "Click button",
+          "confidence": 0.0
+        },
+        "repetitions": 2,
+        "subgoal": "Test DAgger intervention"
+      }
+    ]
+  },
+  "screenshot_file": "a186cabc_1795364162.jpeg"
+}

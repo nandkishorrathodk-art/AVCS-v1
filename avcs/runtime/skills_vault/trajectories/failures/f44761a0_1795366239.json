@@ -1,0 +1,110 @@
+{
+  "session_id": "f44761a0",
+  "goal": "Launch App",
+  "status": "failure",
+  "verified_success": false,
+  "failure_reason": "Target window did not open",
+  "stuck_points": [],
+  "total_steps": 2,
+  "is_complete": true,
+  "stop_reason": "Maximum step limit (2) reached.",
+  "dry_run": false,
+  "steps": [
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Cached full goal",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 0.0,
+      "plan_latency_ms": 0.0,
+      "timestamp": 1795366239.5212038,
+      "reason": "Cached full goal"
+    },
+    {
+      "step_index": 2,
+      "action": {
+        "kind": "stop",
+        "duration": 0.0,
+        "reason": "Dynamic recovered",
+        "confidence": 0.0
+      },
+      "capture_time_ms": 132.95221328735352,
+      "plan_latency_ms": 50.0,
+      "timestamp": 1795366239.7788815,
+      "reason": "Dynamic recovered"
+    }
+  ],
+  "metrics": {
+    "session_id": "f44761a0",
+    "goal": "Launch App",
+    "total_steps": 2,
+    "is_complete": true,
+    "stop_reason": "Maximum step limit (2) reached.",
+    "dry_run": false,
+    "is_stuck": false,
+    "blacklisted_coordinates": [],
+    "elapsed_seconds": 0.26,
+    "avg_plan_latency_ms": 50.0
+  },
+  "created_at": 1795366239.8569477,
+  "metadata": {
+    "subgoals": [
+      {
+        "index": 1,
+        "description": "Click Windows Start icon on taskbar to open Start Menu",
+        "expected_ui_state": "Start menu opened and search input visible",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 2,
+        "description": "Type 'App' into search",
+        "expected_ui_state": "Search results for App displayed",
+        "status": "pending",
+        "metadata": {}
+      },
+      {
+        "index": 3,
+        "description": "Click App app icon in search results to launch application",
+        "expected_ui_state": "App application window active",
+        "status": "pending",
+        "metadata": {}
+      }
+    ],
+    "shadow_comparisons": [],
+    "blacklisted_coordinates": [],
+    "dagger_interventions": []
+  },
+  "verification": {
+    "stage1_passed": true,
+    "stage1_delta": 0.0,
+    "stage2_passed": false,
+    "stage2_details": "Target window did not open",
+    "stage3_passed": false,
+    "stage3_failure_type": "hunting_loop",
+    "stage3_intervention_applied": true
+  },
+  "dagger_interventions": [],
+  "contrastive_recovery": {
+    "is_negative_demonstration": true,
+    "stuck_points": [],
+    "failure_turning_points": [
+      {
+        "step": 2,
+        "rejected_action": {
+          "kind": "stop",
+          "duration": 0.0,
+          "reason": "Dynamic recovered",
+          "confidence": 0.0
+        },
+        "repetitions": 1,
+        "subgoal": "Launch App",
+        "failure_reason": "Target window did not open"
+      }
+    ]
+  },
+  "screenshot_file": "f44761a0_1795366239.jpeg"
+}

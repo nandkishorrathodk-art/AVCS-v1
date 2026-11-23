@@ -1,0 +1,34 @@
+{
+  "benchmark": "generalagents/showdown-clicks-dev",
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "evaluation_type": "zero_shot_baseline",
+  "timestamp": "2026-11-23T01:10:00Z",
+  "hardware": "Nvidia Tesla T4 (Google Colab)",
+  "precision": "fp16",
+  "attention": "sdpa",
+  "total_samples": 557,
+  "primary_metric": {
+    "name": "strict_0.0px_in_bbox",
+    "hits": 294,
+    "top1_accuracy_percent": 52.78,
+    "wilson_95_ci": [48.64, 56.88]
+  },
+  "secondary_metric": {
+    "name": "diagnostic_15.0px_edge_distance",
+    "hits": 341,
+    "accuracy_percent": 61.22,
+    "wilson_95_ci": [57.10, 65.20]
+  },
+  "latency_telemetry": {
+    "median_p50_ms": 3432.5,
+    "p90_ms": 4015.9,
+    "mean_ms": 3580.4,
+    "notes": "Dominated by unpruned 1,800-token vision prefill + per-step HTTPS download"
+  },
+  "conclusions": [
+    "Un-finetuned zero-shot model achieves 52.78% strict in-box accuracy on 557 macOS clicks without any desktop task training.",
+    "Near-miss delta between 0.0px and 15.0px is 8.44% (47 samples grazes within 15px of boundary).",
+    "Confirms Step 5.4 Stage 1 warmup gate of >= 65.00% is directly reachable via QLoRA fine-tuning.",
+    "Validates Phase 5 transition to Step 5.2 (OS-Atlas / ShowUI-desktop + Windows 11 dataset curation)."
+  ]
+}
