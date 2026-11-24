@@ -296,7 +296,7 @@ def test_openai_and_sharegpt_format_ingestion_and_normalization(tmp_path: Path):
 
     # Verify __getitem__ loads real image pixels rather than zeros
     item = ds[0]
-    assert item["image"].shape == (3, 400, 640)
+    assert item["image"].shape == (3, 800, 1280)
     assert (item["image"] > 0).sum() > 0
 
 

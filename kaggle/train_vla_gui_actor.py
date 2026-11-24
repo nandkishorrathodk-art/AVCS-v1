@@ -19,6 +19,8 @@ Hardware & Optimization Guardrails:
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+import copy
 import io
 import json
 import logging
@@ -624,12 +626,15 @@ class GroundingDataset(Dataset):
         self,
         dataset_paths: Optional[List[str]] = None,
         max_samples: int = 40000,
-        target_size: Tuple[int, int] = (400, 640),
+        target_size: Tuple[int, int] = (800, 1280),
         allow_synthetic_fallback: bool = True,
-        stream_hf: bool = False,
+        stream_hf: bool = True,
         hf_samples: int = 4000,
+        max_elements_per_image: int = 5,
     ) -> None:
         self.target_size = target_size
+        self.allow_synthetic_fallback = allow_synthetic_fallback
+        self.max_elements_per_image = max_elements_per_image
         self.samples: List[Dict[str, Any]] = []
         self.leakage_filtered_count = 0
 
@@ -664,8 +669,8 @@ class GroundingDataset(Dataset):
             and not any(Path(p).exists() for p in ["/kaggle/input/os-atlas-desktop/train.jsonl", "/kaggle/input/showui-desktop-40k/train.jsonl"])
             and len(self.samples) < hf_samples
         )
-        if should_stream:
-            self._ingest_from_hf(hf_samples)
+        if should_stream and len(self.samples) < hf_samples:
+            self._ingest_from_hf(hf_samples - len(self.samples), max_elements_per_image=self.max_elements_per_image)
 
         # Fail-closed gate: if no samples were ingested
         if len(self.samples) == 0:
@@ -865,11 +870,16 @@ class GroundingDataset(Dataset):
             except Exception:
                 continue
 
-    def _ingest_from_hf(self, max_samples: int) -> None:
+    def _ingest_from_hf(self, max_samples: int, max_elements_per_image: int = 5) -> None:
         try:
             from datasets import load_dataset
-            logger.info(f"[HF-INGEST] Streaming real desktop samples from showlab/ShowUI-desktop (up to {max_samples})...")
+            logger.info(
+                f"[HF-INGEST] Streaming real desktop samples from showlab/ShowUI-desktop "
+                f"(up to {max_samples}, max {max_elements_per_image} per unique screenshot)..."
+            )
             ds = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
+            elements_per_img: Dict[str, int] = defaultdict(int)
+
             for item in ds:
                 if len(self.samples) >= max_samples:
                     break
@@ -877,18 +887,24 @@ class GroundingDataset(Dataset):
                 if img is None:
                     continue
                 w, h = img.size
+                img_key = str(item.get("image_id", item.get("id", f"{w}x{h}_{len(self.samples)}")))
+                if elements_per_img[img_key] >= max_elements_per_image:
+                    continue
+
                 raw_pt = item.get("point") or item.get("target_coord")
                 raw_bbox = item.get("bbox") or item.get("target_bbox")
 
                 if raw_pt and len(raw_pt) == 2:
                     cx = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
                     cy = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
+                    bbox_norm = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
                 elif raw_bbox and len(raw_bbox) == 4:
                     b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
                     b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
                     b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
                     b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
                     cx, cy = (b0 + b2) / 2.0, (b1 + b3) / 2.0
+                    bbox_norm = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
                 else:
                     continue
 
@@ -897,14 +913,19 @@ class GroundingDataset(Dataset):
                     self.leakage_filtered_count += 1
                     continue
 
-                pil_resized = img.convert("RGB").resize((self.target_size[1], self.target_size[0]))
+                # Native canvas target size (800, 1280) - 16:10 standard desktop
+                pil_resized = img.convert("RGB").resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
                 arr = np.array(pil_resized, dtype=np.uint8).transpose(2, 0, 1)
+
+                elements_per_img[img_key] += 1
                 self.samples.append({
                     "instruction": instr,
                     "action_idx": 0,
                     "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
+                    "target_bbox": bbox_norm,
                     "image_tensor": torch.from_numpy(arr),
                     "image_path": None,
+                    "image_id": img_key,
                 })
             logger.info(f"[HF-INGEST] Ingested {len(self.samples)} real desktop samples from showlab/ShowUI-desktop.")
         except Exception as e:
@@ -912,12 +933,56 @@ class GroundingDataset(Dataset):
 
     def _generate_synthetic_samples(self, n: int) -> None:
         for i in range(n):
+            cx = float(np.random.uniform(0.05, 0.95))
+            cy = float(np.random.uniform(0.05, 0.95))
+            mock_img = torch.randint(20, 240, (3, self.target_size[0], self.target_size[1]), dtype=torch.uint8)
             self.samples.append({
                 "instruction": f"Synthetic task instruction {i}",
                 "action_idx": i % len(ACTION_VOCAB_10),
-                "target_xy": [float(np.random.uniform(0.05, 0.95)), float(np.random.uniform(0.05, 0.95))],
+                "target_xy": [cx, cy],
+                "target_bbox": [max(0.0, cx - 0.04), max(0.0, cy - 0.04), min(1.0, cx + 0.04), min(1.0, cy + 0.04)],
+                "image_tensor": mock_img,
                 "image_path": None,
+                "image_id": f"synth_img_{i // max(1, self.max_elements_per_image)}",
             })
+
+    def split_train_val(self, val_ratio: float = 0.1, seed: int = 42) -> Tuple["GroundingDataset", "GroundingDataset"]:
+        """Splits the dataset into train and validation sets, partitioned strictly by unique image ID."""
+        import random
+        rng = random.Random(seed)
+
+        # Group samples by unique image identifier
+        groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for s in self.samples:
+            img_id = s.get("image_id") or s.get("image_path") or f"sample_{len(groups)}"
+            groups[img_id].append(s)
+
+        all_keys = list(groups.keys())
+        rng.shuffle(all_keys)
+
+        num_val = max(1, int(len(all_keys) * val_ratio)) if len(all_keys) > 3 else 0
+        val_keys = set(all_keys[:num_val])
+
+        train_samples: List[Dict[str, Any]] = []
+        val_samples: List[Dict[str, Any]] = []
+        for k, items in groups.items():
+            if k in val_keys:
+                val_samples.extend(items)
+            else:
+                train_samples.extend(items)
+
+        # If val_samples is empty (small dataset), keep train_samples
+        if not val_samples and len(train_samples) > 2:
+            val_samples = train_samples[:1]
+            train_samples = train_samples[1:]
+
+        train_ds = copy.copy(self)
+        train_ds.samples = train_samples
+
+        val_ds = copy.copy(self)
+        val_ds.samples = val_samples
+
+        return train_ds, val_ds
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -942,8 +1007,10 @@ class GroundingDataset(Dataset):
                         break
             if os.path.exists(cand_p):
                 try:
-                    pil_img = Image.open(cand_p).convert("RGB").resize((self.target_size[1], self.target_size[0]))
-                    arr = np.array(pil_img, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                    pil_img = Image.open(cand_p).convert("RGB").resize(
+                        (self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR
+                    )
+                    arr = np.array(pil_img, dtype=np.uint8).transpose(2, 0, 1)
                     img_tensor = torch.from_numpy(arr)
                 except Exception as e:
                     logger.debug(f"Failed to open image {cand_p}: {e}")
@@ -953,13 +1020,24 @@ class GroundingDataset(Dataset):
             img_tensor = img_tensor.float() / 255.0
 
         if img_tensor is None:
-            img_tensor = torch.zeros(3, self.target_size[0], self.target_size[1], dtype=torch.float32)
+            if not self.allow_synthetic_fallback:
+                raise RuntimeError(
+                    f"Fail-closed dataset gate: Sample {idx} has missing image data (path={img_p}). "
+                    "Silent dummy/blank-image fallbacks are strictly prohibited in production training."
+                )
+            img_tensor = torch.full((3, self.target_size[0], self.target_size[1]), 0.5, dtype=torch.float32)
+
+        bbox = item.get("target_bbox")
+        if bbox is None:
+            tx, ty = item["target_xy"]
+            bbox = [max(0.0, tx - 0.03), max(0.0, ty - 0.03), min(1.0, tx + 0.03), min(1.0, ty + 0.03)]
 
         return {
             "image": img_tensor,
             "instruction": item["instruction"],
             "target_action": torch.tensor(item["action_idx"], dtype=torch.long),
             "target_coord": torch.tensor(item["target_xy"], dtype=torch.float32),
+            "target_bbox": torch.tensor(bbox, dtype=torch.float32),
         }
 
 
@@ -1447,8 +1525,10 @@ def run_ddp_training(
     fail_closed: bool = False,
     use_token_pruning: bool = False,
     use_rolling_kv: bool = False,
-    stream_hf: bool = False,
+    stream_hf: bool = True,
     hf_samples: int = 4000,
+    max_elements_per_image: int = 5,
+    no_early_abort: bool = False,
     dataset_paths: Optional[List[str]] = None,
 ) -> None:
     rank, world_size, local_rank, is_distributed = setup_distributed()
@@ -1485,31 +1565,48 @@ def run_ddp_training(
         device_ids = [local_rank] if device.type == "cuda" else None
         model = DDP(model, device_ids=device_ids, find_unused_parameters=True)
 
-    # 2. Dataset & Distributed Sampler
-    dataset = GroundingDataset(
+    # 2. Dataset Partitioning into Train & Held-Out Unique Screenshot Validation Sets
+    full_dataset = GroundingDataset(
         dataset_paths=dataset_paths,
         max_samples=max_samples,
+        target_size=(800, 1280),
         allow_synthetic_fallback=not fail_closed,
         stream_hf=stream_hf,
         hf_samples=hf_samples,
+        max_elements_per_image=max_elements_per_image,
     )
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
-    drop_last = len(dataset) >= batch_size
+    train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
+    if rank == 0:
+        print(
+            f"Dataset Partitioning: Train Samples = {len(train_dataset)}, "
+            f"Held-Out Val Samples = {len(val_dataset)} (Partitioned by unique screenshots)"
+        )
+
+    sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
+    drop_last = len(train_dataset) >= batch_size
     dataloader = DataLoader(
-        dataset,
+        train_dataset,
         batch_size=batch_size,
         shuffle=(sampler is None),
         sampler=sampler,
         drop_last=drop_last,
     )
 
-    # 3. Optimizer & Multi-Task Loss Function
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+    ) if len(val_dataset) > 0 else None
+
+    # 3. Optimizer & Multi-Task Loss Function with Patch Classification Cross-Entropy Loss
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-2)
     criterion = UnifiedMultiTaskLoss(
         weight_action=1.0,
         weight_coord_l1=15.0,
         weight_coord_l2=35.0,
+        weight_patch_ce=3.0,
     )
 
     save_path = Path(save_dir)
@@ -1523,6 +1620,9 @@ def run_ddp_training(
             sampler.set_epoch(epoch)
 
         epoch_loss = 0.0
+        epoch_patch_ce = 0.0
+        epoch_coord_l1 = 0.0
+        epoch_patch_acc = 0.0
         step_count = 0
         t0 = time.time()
 
@@ -1534,7 +1634,7 @@ def run_ddp_training(
             optimizer.zero_grad()
             outputs = model(images, queries=batch.get("instruction"))
 
-            # Compute Unified Multi-Task Loss with FP32 upcast
+            # Compute Unified Multi-Task Loss with FP32 upcast and patch cross-entropy
             loss_dict = criterion(
                 model_out=outputs,
                 target_actions=target_actions,
@@ -1546,16 +1646,81 @@ def run_ddp_training(
             optimizer.step()
 
             epoch_loss += loss.item()
+            epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
+            epoch_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
+            epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
             step_count += 1
 
             if dry_run and step_count >= 5:
                 break
 
         avg_loss = epoch_loss / max(1, step_count)
+        avg_patch_ce = epoch_patch_ce / max(1, step_count)
+        avg_coord_l1 = epoch_coord_l1 / max(1, step_count)
+        avg_patch_acc = (epoch_patch_acc / max(1, step_count)) * 100.0
         elapsed = time.time() - t0
         if rank == 0:
-            print(f"Epoch [{epoch}/{epochs}] - Loss: {avg_loss:.4f} | Time: {elapsed:.2f}s | Steps: {step_count}")
+            print(
+                f"Epoch [{epoch}/{epochs}] - Loss: {avg_loss:.4f} | "
+                f"Patch CE: {avg_patch_ce:.4f} | Coord L1: {avg_coord_l1:.4f} | "
+                f"Train Patch Acc: {avg_patch_acc:.1f}% | Time: {elapsed:.2f}s | Steps: {step_count}"
+            )
 
+        # Held-Out Validation Evaluation at Epoch End
+        val_strict_acc = 0.0
+        if rank == 0 and val_dataloader is not None and len(val_dataloader) > 0 and not dry_run:
+            unwrapped = model.module if hasattr(model, "module") else model
+            unwrapped.eval()
+            val_hits = 0
+            val_patch_hits = 0
+            val_total = 0
+            val_loss_acc = 0.0
+
+            with torch.no_grad():
+                for v_batch in val_dataloader:
+                    v_imgs = v_batch["image"].to(device)
+                    v_coords = v_batch["target_coord"].to(device)
+                    v_actions = v_batch["target_action"].to(device)
+                    v_bboxes = v_batch["target_bbox"].to(device)
+
+                    v_out = unwrapped(v_imgs, queries=v_batch.get("instruction"))
+                    v_loss_dict = criterion(model_out=v_out, target_actions=v_actions, target_coords=v_coords)
+                    val_loss_acc += v_loss_dict["loss"].item()
+
+                    pred_coords = v_out["subpixel_coords"]
+                    b_cnt = pred_coords.shape[0]
+
+                    for b_i in range(b_cnt):
+                        px, py = pred_coords[b_i, 0].item(), pred_coords[b_i, 1].item()
+                        bx1, by1, bx2, by2 = (
+                            v_bboxes[b_i, 0].item(),
+                            v_bboxes[b_i, 1].item(),
+                            v_bboxes[b_i, 2].item(),
+                            v_bboxes[b_i, 3].item(),
+                        )
+                        if (bx1 <= px <= bx2) and (by1 <= py <= by2):
+                            val_hits += 1
+
+                    val_patch_hits += int((v_loss_dict.get("patch_top1_acc", 0.0) * b_cnt).round().item())
+                    val_total += b_cnt
+
+            val_strict_acc = val_hits / max(1, val_total)
+            val_patch_acc = (val_patch_hits / max(1, val_total)) * 100.0
+            avg_val_loss = val_loss_acc / max(1, len(val_dataloader))
+            print(
+                f"[VAL] Epoch [{epoch}/{epochs}] Held-Out Val Strict (0px) In-Bbox Acc: {val_strict_acc * 100:.2f}% "
+                f"({val_hits}/{val_total}) | Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}"
+            )
+            unwrapped.train()
+
+            # Early Abortion Gate: Abort early if Epoch 1 accuracy is < 10%
+            if epoch == 1 and val_strict_acc < 0.10 and not no_early_abort:
+                raise RuntimeError(
+                    f"[EARLY-ABORTION-GATE] Epoch 1 validation strict accuracy ({val_strict_acc * 100:.2f}%) is below 10.0% threshold! "
+                    "Attention head has not begun converging on ground-truth patches. Training aborted early to prevent compute waste."
+                )
+
+        if rank == 0:
             # Save checkpoint
             ckpt_file = save_path / f"gui_actor_step6_2_epoch_{epoch}.pt"
             unwrapped = model.module if hasattr(model, "module") else model
@@ -1563,6 +1728,7 @@ def run_ddp_training(
                 "epoch": epoch,
                 "model_state_dict": {k: v for k, v in unwrapped.state_dict().items() if not k.startswith("backbone.")},
                 "stats": stats,
+                "val_strict_acc": val_strict_acc,
             }, ckpt_file)
             print(f"Saved trainable adapter checkpoint to: {ckpt_file}")
 
@@ -1595,8 +1761,11 @@ def main():
     parser.add_argument("--nproc", type=int, default=None, help="Number of processes for auto-torchrun")
     parser.add_argument("--no-auto-spawn", action="store_true", help="Disable auto-torchrun spawning")
     parser.add_argument("--fail-closed", action="store_true", help="Strictly enforce fail-closed dataset ingestion")
-    parser.add_argument("--stream-hf", action="store_true", help="Stream real desktop samples from showlab/ShowUI-desktop")
+    parser.add_argument("--stream-hf", action="store_true", default=True, help="Stream real desktop samples from showlab/ShowUI-desktop (default: True)")
+    parser.add_argument("--no-stream-hf", action="store_true", help="Disable Hugging Face streaming")
     parser.add_argument("--hf-samples", type=int, default=4000, help="Number of real desktop samples to stream from Hugging Face")
+    parser.add_argument("--max-elements-per-image", type=int, default=5, help="Maximum elements per unique screenshot (default: 5)")
+    parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 < 10% early-abort gate")
     parser.add_argument("--dataset-paths", nargs="*", default=None, help="Explicit dataset JSONL / directory paths")
     parser.add_argument("--enable-token-pruning", action="store_true", help="Enable ShowUI token pruner (PAUSED by default)")
     parser.add_argument("--enable-rolling-kv", action="store_true", help="Enable rolling KV memory (PAUSED by default)")
@@ -1640,6 +1809,7 @@ def main():
         maybe_auto_spawn_torchrun(force_nproc=args.nproc)
 
     # 3. Run training
+    should_stream = not args.no_stream_hf if args.no_stream_hf else args.stream_hf
     run_ddp_training(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -1650,8 +1820,10 @@ def main():
         fail_closed=args.fail_closed,
         use_token_pruning=args.enable_token_pruning,
         use_rolling_kv=args.enable_rolling_kv,
-        stream_hf=args.stream_hf,
+        stream_hf=should_stream,
         hf_samples=args.hf_samples,
+        max_elements_per_image=args.max_elements_per_image,
+        no_early_abort=args.no_early_abort,
         dataset_paths=args.dataset_paths,
     )
 

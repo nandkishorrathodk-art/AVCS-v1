@@ -501,3 +501,88 @@ def test_server_ws_act_with_fast_vla_engine():
     finally:
         set_fast_engine(None)
 
+
+# --------------------------------------------------------------------------- #
+# 14. Patch Classification Cross-Entropy Loss & Disjoint Split Tests
+# --------------------------------------------------------------------------- #
+
+def test_patch_cross_entropy_loss_and_accuracy():
+    """Verifies that UnifiedMultiTaskLoss computes patch CE and guides attention to ground truth."""
+    criterion = UnifiedMultiTaskLoss(weight_action=1.0, weight_coord_l1=15.0, weight_coord_l2=35.0, weight_patch_ce=3.0)
+
+    b, k = 4, 300
+    pred_act = torch.randn(b, 10, requires_grad=True)
+    attn_logits = torch.randn(b, 1, k, requires_grad=True)
+    coords = torch.rand(b, 2, requires_grad=True)
+
+    # 15x20 grid
+    gh, gw = 15, 20
+    xs = (torch.arange(gw, dtype=torch.float32) + 0.5) / gw
+    ys = (torch.arange(gh, dtype=torch.float32) + 0.5) / gh
+    my, mx = torch.meshgrid(ys, xs, indexing="ij")
+    patch_coords = torch.stack([mx.flatten(), my.flatten()], dim=-1)  # (300, 2)
+
+    target_actions = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    target_coords = torch.tensor([[0.25, 0.25], [0.75, 0.75], [0.1, 0.9], [0.9, 0.1]], dtype=torch.float32)
+
+    loss_dict = criterion(
+        model_out={
+            "action_logits": pred_act,
+            "target_coords": coords,
+            "attn_logits": attn_logits,
+            "patch_coords": patch_coords,
+        },
+        target_actions=target_actions,
+        target_coords=target_coords,
+    )
+
+    assert "loss_patch_ce" in loss_dict
+    assert "patch_top1_acc" in loss_dict
+    assert loss_dict["loss_patch_ce"].item() > 0.0
+    assert 0.0 <= loss_dict["patch_top1_acc"].item() <= 1.0
+
+    loss_dict["loss"].backward()
+    assert attn_logits.grad is not None
+    assert torch.norm(attn_logits.grad) > 0.0
+
+
+def test_grounding_dataset_split_train_val_disjoint(tmp_path: Path):
+    """Verifies that GroundingDataset.split_train_val partitions samples strictly by unique image ID."""
+    import importlib.util
+    train_vla_path = Path(repo_root) / "kaggle" / "train_vla_gui_actor.py"
+    if "train_vla_gui_actor" in sys.modules:
+        train_vla_module = sys.modules["train_vla_gui_actor"]
+    else:
+        spec = importlib.util.spec_from_file_location("train_vla_gui_actor", train_vla_path)
+        train_vla_module = importlib.util.module_from_spec(spec)
+        sys.modules["train_vla_gui_actor"] = train_vla_module
+        spec.loader.exec_module(train_vla_module)
+    GroundingDataset = train_vla_module.GroundingDataset
+
+    ds = GroundingDataset(dataset_paths=[], allow_synthetic_fallback=True)
+    # Manually configure 20 samples across 4 unique images
+    ds.samples = []
+    for img_i in range(4):
+        for elem_j in range(5):
+            ds.samples.append({
+                "instruction": f"Click {img_i}_{elem_j}",
+                "action_idx": 0,
+                "target_xy": [0.5, 0.5],
+                "target_bbox": [0.4, 0.4, 0.6, 0.6],
+                "image_tensor": torch.ones(3, 800, 1280, dtype=torch.uint8) * (img_i + 1),
+                "image_path": None,
+                "image_id": f"screenshot_{img_i}.png",
+            })
+
+    train_ds, val_ds = ds.split_train_val(val_ratio=0.25, seed=42)
+    assert len(train_ds) + len(val_ds) == 20
+
+    train_images = {s["image_id"] for s in train_ds.samples}
+    val_images = {s["image_id"] for s in val_ds.samples}
+
+    # Strict disjoint invariant: zero overlap between train and validation images
+    assert len(train_images.intersection(val_images)) == 0
+    assert len(val_images) >= 1
+    assert len(train_images) >= 1
+
+
