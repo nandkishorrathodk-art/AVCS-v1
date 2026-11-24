@@ -112,6 +112,19 @@ class FastVLAInferenceEngine:
     def _build_default_model(self) -> nn.Module:
         """Constructs a high-performance default GUI-Actor model with 512-dim widened heads."""
         try:
+            from pathlib import Path
+            import importlib.util
+            train_script = Path(__file__).resolve().parent.parent.parent / "kaggle" / "train_vla_gui_actor.py"
+            if train_script.exists():
+                spec = importlib.util.spec_from_file_location("train_vla_gui_actor", train_script)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["train_vla_gui_actor"] = mod
+                spec.loader.exec_module(mod)
+                return mod.QwenGUIActorModel(
+                    dry_run=True,
+                    pointer_hidden_dim=512,
+                    query_dim=512,
+                )
             from kaggle.train_vla_gui_actor import QwenGUIActorModel
             return QwenGUIActorModel(
                 dry_run=True,

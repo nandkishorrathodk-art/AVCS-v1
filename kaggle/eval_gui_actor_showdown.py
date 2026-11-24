@@ -26,12 +26,24 @@ import requests
 import torch
 from PIL import Image
 
-# Ensure repository root is on sys.path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# Ensure current directory and repository root are prioritized on sys.path
+current_dir = os.path.abspath(os.path.dirname(__file__))
+repo_root = os.path.abspath(os.path.join(current_dir, ".."))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from kaggle.train_vla_gui_actor import QwenGUIActorModel
+try:
+    from train_vla_gui_actor import QwenGUIActorModel
+except ImportError:
+    import importlib.util
+    train_script = os.path.join(current_dir, "train_vla_gui_actor.py")
+    spec = importlib.util.spec_from_file_location("train_vla_gui_actor", train_script)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["train_vla_gui_actor"] = mod
+    spec.loader.exec_module(mod)
+    QwenGUIActorModel = mod.QwenGUIActorModel
 
 logging.basicConfig(
     level=logging.INFO,
