@@ -173,14 +173,64 @@ def run_evaluation(
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
 
-        from transformers import AutoProcessor
+        # Patch Qwen2_5_VLConfig for compatibility with modern transformers (4.48+)
+        # where hidden_size was moved to text_config.hidden_size.
+        try:
+            try:
+                from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+            except ImportError:
+                from transformers import Qwen2_5_VLConfig
+
+            if not hasattr(Qwen2_5_VLConfig, "hidden_size"):
+                def _get_hidden_size(self):
+                    if hasattr(self, "text_config") and hasattr(self.text_config, "hidden_size"):
+                        return self.text_config.hidden_size
+                    return self.__dict__.get("hidden_size", 2048)
+                def _set_hidden_size(self, val):
+                    self.__dict__["hidden_size"] = val
+                Qwen2_5_VLConfig.hidden_size = property(_get_hidden_size, _set_hidden_size)
+
+            if not hasattr(Qwen2_5_VLConfig, "vocab_size"):
+                def _get_vocab_size(self):
+                    if hasattr(self, "text_config") and hasattr(self.text_config, "vocab_size"):
+                        return self.text_config.vocab_size
+                    return self.__dict__.get("vocab_size", 152064)
+                def _set_vocab_size(self, val):
+                    self.__dict__["vocab_size"] = val
+                Qwen2_5_VLConfig.vocab_size = property(_get_vocab_size, _set_vocab_size)
+
+            _orig_getattr = getattr(Qwen2_5_VLConfig, "__getattr__", None)
+            def _qwen_getattr(self, item):
+                if item != "text_config" and hasattr(self, "text_config") and hasattr(self.text_config, item):
+                    return getattr(self.text_config, item)
+                if _orig_getattr is not None:
+                    return _orig_getattr(self, item)
+                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{item}'")
+            Qwen2_5_VLConfig.__getattr__ = _qwen_getattr
+        except Exception as e:
+            print(f"[BENCHMARK] Warning: could not monkeypatch Qwen2_5_VLConfig: {e}")
+
+        from transformers import AutoConfig, AutoProcessor
+        ms_config = AutoConfig.from_pretrained(model_name)
+        if not hasattr(ms_config, "hidden_size") and hasattr(ms_config, "text_config"):
+            ms_config.hidden_size = ms_config.text_config.hidden_size
+        if not hasattr(ms_config, "pointer_pad_token_id") or ms_config.pointer_pad_token_id is None:
+            ms_config.pointer_pad_token_id = 151669
+        if not hasattr(ms_config, "pointer_start_token_id") or ms_config.pointer_start_token_id is None:
+            ms_config.pointer_start_token_id = 151667
+        if not hasattr(ms_config, "pointer_end_token_id") or ms_config.pointer_end_token_id is None:
+            ms_config.pointer_end_token_id = 151668
+
         ms_processor = AutoProcessor.from_pretrained(model_name)
         ms_tokenizer = ms_processor.tokenizer
         ms_model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
             model_name,
+            config=ms_config,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="cuda:0" if torch.cuda.is_available() else "cpu",
         ).eval()
+        if not hasattr(ms_model.config, "pointer_pad_token_id") or ms_model.config.pointer_pad_token_id is None:
+            ms_model.config.pointer_pad_token_id = 151669
     else:
         print(f"Initializing QwenGUIActorModel on {device}...")
         model = QwenGUIActorModel(
@@ -408,7 +458,8 @@ def run_evaluation(
 
     summary = {
         "benchmark": "generalagents/showdown-clicks-dev",
-        "checkpoint": str(checkpoint_path),
+        "model_name": model_name,
+        "checkpoint": model_name if is_ms_gui_actor else str(checkpoint_path),
         "total_samples": evaluated_count,
         "elapsed_seconds": round(elapsed_sec, 2),
         "resolution": {
@@ -430,7 +481,7 @@ def run_evaluation(
             "accuracy_percent": round(acc_sharp, 2),
             "hit_15px_percent": round(acc_sharp_15, 2),
             "wilson_95_ci": wilson_sharp,
-            "pass_gate_65_pct": sharp_strict_hits >= 65.0,
+            "pass_gate_65_pct": acc_sharp >= 65.0,
         },
         "soft_centroid": {
             "name": "soft_unsharpened_centroid_T_1.0",
@@ -438,7 +489,7 @@ def run_evaluation(
             "accuracy_percent": round(acc_soft, 2),
             "hit_15px_percent": round(acc_soft_15, 2),
             "wilson_95_ci": wilson_soft,
-            "pass_gate_65_pct": soft_strict_hits >= 65.0,
+            "pass_gate_65_pct": acc_soft >= 65.0,
         },
         "latency_telemetry": {
             "mean_ms": round(mean_lat, 2),
