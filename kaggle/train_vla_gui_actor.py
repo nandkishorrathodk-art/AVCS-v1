@@ -649,6 +649,10 @@ class GroundingDataset(Dataset):
             elif p.is_file() and p.suffix == ".jsonl":
                 self._ingest_jsonl(p, max_samples)
 
+        # If running default paths on Kaggle and no on-disk files found, stream from HuggingFace
+        if dataset_paths is None and len(self.samples) == 0:
+            self._ingest_from_hf(max_samples)
+
         # Fail-closed gate: if no samples were ingested
         if len(self.samples) == 0:
             if allow_synthetic_fallback:
@@ -776,6 +780,51 @@ class GroundingDataset(Dataset):
             except Exception:
                 continue
 
+    def _ingest_from_hf(self, max_samples: int) -> None:
+        try:
+            from datasets import load_dataset
+            logger.info(f"[HF-INGEST] Streaming real desktop samples from showlab/ShowUI-desktop (up to {max_samples})...")
+            ds = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
+            for item in ds:
+                if len(self.samples) >= max_samples:
+                    break
+                img = item.get("image") or item.get("img")
+                if img is None:
+                    continue
+                w, h = img.size
+                raw_pt = item.get("point") or item.get("target_coord")
+                raw_bbox = item.get("bbox") or item.get("target_bbox")
+
+                if raw_pt and len(raw_pt) == 2:
+                    cx = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
+                    cy = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
+                elif raw_bbox and len(raw_bbox) == 4:
+                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
+                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
+                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
+                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                    cx, cy = (b0 + b2) / 2.0, (b1 + b3) / 2.0
+                else:
+                    continue
+
+                instr = item.get("instruction") or item.get("query") or item.get("task") or "Click target control"
+                if self._is_held_out_leakage(instr):
+                    self.leakage_filtered_count += 1
+                    continue
+
+                pil_resized = img.convert("RGB").resize((self.target_size[1], self.target_size[0]))
+                arr = np.array(pil_resized, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                self.samples.append({
+                    "instruction": instr,
+                    "action_idx": 0,
+                    "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
+                    "image_tensor": torch.from_numpy(arr),
+                    "image_path": None,
+                })
+            logger.info(f"[HF-INGEST] Ingested {len(self.samples)} real desktop samples from showlab/ShowUI-desktop.")
+        except Exception as e:
+            logger.warning(f"[HF-INGEST] Streaming from showlab/ShowUI-desktop failed ({e}).")
+
     def _generate_synthetic_samples(self, n: int) -> None:
         for i in range(n):
             self.samples.append({
@@ -790,9 +839,9 @@ class GroundingDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.samples[idx]
-        img_tensor: Optional[torch.Tensor] = None
+        img_tensor: Optional[torch.Tensor] = item.get("image_tensor")
         img_p = item.get("image_path")
-        if img_p and os.path.exists(img_p):
+        if img_tensor is None and img_p and os.path.exists(img_p):
             try:
                 pil_img = Image.open(img_p).convert("RGB").resize((self.target_size[1], self.target_size[0]))
                 arr = np.array(pil_img, dtype=np.float32).transpose(2, 0, 1) / 255.0
