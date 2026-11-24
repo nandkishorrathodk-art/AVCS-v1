@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -140,8 +141,10 @@ def run_evaluation(
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
         except ImportError:
-            print("[BENCHMARK] gui_actor package not installed; installing from https://github.com/microsoft/GUI-Actor.git ...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "git+https://github.com/microsoft/GUI-Actor.git"])
+            print("[BENCHMARK] gui_actor package not installed; installing via --no-deps from GitHub...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-deps", "git+https://github.com/microsoft/GUI-Actor.git"])
+            import importlib
+            importlib.invalidate_caches()
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
 
@@ -150,7 +153,7 @@ def run_evaluation(
         ms_tokenizer = ms_processor.tokenizer
         ms_model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="cuda:0" if torch.cuda.is_available() else "cpu",
         ).eval()
     else:
@@ -256,7 +259,10 @@ def run_evaluation(
             if device.type == "cuda":
                 torch.cuda.synchronize()
             infer_ms = (time.perf_counter() - t0) * 1000.0
-            px_norm, py_norm = pred["topk_points"][0]
+            if pred and isinstance(pred.get("topk_points"), list) and len(pred["topk_points"]) > 0:
+                px_norm, py_norm = pred["topk_points"][0]
+            else:
+                px_norm, py_norm = 0.5, 0.5
             sub_px = float(px_norm * raw_w)
             sub_py = float(py_norm * raw_h)
             sharp_px = sub_px
