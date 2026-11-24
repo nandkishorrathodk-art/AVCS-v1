@@ -150,7 +150,9 @@ def run_evaluation(
 
     for idx, row in enumerate(samples):
         sample_id = row.get("id", str(idx))
-        img_rel = row["image_rel_path"]
+        img_rel = row.get("image") or row.get("image_rel_path") or row.get("image_path")
+        if not img_rel:
+            continue
         instruction = row["instruction"]
         x1, y1 = float(row["x1"]), float(row["y1"])
         x2, y2 = float(row["x2"]), float(row["y2"])
