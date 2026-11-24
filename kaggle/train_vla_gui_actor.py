@@ -25,6 +25,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -623,6 +624,8 @@ class GroundingDataset(Dataset):
         max_samples: int = 40000,
         target_size: Tuple[int, int] = (400, 640),
         allow_synthetic_fallback: bool = True,
+        stream_hf: bool = False,
+        hf_samples: int = 4000,
     ) -> None:
         self.target_size = target_size
         self.samples: List[Dict[str, Any]] = []
@@ -639,6 +642,9 @@ class GroundingDataset(Dataset):
 
         for p_str in paths_to_check:
             p = Path(p_str)
+            if not p.is_absolute():
+                if not p.exists() and (Path(repo_root) / p).exists():
+                    p = Path(repo_root) / p
             if not p.exists():
                 if "golden" in p_str:
                     logger.debug(f"Golden trajectory directory {p_str} does not exist; cleanly skipping.")
@@ -649,9 +655,15 @@ class GroundingDataset(Dataset):
             elif p.is_file() and p.suffix == ".jsonl":
                 self._ingest_jsonl(p, max_samples)
 
-        # If running default paths on Kaggle and no on-disk files found, stream from HuggingFace
-        if dataset_paths is None and len(self.samples) == 0:
-            self._ingest_from_hf(max_samples)
+        # Stream real desktop samples from Hugging Face if requested OR on Kaggle with unmounted external input
+        should_stream = stream_hf or (
+            dataset_paths is None
+            and os.path.exists("/kaggle")
+            and not any(Path(p).exists() for p in ["/kaggle/input/os-atlas-desktop/train.jsonl", "/kaggle/input/showui-desktop-40k/train.jsonl"])
+            and len(self.samples) < hf_samples
+        )
+        if should_stream:
+            self._ingest_from_hf(hf_samples)
 
         # Fail-closed gate: if no samples were ingested
         if len(self.samples) == 0:
@@ -689,11 +701,11 @@ class GroundingDataset(Dataset):
                 try:
                     data = json.loads(line)
                     raw_id = str(data.get("id", ""))
-                    raw_img = str(data.get("image", ""))
+                    raw_img = str(data.get("image", "") or data.get("image_path", "") or data.get("img", "") or "")
                     raw_source = str(data.get("source", ""))
                     raw_ds = str(data.get("dataset", ""))
                     raw_task = str(data.get("task", ""))
-                    raw_instr = str(data.get("instruction", ""))
+                    raw_instr = str(data.get("instruction", "") or data.get("query", "") or "")
                     if (
                         self._is_held_out_leakage(raw_id)
                         or self._is_held_out_leakage(raw_img)
@@ -705,37 +717,108 @@ class GroundingDataset(Dataset):
                         self.leakage_filtered_count += 1
                         continue
 
-                    # Parse instruction and coordinates
-                    instruction = data.get("instruction", "Click target")
+                    # 1. Resolve relative image path on disk
+                    resolved_img = None
+                    if raw_img:
+                        for cand in [
+                            Path(raw_img),
+                            jsonl_path.parent / raw_img,
+                            jsonl_path.parent / "images" / Path(raw_img).name,
+                            Path(repo_root) / raw_img,
+                            Path(repo_root) / "data" / "vla_dataset" / raw_img,
+                            Path("/kaggle/working/AVCS-v1") / raw_img,
+                            Path("/kaggle/working/AVCS-v1/data/vla_dataset") / raw_img,
+                            Path("/kaggle/input") / raw_img,
+                        ]:
+                            if cand.exists() and cand.is_file():
+                                resolved_img = str(cand.resolve())
+                                break
+                    if resolved_img is None and raw_img:
+                        resolved_img = raw_img
+
+                    # 2. Parse instruction, resolution, and coordinates across ShareGPT and OpenAI formats
+                    instruction = data.get("instruction") or data.get("query") or data.get("task") or "Click target"
                     conversations = data.get("conversations", [])
                     action_idx = 0  # default left_click
                     target_xy = [0.5, 0.5]
-                    img_w = float(data.get("width", 1280.0)) or 1280.0
-                    img_h = float(data.get("height", 800.0)) or 800.0
+                    img_w = float(data.get("width", 0.0) or data.get("img_w", 0.0) or 0.0)
+                    img_h = float(data.get("height", 0.0) or data.get("img_h", 0.0) or 0.0)
+
+                    root_coord = data.get("coordinate") or data.get("point") or data.get("target_coord")
+                    root_bbox = data.get("bbox") or data.get("box") or data.get("target_bbox")
 
                     for turn in conversations:
-                        if turn.get("from") == "human":
-                            instruction = turn.get("value", instruction)
-                        elif turn.get("from") == "gpt":
-                            content = turn.get("value", "")
+                        sender = turn.get("from") or turn.get("role", "")
+                        text_val = str(turn.get("value") or turn.get("content", ""))
+
+                        if sender in ("human", "user"):
+                            m_inst = re.search(r"Instruction:\s*([^\n]+)", text_val)
+                            if m_inst:
+                                instruction = m_inst.group(1).strip()
+                            elif text_val and (not instruction or instruction == "Click target"):
+                                clean_val = re.sub(r"<image>\s*", "", text_val).strip()
+                                if clean_val:
+                                    instruction = clean_val
+                            m_res = re.search(r"Screen Resolution:\s*(\d+)\s*[xX,]\s*(\d+)", text_val)
+                            if m_res:
+                                img_w = float(m_res.group(1))
+                                img_h = float(m_res.group(2))
+
+                        elif sender in ("gpt", "assistant"):
+                            parsed: Dict[str, Any] = {}
                             try:
-                                parsed = json.loads(content)
-                                action_name = parsed.get("action", "left_click")
-                                if action_name in ACTION_VOCAB_10:
-                                    action_idx = ACTION_VOCAB_10.index(action_name)
-                                coord = parsed.get("coordinate", [0.5, 0.5])
-                                if len(coord) == 2:
-                                    norm_x = float(coord[0]) / img_w if float(coord[0]) > 1.0 else float(coord[0])
-                                    norm_y = float(coord[1]) / img_h if float(coord[1]) > 1.0 else float(coord[1])
-                                    target_xy = [min(1.0, max(0.0, norm_x)), min(1.0, max(0.0, norm_y))]
+                                parsed = json.loads(text_val)
                             except Exception:
-                                pass
+                                m_json = re.search(r"\{.*\}", text_val, re.DOTALL)
+                                if m_json:
+                                    try:
+                                        parsed = json.loads(m_json.group(0))
+                                    except Exception:
+                                        pass
+
+                            action_name = parsed.get("action") or parsed.get("act") or "left_click"
+                            if action_name == "click":
+                                action_name = "left_click"
+                            if action_name in ACTION_VOCAB_10:
+                                action_idx = ACTION_VOCAB_10.index(action_name)
+
+                            coord = parsed.get("coordinate") or parsed.get("point") or parsed.get("target_coord")
+                            if not coord:
+                                bbox = parsed.get("bbox") or parsed.get("box")
+                                if bbox and len(bbox) == 4:
+                                    coord = [(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0]
+                            if not coord:
+                                m_pt = re.search(r"\[\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\]", text_val)
+                                if m_pt:
+                                    coord = [float(m_pt.group(1)), float(m_pt.group(2))]
+
+                            if coord and len(coord) == 2:
+                                ref_w = img_w if img_w > 0 else 1280.0
+                                ref_h = img_h if img_h > 0 else 800.0
+                                cx = float(coord[0]) / ref_w if float(coord[0]) > 1.0 else float(coord[0])
+                                cy = float(coord[1]) / ref_h if float(coord[1]) > 1.0 else float(coord[1])
+                                target_xy = [round(min(1.0, max(0.0, cx)), 6), round(min(1.0, max(0.0, cy)), 6)]
+
+                    # Fallback to root-level coordinates if conversation turns didn't contain coordinates
+                    if target_xy == [0.5, 0.5] and (root_coord or root_bbox):
+                        ref_w = img_w if img_w > 0 else 1280.0
+                        ref_h = img_h if img_h > 0 else 800.0
+                        if root_coord and len(root_coord) == 2:
+                            cx = float(root_coord[0]) / ref_w if float(root_coord[0]) > 1.0 else float(root_coord[0])
+                            cy = float(root_coord[1]) / ref_h if float(root_coord[1]) > 1.0 else float(root_coord[1])
+                            target_xy = [round(min(1.0, max(0.0, cx)), 6), round(min(1.0, max(0.0, cy)), 6)]
+                        elif root_bbox and len(root_bbox) == 4:
+                            b0 = float(root_bbox[0]) / ref_w if float(root_bbox[0]) > 1.0 else float(root_bbox[0])
+                            b1 = float(root_bbox[1]) / ref_h if float(root_bbox[1]) > 1.0 else float(root_bbox[1])
+                            b2 = float(root_bbox[2]) / ref_w if float(root_bbox[2]) > 1.0 else float(root_bbox[2])
+                            b3 = float(root_bbox[3]) / ref_h if float(root_bbox[3]) > 1.0 else float(root_bbox[3])
+                            target_xy = [round(min(1.0, max(0.0, (b0 + b2) / 2.0)), 6), round(min(1.0, max(0.0, (b1 + b3) / 2.0)), 6)]
 
                     self.samples.append({
                         "instruction": instruction,
                         "action_idx": action_idx,
                         "target_xy": target_xy,
-                        "image_path": raw_img,
+                        "image_path": resolved_img,
                     })
                 except Exception:
                     continue
@@ -813,7 +896,7 @@ class GroundingDataset(Dataset):
                     continue
 
                 pil_resized = img.convert("RGB").resize((self.target_size[1], self.target_size[0]))
-                arr = np.array(pil_resized, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                arr = np.array(pil_resized, dtype=np.uint8).transpose(2, 0, 1)
                 self.samples.append({
                     "instruction": instr,
                     "action_idx": 0,
@@ -841,13 +924,32 @@ class GroundingDataset(Dataset):
         item = self.samples[idx]
         img_tensor: Optional[torch.Tensor] = item.get("image_tensor")
         img_p = item.get("image_path")
-        if img_tensor is None and img_p and os.path.exists(img_p):
-            try:
-                pil_img = Image.open(img_p).convert("RGB").resize((self.target_size[1], self.target_size[0]))
-                arr = np.array(pil_img, dtype=np.float32).transpose(2, 0, 1) / 255.0
-                img_tensor = torch.from_numpy(arr)
-            except Exception:
-                img_tensor = None
+        if img_tensor is None and img_p:
+            cand_p = img_p
+            if not os.path.exists(cand_p):
+                for prefix in [
+                    repo_root,
+                    os.path.join(repo_root, "data", "vla_dataset"),
+                    "/kaggle/working/AVCS-v1",
+                    "/kaggle/working/AVCS-v1/data/vla_dataset",
+                    "/kaggle/input",
+                ]:
+                    test_p = os.path.join(prefix, img_p)
+                    if os.path.exists(test_p):
+                        cand_p = test_p
+                        break
+            if os.path.exists(cand_p):
+                try:
+                    pil_img = Image.open(cand_p).convert("RGB").resize((self.target_size[1], self.target_size[0]))
+                    arr = np.array(pil_img, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                    img_tensor = torch.from_numpy(arr)
+                except Exception as e:
+                    logger.debug(f"Failed to open image {cand_p}: {e}")
+                    img_tensor = None
+
+        if img_tensor is not None and img_tensor.dtype == torch.uint8:
+            img_tensor = img_tensor.float() / 255.0
+
         if img_tensor is None:
             img_tensor = torch.zeros(3, self.target_size[0], self.target_size[1], dtype=torch.float32)
 
@@ -1343,6 +1445,9 @@ def run_ddp_training(
     fail_closed: bool = False,
     use_token_pruning: bool = False,
     use_rolling_kv: bool = False,
+    stream_hf: bool = False,
+    hf_samples: int = 4000,
+    dataset_paths: Optional[List[str]] = None,
 ) -> None:
     rank, world_size, local_rank, is_distributed = setup_distributed()
 
@@ -1379,7 +1484,13 @@ def run_ddp_training(
         model = DDP(model, device_ids=device_ids, find_unused_parameters=True)
 
     # 2. Dataset & Distributed Sampler
-    dataset = GroundingDataset(max_samples=max_samples, allow_synthetic_fallback=not fail_closed)
+    dataset = GroundingDataset(
+        dataset_paths=dataset_paths,
+        max_samples=max_samples,
+        allow_synthetic_fallback=not fail_closed,
+        stream_hf=stream_hf,
+        hf_samples=hf_samples,
+    )
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
     drop_last = len(dataset) >= batch_size
     dataloader = DataLoader(
@@ -1482,6 +1593,9 @@ def main():
     parser.add_argument("--nproc", type=int, default=None, help="Number of processes for auto-torchrun")
     parser.add_argument("--no-auto-spawn", action="store_true", help="Disable auto-torchrun spawning")
     parser.add_argument("--fail-closed", action="store_true", help="Strictly enforce fail-closed dataset ingestion")
+    parser.add_argument("--stream-hf", action="store_true", help="Stream real desktop samples from showlab/ShowUI-desktop")
+    parser.add_argument("--hf-samples", type=int, default=4000, help="Number of real desktop samples to stream from Hugging Face")
+    parser.add_argument("--dataset-paths", nargs="*", default=None, help="Explicit dataset JSONL / directory paths")
     parser.add_argument("--enable-token-pruning", action="store_true", help="Enable ShowUI token pruner (PAUSED by default)")
     parser.add_argument("--enable-rolling-kv", action="store_true", help="Enable rolling KV memory (PAUSED by default)")
     args = parser.parse_args()
@@ -1534,6 +1648,9 @@ def main():
         fail_closed=args.fail_closed,
         use_token_pruning=args.enable_token_pruning,
         use_rolling_kv=args.enable_rolling_kv,
+        stream_hf=args.stream_hf,
+        hf_samples=args.hf_samples,
+        dataset_paths=args.dataset_paths,
     )
 
 

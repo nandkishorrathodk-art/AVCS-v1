@@ -229,6 +229,77 @@ def test_golden_directory_clean_skip_and_normalization(tmp_path: Path):
     assert ds_golden.samples[1]["target_xy"] == [0.25, 0.75]
 
 
+def test_openai_and_sharegpt_format_ingestion_and_normalization(tmp_path: Path):
+    """Verifies that OpenAI/HF (role/content) and ShareGPT (from/value) formats are ingested with dynamic resolution scaling."""
+    sample_jsonl = tmp_path / "mixed_format.jsonl"
+    dummy_img = tmp_path / "test_frame.png"
+    from PIL import Image
+    Image.new("RGB", (128, 128), color=(255, 0, 0)).save(dummy_img)
+
+    records = [
+        # OpenAI/HF format with 128x128 resolution specified in user prompt
+        {
+            "id": "hf_sample_1",
+            "image": str(dummy_img),
+            "conversations": [
+                {
+                    "role": "user",
+                    "content": "<image>\nInstruction: Click the tab at (16, 64)\nScreen Resolution: 128x128\nCoordinate Space: absolute screen pixels [0 to 128, 0 to 128]\nOutput the physical action:"
+                },
+                {
+                    "role": "assistant",
+                    "content": '{"action": "left_click", "coordinate": [16, 64]}'
+                }
+            ]
+        },
+        # ShareGPT format with 1280x800 resolution
+        {
+            "id": "sharegpt_sample_2",
+            "image": str(dummy_img),
+            "width": 1280,
+            "height": 800,
+            "conversations": [
+                {"from": "human", "value": "Click Submit button"},
+                {"from": "gpt", "value": '{"action": "double_click", "coordinate": [640, 400]}'}
+            ]
+        },
+        # Root-level bbox format
+        {
+            "id": "root_bbox_sample_3",
+            "instruction": "Click Search Icon",
+            "width": 1000,
+            "height": 500,
+            "bbox": [100, 200, 200, 300],
+        }
+    ]
+    with open(sample_jsonl, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+    ds = GroundingDataset(dataset_paths=[str(sample_jsonl)], allow_synthetic_fallback=False)
+    assert len(ds) == 3
+
+    # Sample 1: 16/128 = 0.125, 64/128 = 0.5
+    assert ds.samples[0]["instruction"] == "Click the tab at (16, 64)"
+    assert ds.samples[0]["action_idx"] == ACTION_VOCAB_10.index("left_click")
+    assert ds.samples[0]["target_xy"] == [0.125, 0.5]
+
+    # Sample 2: 640/1280 = 0.5, 400/800 = 0.5
+    assert ds.samples[1]["instruction"] == "Click Submit button"
+    assert ds.samples[1]["action_idx"] == ACTION_VOCAB_10.index("double_click")
+    assert ds.samples[1]["target_xy"] == [0.5, 0.5]
+
+    # Sample 3: center of [100, 200, 200, 300] is [150, 250] -> 150/1000 = 0.15, 250/500 = 0.5
+    assert ds.samples[2]["instruction"] == "Click Search Icon"
+    assert ds.samples[2]["target_xy"][0] == pytest.approx(0.15)
+    assert ds.samples[2]["target_xy"][1] == pytest.approx(0.5)
+
+    # Verify __getitem__ loads real image pixels rather than zeros
+    item = ds[0]
+    assert item["image"].shape == (3, 400, 640)
+    assert (item["image"] > 0).sum() > 0
+
+
 # --------------------------------------------------------------------------- #
 # 5. Token Pruning and KV Memory Pause Verification
 # --------------------------------------------------------------------------- #
