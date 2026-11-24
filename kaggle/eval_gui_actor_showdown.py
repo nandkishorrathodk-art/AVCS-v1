@@ -62,8 +62,10 @@ def compute_edge_distance(px: float, py: float, x1: float, y1: float, x2: float,
 
     Returns 0.0 if the point is strictly inside the box.
     """
-    dx = max(0.0, max(x1 - px, px - x2))
-    dy = max(0.0, max(y1 - py, py - y2))
+    bx1, bx2 = min(x1, x2), max(x1, x2)
+    by1, by2 = min(y1, y2), max(y1, y2)
+    dx = max(0.0, max(bx1 - px, px - bx2))
+    dy = max(0.0, max(by1 - py, py - by2))
     return math.hypot(dx, dy)
 
 
@@ -177,8 +179,10 @@ def run_evaluation(
         pred_py = float(pred_norm_xy[1] * raw_h)
 
         # Evaluate bounding box inclusion
-        is_strict = (x1 <= pred_px <= x2) and (y1 <= pred_py <= y2)
-        dist_err = compute_edge_distance(pred_px, pred_py, x1, y1, x2, y2)
+        bx1, bx2 = min(x1, x2), max(x1, x2)
+        by1, by2 = min(y1, y2), max(y1, y2)
+        is_strict = (bx1 <= pred_px <= bx2) and (by1 <= pred_py <= by2)
+        dist_err = compute_edge_distance(pred_px, pred_py, bx1, by1, bx2, by2)
         is_15px = is_strict or (dist_err <= 15.0)
 
         if is_strict:
