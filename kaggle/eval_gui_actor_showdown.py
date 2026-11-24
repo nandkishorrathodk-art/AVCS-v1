@@ -173,6 +173,87 @@ def run_evaluation(
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
 
+        # 1. Patch Qwen2_5_VLForConditionalGenerationWithPointer:
+        # - visual property -> self.model.visual
+        # - is_custom_code -> False (so transformers treats it as native and applies conversions)
+        if not hasattr(Qwen2_5_VLForConditionalGenerationWithPointer, "visual"):
+            def _get_visual(self):
+                if hasattr(self, "model") and hasattr(self.model, "visual"):
+                    return self.model.visual
+                return getattr(self, "_visual", None)
+            def _set_visual(self, val):
+                self._visual = val
+            Qwen2_5_VLForConditionalGenerationWithPointer.visual = property(_get_visual, _set_visual)
+
+        Qwen2_5_VLForConditionalGenerationWithPointer.is_custom_code = classmethod(lambda cls: False)
+
+        # 2. Patch Qwen2_5_VLModel to forward embed_tokens, layers, norm to language_model
+        try:
+            try:
+                from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+            except ImportError:
+                from transformers import Qwen2_5_VLModel
+
+            if not hasattr(Qwen2_5_VLModel, "embed_tokens"):
+                Qwen2_5_VLModel.embed_tokens = property(
+                    lambda self: getattr(self, "language_model", self).embed_tokens
+                )
+            if not hasattr(Qwen2_5_VLModel, "layers"):
+                Qwen2_5_VLModel.layers = property(
+                    lambda self: getattr(self, "language_model", self).layers
+                )
+            if not hasattr(Qwen2_5_VLModel, "norm"):
+                Qwen2_5_VLModel.norm = property(
+                    lambda self: getattr(self, "language_model", self).norm
+                )
+        except Exception as e:
+            print(f"[BENCHMARK] Warning: could not patch Qwen2_5_VLModel: {e}")
+
+        # 3. Patch transformers conversion_mapping to remap checkpoint keys:
+        # model.layers -> model.language_model.layers
+        # model.embed_tokens -> model.language_model.embed_tokens
+        # model.norm -> model.language_model.norm
+        try:
+            import transformers.conversion_mapping as cm
+            import transformers.modeling_utils as mu
+
+            if hasattr(cm, "USER_REGISTERED_MAPPINGS"):
+                cm.USER_REGISTERED_MAPPINGS.add("Qwen2_5_VLForConditionalGenerationWithPointer")
+                cm.USER_REGISTERED_MAPPINGS.add("qwen2_5_vl")
+
+            orig_get_mapping = getattr(cm, "get_model_conversion_mapping", None)
+            if orig_get_mapping is not None:
+                def custom_get_model_conversion_mapping(model, key_mapping=None, hf_quantizer=None, add_legacy=True):
+                    conversions = orig_get_mapping(model, key_mapping, hf_quantizer, add_legacy)
+                    has_lm_rename = any(
+                        getattr(c, "target_patterns", None) == "model.language_model" for c in conversions
+                    )
+                    if not has_lm_rename and ("Qwen" in type(model).__name__ or getattr(getattr(model, "config", None), "model_type", "") == "qwen2_5_vl"):
+                        conversions.extend([
+                            cm.WeightRenaming(source_patterns=r"^visual", target_patterns="model.visual"),
+                            cm.WeightRenaming(
+                                source_patterns=r"^model(?!\.(language_model|visual))", target_patterns="model.language_model"
+                            ),
+                        ])
+                    return conversions
+
+                cm.get_model_conversion_mapping = custom_get_model_conversion_mapping
+                mu.get_model_conversion_mapping = custom_get_model_conversion_mapping
+
+            if hasattr(cm, "register_checkpoint_conversion_mapping"):
+                cm.register_checkpoint_conversion_mapping(
+                    "Qwen2_5_VLForConditionalGenerationWithPointer",
+                    [
+                        cm.WeightRenaming(source_patterns=r"^visual", target_patterns="model.visual"),
+                        cm.WeightRenaming(
+                            source_patterns=r"^model(?!\.(language_model|visual))", target_patterns="model.language_model"
+                        ),
+                    ],
+                    overwrite=True,
+                )
+        except Exception as e:
+            print(f"[BENCHMARK] Warning: could not patch conversion_mapping: {e}")
+
         # Patch Qwen2_5_VLConfig for compatibility with modern transformers (4.48+)
         # where hidden_size was moved to text_config.hidden_size.
         try:
@@ -223,6 +304,16 @@ def run_evaluation(
 
         ms_processor = AutoProcessor.from_pretrained(model_name)
         ms_tokenizer = ms_processor.tokenizer
+
+        # Wrap ms_processor to strip mm_token_type_ids (causes ValueError in generate)
+        orig_proc_call = ms_processor.__call__
+        def safe_proc_call(*args, **kwargs):
+            out = orig_proc_call(*args, **kwargs)
+            if hasattr(out, "pop"):
+                out.pop("mm_token_type_ids", None)
+            return out
+        ms_processor.__call__ = safe_proc_call
+
         ms_model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
             model_name,
             config=ms_config,
@@ -231,6 +322,26 @@ def run_evaluation(
         ).eval()
         if not hasattr(ms_model.config, "pointer_pad_token_id") or ms_model.config.pointer_pad_token_id is None:
             ms_model.config.pointer_pad_token_id = 151669
+
+        # Wrap ms_model generate & validate & forward to strip mm_token_type_ids
+        if hasattr(ms_model, "_validate_model_kwargs"):
+            orig_validate = ms_model._validate_model_kwargs
+            def safe_validate(model_kwargs):
+                model_kwargs.pop("mm_token_type_ids", None)
+                return orig_validate(model_kwargs)
+            ms_model._validate_model_kwargs = safe_validate
+
+        orig_generate = ms_model.generate
+        def safe_generate(*args, **kwargs):
+            kwargs.pop("mm_token_type_ids", None)
+            return orig_generate(*args, **kwargs)
+        ms_model.generate = safe_generate
+
+        orig_forward = ms_model.forward
+        def safe_forward(*args, **kwargs):
+            kwargs.pop("mm_token_type_ids", None)
+            return orig_forward(*args, **kwargs)
+        ms_model.forward = safe_forward
     else:
         print(f"Initializing QwenGUIActorModel on {device}...")
         model = QwenGUIActorModel(
