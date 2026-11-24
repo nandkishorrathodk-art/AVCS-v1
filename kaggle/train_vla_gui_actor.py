@@ -73,6 +73,8 @@ def maybe_auto_spawn_torchrun(force_nproc: Optional[int] = None) -> bool:
 
     if running in a multi-GPU environment without LOCAL_RANK set.
     """
+    if "--no-auto-spawn" in sys.argv:
+        return False
     if "LOCAL_RANK" not in os.environ and "RANK" not in os.environ:
         gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
         if gpu_count >= 2 or force_nproc:
@@ -98,6 +100,12 @@ def maybe_auto_spawn_torchrun(force_nproc: Optional[int] = None) -> bool:
 
 def setup_distributed() -> Tuple[int, int, int, bool]:
     """Initializes PyTorch Distributed Data Parallel environment."""
+    if dist.is_available() and dist.is_initialized():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        return rank, world_size, local_rank, True
+
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -141,6 +149,8 @@ class MockQwenBackbone(nn.Module):
         b = images.shape[0]
         # Dynamic non-square patch grid (H_patches, W_patches) = (H_grid // 2, W_grid // 2)
         if image_grid_thw is not None:
+            if image_grid_thw.dim() == 1:
+                image_grid_thw = image_grid_thw.unsqueeze(0)
             gh = int(image_grid_thw[0, 1].item()) // 2
             gw = int(image_grid_thw[0, 2].item()) // 2
         elif grid_hw is not None:
@@ -319,6 +329,9 @@ class QwenGUIActorModel(nn.Module):
         device = images.device
 
         # Dynamic image_grid_thw alignment from input dimensions if not explicitly passed
+        if image_grid_thw is not None and image_grid_thw.dim() == 1:
+            image_grid_thw = image_grid_thw.unsqueeze(0)
+
         if image_grid_thw is None and grid_hw is None and images.dim() == 4:
             h, w = images.shape[2], images.shape[3]
             h_grid = max(2, (h // 28) * 2)
@@ -500,6 +513,10 @@ class GroundingDataset(Dataset):
                 line = line.strip()
                 if not line:
                     continue
+                # Fail-closed check: if the raw json line contains any held-out benchmark indicator
+                if self._is_held_out_leakage(line):
+                    self.leakage_filtered_count += 1
+                    continue
                 try:
                     data = json.loads(line)
                     raw_id = str(data.get("id", ""))
@@ -524,6 +541,8 @@ class GroundingDataset(Dataset):
                     conversations = data.get("conversations", [])
                     action_idx = 0  # default left_click
                     target_xy = [0.5, 0.5]
+                    img_w = float(data.get("width", 1280.0)) or 1280.0
+                    img_h = float(data.get("height", 800.0)) or 800.0
 
                     for turn in conversations:
                         if turn.get("from") == "human":
@@ -537,8 +556,8 @@ class GroundingDataset(Dataset):
                                     action_idx = ACTION_VOCAB_10.index(action_name)
                                 coord = parsed.get("coordinate", [0.5, 0.5])
                                 if len(coord) == 2:
-                                    norm_x = float(coord[0]) / 1280.0 if float(coord[0]) > 1.0 else float(coord[0])
-                                    norm_y = float(coord[1]) / 800.0 if float(coord[1]) > 1.0 else float(coord[1])
+                                    norm_x = float(coord[0]) / img_w if float(coord[0]) > 1.0 else float(coord[0])
+                                    norm_y = float(coord[1]) / img_h if float(coord[1]) > 1.0 else float(coord[1])
                                     target_xy = [min(1.0, max(0.0, norm_x)), min(1.0, max(0.0, norm_y))]
                             except Exception:
                                 pass
@@ -564,7 +583,11 @@ class GroundingDataset(Dataset):
                 continue
             try:
                 with open(json_file, "r", encoding="utf-8") as f:
-                    traj = json.load(f)
+                    content_str = f.read()
+                    if self._is_held_out_leakage(content_str):
+                        self.leakage_filtered_count += 1
+                        continue
+                    traj = json.loads(content_str)
                     goal = traj.get("goal", "Execute goal")
                     if self._is_held_out_leakage(goal):
                         self.leakage_filtered_count += 1
@@ -749,6 +772,7 @@ def run_overfit_sanity(
     steps_per_res: int = 35,
     lr: float = 3e-4,
     device: Optional[torch.device] = None,
+    assert_gate: bool = True,
 ) -> Dict[str, Any]:
     """Multi-resolution overfit sanity verification mode.
 
@@ -831,9 +855,10 @@ def run_overfit_sanity(
             f"[OVERFIT-SANITY-HF] Strict (0px) In-Bbox Accuracy across {total_samples} samples: "
             f"{strict_accuracy * 100:.1f}% ({hits}/{total_samples})"
         )
-        assert strict_accuracy >= 0.95, (
-            f"Overfit sanity gate failed on HF pre-flight: Strict in-bbox accuracy {strict_accuracy:.2%} < 95.0% threshold"
-        )
+        if assert_gate and strict_accuracy < 0.95:
+            raise AssertionError(
+                f"Overfit sanity gate failed on HF pre-flight: Strict in-bbox accuracy {strict_accuracy:.2%} < 95.0% threshold"
+            )
         return results
 
     # Multi-resolution synthetic native screen targets
@@ -911,9 +936,12 @@ def run_overfit_sanity(
             f"Loss {initial_loss:.4f} -> {final_loss:.4f} (drop: {initial_loss - final_loss:.4f}), "
             f"Coord Dist: {coord_dist:.4f} | Strict (0px) In-Bbox Acc: {strict_accuracy * 100:.1f}% | Converged: {converged}"
         )
-        assert strict_accuracy >= 0.95, (
-            f"Overfit sanity gate failed on resolution {w}x{h}: "
-            f"Strict in-bbox accuracy {strict_accuracy:.2%} < 95.0% threshold"
+
+    failed_res = [k for k, v in results.items() if not v.get("converged", False) or v.get("strict_accuracy", 0.0) < 0.95]
+    if failed_res and assert_gate:
+        raise AssertionError(
+            f"Overfit sanity gate failed on resolution(s) {failed_res}: Strict in-bbox accuracy < 95.0% threshold. "
+            f"Details: {results}"
         )
 
     return results
@@ -1066,12 +1094,13 @@ def run_ddp_training(
     # 2. Dataset & Distributed Sampler
     dataset = GroundingDataset(max_samples=max_samples, allow_synthetic_fallback=not fail_closed)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
+    drop_last = len(dataset) >= batch_size
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(sampler is None),
         sampler=sampler,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
     # 3. Optimizer & Multi-Task Loss Function

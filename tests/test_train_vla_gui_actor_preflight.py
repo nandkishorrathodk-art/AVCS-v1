@@ -38,6 +38,7 @@ GroundingDataset = train_vla_module.GroundingDataset
 MockQwenBackbone = train_vla_module.MockQwenBackbone
 QwenGUIActorModel = train_vla_module.QwenGUIActorModel
 maybe_auto_spawn_torchrun = train_vla_module.maybe_auto_spawn_torchrun
+setup_distributed = train_vla_module.setup_distributed
 run_overfit_sanity = train_vla_module.run_overfit_sanity
 
 
@@ -70,7 +71,7 @@ def test_auto_torchrun_spawns_when_multigpu_unranked():
 
 
 def test_auto_torchrun_skips_when_ranked_or_single_gpu():
-    """Verifies that maybe_auto_spawn_torchrun does nothing when LOCAL_RANK is set or only 1 GPU."""
+    """Verifies that maybe_auto_spawn_torchrun does nothing when LOCAL_RANK is set, only 1 GPU, or --no-auto-spawn."""
     # Case 1: LOCAL_RANK is already set
     with patch.dict(os.environ, {"LOCAL_RANK": "0", "RANK": "0"}):
         with patch("torch.cuda.device_count", return_value=2):
@@ -81,6 +82,15 @@ def test_auto_torchrun_skips_when_ranked_or_single_gpu():
         os.environ.pop("RANK", None)
         os.environ.pop("LOCAL_RANK", None)
         with patch("torch.cuda.device_count", return_value=1), \
+             patch("torch.cuda.is_available", return_value=True):
+            assert maybe_auto_spawn_torchrun() is False
+
+    # Case 3: --no-auto-spawn explicitly in sys.argv
+    with patch.dict(os.environ, {}, clear=True):
+        os.environ.pop("RANK", None)
+        os.environ.pop("LOCAL_RANK", None)
+        with patch.object(sys, "argv", ["train_vla_gui_actor.py", "--no-auto-spawn"]), \
+             patch("torch.cuda.device_count", return_value=2), \
              patch("torch.cuda.is_available", return_value=True):
             assert maybe_auto_spawn_torchrun() is False
 
@@ -171,6 +181,7 @@ def test_zero_leakage_gate_comprehensive(tmp_path: Path):
         {"id": "valid_id", "image": "showdown_dev/shot1.png", "instruction": "Leaked sample 2"},
         {"id": "valid_id_2", "source": "eval_dev_benchmark", "instruction": "Leaked sample 3"},
         {"id": "valid_id_3", "dataset": "showdown_clicks_eval", "instruction": "Leaked sample 4"},
+        {"id": "valid_id_4", "custom_meta": {"benchmark": "showdown-clicks-dev"}, "instruction": "Leaked sample 5"},
     ]
     with open(sample_jsonl, "w", encoding="utf-8") as f:
         for r in records:
@@ -178,7 +189,7 @@ def test_zero_leakage_gate_comprehensive(tmp_path: Path):
 
     ds = GroundingDataset(dataset_paths=[str(sample_jsonl)], allow_synthetic_fallback=False)
     assert len(ds) == 2
-    assert ds.leakage_filtered_count == 4
+    assert ds.leakage_filtered_count == 5
 
 
 def test_golden_directory_clean_skip_and_normalization(tmp_path: Path):
@@ -245,35 +256,59 @@ def test_grid_hw_and_image_grid_thw_mutual_derivation():
     out1 = model(images, grid_hw=(14, 22))
     assert out1["grid_hw"] == (14, 22)
 
-    # 2. Provide only image_grid_thw
-    thw = torch.tensor([[1, 28, 44]], dtype=torch.long)
-    out2 = model(images, image_grid_thw=thw)
+    # 2. Provide 2D image_grid_thw (B, 3)
+    thw_2d = torch.tensor([[1, 28, 44]], dtype=torch.long)
+    out2 = model(images, image_grid_thw=thw_2d)
     assert out2["grid_hw"] == (14, 22)
 
+    # 3. Provide 1D image_grid_thw (3,)
+    thw_1d = torch.tensor([1, 28, 44], dtype=torch.long)
+    out3 = model(images, image_grid_thw=thw_1d)
+    assert out3["grid_hw"] == (14, 22)
 
-def test_ddp_multi_step_backward_with_unused_parameters():
+
+def test_ddp_multi_step_backward_with_unused_parameters(tmp_path: Path):
     """Verifies that DDP operates across multiple backward steps with find_unused_parameters=True."""
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
 
     model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=512, query_dim=512)
-    with patch.dict(os.environ, {"MASTER_ADDR": "localhost", "MASTER_PORT": "29519"}):
-        dist.init_process_group("gloo", rank=0, world_size=1)
-        try:
-            ddp_model = DDP(model, find_unused_parameters=True)
-            optimizer = torch.optim.AdamW([p for p in ddp_model.parameters() if p.requires_grad], lr=1e-3)
-            images = torch.randn(2, 3, 400, 640)
-            target_actions = torch.tensor([0, 1], dtype=torch.long)
+    store_file = tmp_path / "ddp_store"
+    store = dist.FileStore(str(store_file), 1)
+    dist.init_process_group("gloo", store=store, rank=0, world_size=1)
+    try:
+        ddp_model = DDP(model, find_unused_parameters=True)
+        optimizer = torch.optim.AdamW([p for p in ddp_model.parameters() if p.requires_grad], lr=1e-3)
+        images = torch.randn(2, 3, 400, 640)
+        target_actions = torch.tensor([0, 1], dtype=torch.long)
 
-            # Must run multiple iterations without throwing "reduction in prior iteration" error
-            for step in range(3):
-                optimizer.zero_grad()
-                out = ddp_model(images)
-                loss = torch.nn.functional.cross_entropy(out["action_logits"], target_actions)
-                loss.backward()
-                optimizer.step()
-                assert loss.item() > 0.0
-        finally:
+        # Must run multiple iterations without throwing "reduction in prior iteration" error
+        for step in range(3):
+            optimizer.zero_grad()
+            out = ddp_model(images)
+            loss = torch.nn.functional.cross_entropy(out["action_logits"], target_actions)
+            loss.backward()
+            optimizer.step()
+            assert loss.item() > 0.0
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def test_setup_distributed_reentry_when_initialized(tmp_path: Path):
+    """Verifies that setup_distributed cleanly reuses an existing initialized process group."""
+    import torch.distributed as dist
+
+    store_file = tmp_path / "reentry_store"
+    store = dist.FileStore(str(store_file), 1)
+    dist.init_process_group("gloo", store=store, rank=0, world_size=1)
+    try:
+        rank, world_size, local_rank, is_dist = setup_distributed()
+        assert rank == 0
+        assert world_size == 1
+        assert is_dist is True
+    finally:
+        if dist.is_initialized():
             dist.destroy_process_group()
 
 
