@@ -415,6 +415,7 @@ def run_evaluation(
             "p90_ms": round(p90_lat, 2),
             "speedup_vs_autoregressive_baseline": round(3580.4 / max(0.1, mean_lat), 1),
         },
+        "predictions": results_detail,
     }
 
     print("\n" + "=" * 80)
