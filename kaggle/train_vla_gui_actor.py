@@ -85,6 +85,8 @@ def maybe_auto_spawn_torchrun(force_nproc: Optional[int] = None) -> bool:
                 f"Self-spawning torch.distributed.run --nproc_per_node={nproc}..."
             )
             clean_argv = [arg for arg in sys.argv if arg != "--no-auto-spawn"]
+            if clean_argv:
+                clean_argv[0] = os.path.abspath(clean_argv[0])
             cmd = [
                 sys.executable,
                 "-m",
@@ -93,7 +95,7 @@ def maybe_auto_spawn_torchrun(force_nproc: Optional[int] = None) -> bool:
                 *clean_argv,
                 "--no-auto-spawn",
             ]
-            res = subprocess.run(cmd)
+            res = subprocess.run(cmd, cwd=repo_root)
             sys.exit(res.returncode)
             return True
     return False
