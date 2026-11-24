@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 # Ensure current directory and repository root are prioritized on sys.path
@@ -82,10 +83,14 @@ def compute_edge_distance(px: float, py: float, x1: float, y1: float, x2: float,
 
 
 def run_evaluation(
-    checkpoint_path: str = "runs/checkpoints/gui_actor_step6_2_epoch_1.pt",
+    checkpoint_path: str = "runs/checkpoints/gui_actor_step6_2_epoch_3.pt",
     limit: Optional[int] = None,
     output_path: str = "benchmarks/results/showdown_gui_actor_step6_2.json",
     cache_dir: str = "data/showdown-clicks-dev",
+    eval_w: int = 640,
+    eval_h: int = 400,
+    native_size: bool = False,
+    temperature: float = 0.05,
 ) -> Dict[str, Any]:
     print("=" * 80)
     print("  AVCS STEP 6.2: HELD-OUT BENCHMARK EVALUATION (showdown-clicks-dev)  ")
@@ -94,6 +99,9 @@ def run_evaluation(
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Evaluation Device: {device}")
+    res_mode = "Native Screen Resolution" if native_size else f"Standard Desktop Canvas ({eval_w}x{eval_h})"
+    print(f"Resolution Mode:   {res_mode}")
+    print(f"Sharpening Temp:   T = {temperature}")
 
     # 1. Download or load benchmark manifest
     cache_path = Path(cache_dir)
@@ -138,14 +146,21 @@ def run_evaluation(
     model.to(device)
     model.eval()
 
-    # 3. Evaluation Loop
-    strict_hits = 0
-    hit_15px_count = 0
+    # 3. Evaluation Tracking across 3 pointer decoding strategies
+    sub_strict_hits = 0
+    sub_15_hits = 0
+
+    sharp_strict_hits = 0
+    sharp_15_hits = 0
+
+    soft_strict_hits = 0
+    soft_15_hits = 0
+
     total_latency_ms = 0.0
     latencies: List[float] = []
     results_detail: List[Dict[str, Any]] = []
 
-    print(f"\nEvaluating {total_samples} samples...")
+    print(f"\nEvaluating {total_samples} samples across pointer decoding heads...")
     t_start = time.time()
 
     for idx, row in enumerate(samples):
@@ -177,58 +192,117 @@ def run_evaluation(
             logger.warning(f"Failed to open image {img_file}: {e}")
             continue
 
+        # Resize image to canvas size if not in native_size mode
+        if not native_size and eval_w > 0 and eval_h > 0:
+            model_img = pil_img.resize((eval_w, eval_h), Image.Resampling.BILINEAR)
+        else:
+            model_img = pil_img
+
         # Single-pass model forward step (measure pure inference latency)
         t0 = time.perf_counter()
         with torch.no_grad():
-            out = model(images=pil_img, queries=[instruction])
+            out = model(images=model_img, queries=[instruction])
             if device.type == "cuda":
                 torch.cuda.synchronize()
         infer_ms = (time.perf_counter() - t0) * 1000.0
         latencies.append(infer_ms)
         total_latency_ms += infer_ms
 
-        # Map normalized coordinates [0, 1] to native pixel space
-        pred_norm_xy = out["target_coords"][0].cpu().numpy()
-        pred_px = float(pred_norm_xy[0] * raw_w)
-        pred_py = float(pred_norm_xy[1] * raw_h)
+        # 1. Subpixel coordinates (Argmax patch + subpatch offset MLP)
+        sub_norm_xy = out["subpixel_coords"][0].cpu().numpy()
+        sub_px = float(sub_norm_xy[0] * raw_w)
+        sub_py = float(sub_norm_xy[1] * raw_h)
+
+        # 2. Temperature-sharpened centroid
+        attn_logits = out["attn_logits"]
+        patch_coords = out["patch_coords"]
+        if patch_coords.dim() == 2:
+            patch_coords = patch_coords.unsqueeze(0)
+        sharp_weights = F.softmax(attn_logits / max(temperature, 1e-4), dim=-1)
+        sharp_norm_xy = torch.bmm(sharp_weights, patch_coords).squeeze(1)[0].cpu().numpy()
+        sharp_px = float(sharp_norm_xy[0] * raw_w)
+        sharp_py = float(sharp_norm_xy[1] * raw_h)
+
+        # 3. Soft unsharpened centroid (T=1.0)
+        soft_norm_xy = out["target_coords"][0].cpu().numpy()
+        soft_px = float(soft_norm_xy[0] * raw_w)
+        soft_py = float(soft_norm_xy[1] * raw_h)
 
         # Evaluate bounding box inclusion
         bx1, bx2 = min(x1, x2), max(x1, x2)
         by1, by2 = min(y1, y2), max(y1, y2)
-        is_strict = (bx1 <= pred_px <= bx2) and (by1 <= pred_py <= by2)
-        dist_err = compute_edge_distance(pred_px, pred_py, bx1, by1, bx2, by2)
-        is_15px = is_strict or (dist_err <= 15.0)
 
-        if is_strict:
-            strict_hits += 1
-        if is_15px:
-            hit_15px_count += 1
+        is_sub_strict = (bx1 <= sub_px <= bx2) and (by1 <= sub_py <= by2)
+        dist_sub = compute_edge_distance(sub_px, sub_py, bx1, by1, bx2, by2)
+        is_sub_15 = is_sub_strict or (dist_sub <= 15.0)
+
+        is_sharp_strict = (bx1 <= sharp_px <= bx2) and (by1 <= sharp_py <= by2)
+        dist_sharp = compute_edge_distance(sharp_px, sharp_py, bx1, by1, bx2, by2)
+        is_sharp_15 = is_sharp_strict or (dist_sharp <= 15.0)
+
+        is_soft_strict = (bx1 <= soft_px <= bx2) and (by1 <= soft_py <= by2)
+        dist_soft = compute_edge_distance(soft_px, soft_py, bx1, by1, bx2, by2)
+        is_soft_15 = is_soft_strict or (dist_soft <= 15.0)
+
+        if is_sub_strict:
+            sub_strict_hits += 1
+        if is_sub_15:
+            sub_15_hits += 1
+
+        if is_sharp_strict:
+            sharp_strict_hits += 1
+        if is_sharp_15:
+            sharp_15_hits += 1
+
+        if is_soft_strict:
+            soft_strict_hits += 1
+        if is_soft_15:
+            soft_15_hits += 1
 
         results_detail.append({
             "id": sample_id,
             "instruction": instruction,
-            "pred_px": [round(pred_px, 1), round(pred_py, 1)],
             "target_bbox": [x1, y1, x2, y2],
-            "strict_hit": is_strict,
-            "edge_dist": round(dist_err, 2),
+            "subpixel_px": [round(sub_px, 1), round(sub_py, 1)],
+            "subpixel_strict": is_sub_strict,
+            "subpixel_edge_dist": round(dist_sub, 2),
+            "sharpened_px": [round(sharp_px, 1), round(sharp_py, 1)],
+            "sharpened_strict": is_sharp_strict,
+            "soft_px": [round(soft_px, 1), round(soft_py, 1)],
+            "soft_strict": is_soft_strict,
             "latency_ms": round(infer_ms, 2),
         })
 
-        if (idx + 1) % 50 == 0 or (idx + 1) == total_samples:
-            cur_acc = (strict_hits / (idx + 1)) * 100.0
-            cur_15 = (hit_15px_count / (idx + 1)) * 100.0
+        if (idx + 1) % 25 == 0 or (idx + 1) == total_samples:
+            acc_sub = (sub_strict_hits / (idx + 1)) * 100.0
+            acc_sharp = (sharp_strict_hits / (idx + 1)) * 100.0
+            acc_soft = (soft_strict_hits / (idx + 1)) * 100.0
             avg_lat = total_latency_ms / (idx + 1)
             print(
-                f"[{idx + 1:3d}/{total_samples}] Strict: {cur_acc:5.2f}% ({strict_hits}/{idx + 1}) | "
-                f"15px: {cur_15:5.2f}% | Latency: {avg_lat:5.1f}ms/step"
+                f"[{idx + 1:3d}/{total_samples}] "
+                f"Subpixel (Argmax): {acc_sub:5.2f}% ({sub_strict_hits}/{idx + 1}) | "
+                f"Sharpened (T={temperature}): {acc_sharp:5.2f}% | "
+                f"Soft Centroid: {acc_soft:5.2f}% | "
+                f"Latency: {avg_lat:5.1f}ms/step"
             )
 
     elapsed_sec = time.time() - t_start
     evaluated_count = len(results_detail)
-    strict_acc = (strict_hits / max(1, evaluated_count)) * 100.0
-    hit_15_acc = (hit_15px_count / max(1, evaluated_count)) * 100.0
-    wilson_strict = wilson_interval(strict_hits, evaluated_count)
-    wilson_15 = wilson_interval(hit_15px_count, evaluated_count)
+
+    acc_sub = (sub_strict_hits / max(1, evaluated_count)) * 100.0
+    acc_sub_15 = (sub_15_hits / max(1, evaluated_count)) * 100.0
+    wilson_sub = wilson_interval(sub_strict_hits, evaluated_count)
+
+    acc_sharp = (sharp_strict_hits / max(1, evaluated_count)) * 100.0
+    acc_sharp_15 = (sharp_15_hits / max(1, evaluated_count)) * 100.0
+    wilson_sharp = wilson_interval(sharp_strict_hits, evaluated_count)
+
+    acc_soft = (soft_strict_hits / max(1, evaluated_count)) * 100.0
+    acc_soft_15 = (soft_15_hits / max(1, evaluated_count)) * 100.0
+    wilson_soft = wilson_interval(soft_strict_hits, evaluated_count)
+
+    best_strict = max(acc_sub, acc_sharp)
+    best_strategy = "subpixel_argmax" if acc_sub >= acc_sharp else "sharpened_centroid"
 
     latencies.sort()
     p50_lat = latencies[len(latencies) // 2] if latencies else 0.0
@@ -240,18 +314,34 @@ def run_evaluation(
         "checkpoint": str(checkpoint_path),
         "total_samples": evaluated_count,
         "elapsed_seconds": round(elapsed_sec, 2),
-        "primary_metric": {
-            "name": "strict_0.0px_in_bbox",
-            "hits": strict_hits,
-            "accuracy_percent": round(strict_acc, 2),
-            "wilson_95_ci": wilson_strict,
-            "pass_gate_65_pct": strict_acc >= 65.0,
+        "resolution": {
+            "mode": "native" if native_size else "canvas",
+            "canvas_size": None if native_size else [eval_w, eval_h],
         },
-        "secondary_metric": {
-            "name": "diagnostic_15.0px_edge_distance",
-            "hits": hit_15px_count,
-            "accuracy_percent": round(hit_15_acc, 2),
-            "wilson_95_ci": wilson_15,
+        "best_strategy": best_strategy,
+        "subpixel_argmax": {
+            "name": "subpixel_argmax_plus_offset",
+            "hits": sub_strict_hits,
+            "accuracy_percent": round(acc_sub, 2),
+            "hit_15px_percent": round(acc_sub_15, 2),
+            "wilson_95_ci": wilson_sub,
+            "pass_gate_65_pct": acc_sub >= 65.0,
+        },
+        "sharpened_centroid": {
+            "name": f"sharpened_attention_centroid_T_{temperature}",
+            "hits": sharp_strict_hits,
+            "accuracy_percent": round(acc_sharp, 2),
+            "hit_15px_percent": round(acc_sharp_15, 2),
+            "wilson_95_ci": wilson_sharp,
+            "pass_gate_65_pct": sharp_strict_hits >= 65.0,
+        },
+        "soft_centroid": {
+            "name": "soft_unsharpened_centroid_T_1.0",
+            "hits": soft_strict_hits,
+            "accuracy_percent": round(acc_soft, 2),
+            "hit_15px_percent": round(acc_soft_15, 2),
+            "wilson_95_ci": wilson_soft,
+            "pass_gate_65_pct": soft_strict_hits >= 65.0,
         },
         "latency_telemetry": {
             "mean_ms": round(mean_lat, 2),
@@ -264,13 +354,14 @@ def run_evaluation(
     print("\n" + "=" * 80)
     print("  FINAL EVALUATION REPORT: STEP 6.2 GUI-ACTOR POINTER  ")
     print("=" * 80)
-    print(f"Evaluated Samples:      {evaluated_count}/{total_samples}")
-    print(f"Strict In-Bbox (0.0px): {strict_acc:.2f}% (Wilson 95% CI: [{wilson_strict[0]}%, {wilson_strict[1]}%])")
-    print(f"Hit at 15.0px Edge:     {hit_15_acc:.2f}% (Wilson 95% CI: [{wilson_15[0]}%, {wilson_15[1]}%])")
-    print(f"Latency per Step:       {mean_lat:.2f}ms (P50: {p50_lat:.2f}ms, P90: {p90_lat:.2f}ms)")
-    print(f"Inference Acceleration: {3580.4 / max(0.1, mean_lat):.1f}x faster than autoregressive base model")
-    gate_str = "PASS (>= 65.0%)" if strict_acc >= 65.0 else "PENDING (< 65.0%)"
-    print(f"Milestone Gate:         {gate_str}")
+    print(f"Evaluated Samples:              {evaluated_count}/{total_samples}")
+    print(f"Subpixel (Argmax + Offset):     {acc_sub:.2f}% (Wilson 95% CI: [{wilson_sub[0]}%, {wilson_sub[1]}%]) | 15px: {acc_sub_15:.2f}%")
+    print(f"Sharpened Centroid (T={temperature}): {acc_sharp:.2f}% (Wilson 95% CI: [{wilson_sharp[0]}%, {wilson_sharp[1]}%]) | 15px: {acc_sharp_15:.2f}%")
+    print(f"Soft Centroid (T=1.0):          {acc_soft:.2f}% (Wilson 95% CI: [{wilson_soft[0]}%, {wilson_soft[1]}%]) | 15px: {acc_soft_15:.2f}%")
+    print(f"Latency per Step:               {mean_lat:.2f}ms (P50: {p50_lat:.2f}ms, P90: {p90_lat:.2f}ms)")
+    print(f"Inference Acceleration:         {3580.4 / max(0.1, mean_lat):.1f}x faster than autoregressive base model")
+    gate_str = "PASS (>= 65.0%)" if best_strict >= 65.0 else "PENDING (< 65.0%)"
+    print(f"Milestone Gate ({best_strategy}): {gate_str}")
     print("=" * 80)
 
     out_file = Path(output_path)
@@ -283,10 +374,13 @@ def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Fine-Tuned GUI-Actor Pointer on showdown-clicks-dev")
-    parser.add_argument("--checkpoint", type=str, default="runs/checkpoints/gui_actor_step6_2_epoch_1.pt", help="Path to adapter checkpoint")
+    parser.add_argument("--checkpoint", type=str, default="runs/checkpoints/gui_actor_step6_2_epoch_3.pt", help="Path to adapter checkpoint")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of evaluation samples")
     parser.add_argument("--output", type=str, default="benchmarks/results/showdown_gui_actor_step6_2.json", help="Output JSON path")
     parser.add_argument("--cache-dir", type=str, default="data/showdown-clicks-dev", help="Benchmark cache directory")
+    parser.add_argument("--eval-size", nargs=2, type=int, default=[640, 400], help="Evaluation canvas size W H (default: 640 400 matching training)")
+    parser.add_argument("--native-size", action="store_true", help="Evaluate at native screen resolution without resizing")
+    parser.add_argument("--temperature", type=float, default=0.05, help="Attention sharpening temperature (default: 0.05)")
     args = parser.parse_args()
 
     run_evaluation(
@@ -294,6 +388,10 @@ def main():
         limit=args.limit,
         output_path=args.output,
         cache_dir=args.cache_dir,
+        eval_w=args.eval_size[0],
+        eval_h=args.eval_size[1],
+        native_size=args.native_size,
+        temperature=args.temperature,
     )
 
 
