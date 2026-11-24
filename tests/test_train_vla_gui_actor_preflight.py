@@ -327,3 +327,56 @@ def test_overfit_sanity_clean_convergence():
         assert res[r_key]["converged"] is True
         assert res[r_key]["loss_drop"] > 0.0
         assert res[r_key]["final_loss"] < res[r_key]["initial_loss"]
+
+
+def test_extract_features_and_precomputed_forwarding():
+    """Verifies extract_features works with PIL images and precomputed feats forward correctly."""
+    from PIL import Image
+    model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=512, query_dim=512)
+    pil_img = Image.new("RGB", (640, 400), color=(100, 150, 200))
+
+    # Extract features
+    feats = model.extract_features(images=[pil_img], queries=["Click the file menu"])
+    assert "patch_feats" in feats
+    assert "pooled_feats" in feats
+    assert "grid_hw" in feats
+    gh, gw = feats["grid_hw"]
+    assert gh * gw == feats["patch_feats"].shape[1]
+
+    # Forward with precomputed features
+    out = model(
+        patch_feats=feats["patch_feats"],
+        pooled_feats=feats["pooled_feats"],
+        grid_hw=(gh, gw),
+    )
+    assert "action_logits" in out
+    assert "target_coords" in out
+    assert out["target_coords"].shape == (1, 2)
+    assert 0.0 <= out["target_coords"][0, 0].item() <= 1.0
+    assert 0.0 <= out["target_coords"][0, 1].item() <= 1.0
+
+
+def test_overfit_sanity_with_hf_sample_structure():
+    """Verifies run_overfit_sanity with mock HF desktop samples achieving >=95% strict accuracy."""
+    from PIL import Image
+    model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=512, query_dim=512)
+    samples = [
+        {
+            "id": f"test_sample_{i}",
+            "image": Image.new("RGB", (640, 400), color=(i * 20, 100, 150)),
+            "width": 640,
+            "height": 400,
+            "source": "showlab/ShowUI-desktop",
+            "instruction": f"Click icon {i}",
+            "target_action": 0,
+            "target_coord": [0.35 + i * 0.05, 0.45],
+            "target_bbox": [0.30 + i * 0.05, 0.40, 0.40 + i * 0.05, 0.50],
+        }
+        for i in range(4)
+    ]
+
+    res = run_overfit_sanity(model=model, samples=samples, steps_per_res=35, lr=1e-3)
+    assert "hf_preflight" in res
+    assert res["hf_preflight"]["converged"] is True
+    assert res["hf_preflight"]["strict_accuracy"] >= 0.95
+    assert res["hf_preflight"]["hits"] == 4

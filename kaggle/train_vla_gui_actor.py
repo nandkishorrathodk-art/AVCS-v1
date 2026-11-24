@@ -311,65 +311,230 @@ class QwenGUIActorModel(nn.Module):
             "frozen_params": frozen_params,
         }
 
+    def extract_features(
+        self,
+        images: Optional[Union[torch.Tensor, List[Any], Any]] = None,
+        queries: Optional[List[str]] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        grid_hw: Optional[Tuple[int, int]] = None,
+    ) -> Dict[str, Any]:
+        """Extracts visual patch features and query representation from the frozen backbone.
+
+        If using MockQwenBackbone: derives deterministic spatial features.
+        If using real Qwen2.5-VL: formats multimodal prompts with valid input_ids and <|image_pad|>
+        visual tokens, executing a single no-grad forward pass through the frozen backbone.
+        """
+        if isinstance(self.backbone, MockQwenBackbone):
+            if isinstance(images, torch.Tensor):
+                pass
+            elif isinstance(images, Image.Image):
+                arr = np.array(images, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                images = torch.from_numpy(arr).unsqueeze(0)
+            elif isinstance(images, np.ndarray):
+                images = torch.from_numpy(images).unsqueeze(0)
+            elif isinstance(images, list):
+                img_tensors = []
+                for img in images:
+                    if isinstance(img, torch.Tensor):
+                        img_tensors.append(img)
+                    elif isinstance(img, Image.Image):
+                        arr = np.array(img, dtype=np.float32).transpose(2, 0, 1) / 255.0
+                        img_tensors.append(torch.from_numpy(arr))
+                    elif isinstance(img, np.ndarray):
+                        img_tensors.append(torch.from_numpy(img))
+                images = torch.stack(img_tensors, dim=0) if img_tensors else torch.randn(1, 3, 800, 1280)
+            elif images is None:
+                images = torch.randn(1, 3, 800, 1280)
+
+            out = self.backbone(images, image_grid_thw=image_grid_thw, grid_hw=grid_hw)
+            gw, gh = out["grid_size"]
+            return {
+                "patch_feats": out["patch_hidden"],
+                "pooled_feats": out["pooled"],
+                "grid_hw": (gh, gw),
+            }
+
+        # Real Qwen2.5-VL backbone
+        device = next(self.backbone.parameters()).device
+        dtype = getattr(self.backbone, "dtype", torch.float16)
+
+        # 1. Standardize images into PIL Images
+        pil_images: List[Image.Image] = []
+        if isinstance(images, torch.Tensor):
+            b_imgs = images.shape[0]
+            for i in range(b_imgs):
+                arr = images[i].detach().cpu().permute(1, 2, 0).numpy()
+                if arr.max() <= 1.0:
+                    arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+                else:
+                    arr = arr.clip(0, 255).astype(np.uint8)
+                pil_images.append(Image.fromarray(arr))
+        elif isinstance(images, list):
+            for item in images:
+                if isinstance(item, Image.Image):
+                    pil_images.append(item)
+                elif isinstance(item, torch.Tensor):
+                    arr = item.detach().cpu().permute(1, 2, 0).numpy()
+                    if arr.max() <= 1.0:
+                        arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+                    else:
+                        arr = arr.clip(0, 255).astype(np.uint8)
+                    pil_images.append(Image.fromarray(arr))
+                elif isinstance(item, np.ndarray):
+                    pil_images.append(Image.fromarray(item))
+        elif isinstance(images, Image.Image):
+            pil_images = [images]
+        elif isinstance(images, np.ndarray):
+            pil_images = [Image.fromarray(images)]
+        else:
+            pil_images = [Image.new("RGB", (1280, 800), color=(128, 128, 128))]
+
+        b = len(pil_images)
+        if queries is None:
+            batch_queries = ["Click the target UI element"] * b
+        elif isinstance(queries, str):
+            batch_queries = [queries] * b
+        else:
+            batch_queries = list(queries)
+            if len(batch_queries) < b:
+                batch_queries += ["Click the target UI element"] * (b - len(batch_queries))
+
+        # 2. Build multimodal chat messages with vision and text tokens
+        messages = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": img},
+                        {"type": "text", "text": q},
+                    ],
+                }
+            ]
+            for img, q in zip(pil_images, batch_queries)
+        ]
+
+        try:
+            texts = [
+                self.processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+                for m in messages
+            ]
+        except Exception:
+            texts = [
+                f"<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{q}<|im_end|>\n<|im_start|>assistant\n"
+                for q in batch_queries
+            ]
+
+        try:
+            from qwen_vl_utils import process_vision_info
+            image_inputs, _ = process_vision_info(messages)
+        except Exception:
+            image_inputs = pil_images
+
+        # 3. Process inputs through AutoProcessor
+        inputs = self.processor(
+            text=texts,
+            images=image_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+
+        # 4. Device and precision alignment
+        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        if "pixel_values" in inputs and isinstance(inputs["pixel_values"], torch.Tensor):
+            inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
+
+        # 5. Single frozen forward pass through backbone
+        with torch.no_grad():
+            outputs = self.backbone(**inputs, output_hidden_states=True)
+            last_hidden = outputs.hidden_states[-1]
+
+        # 6. Extract visual patch hidden states from <|image_pad|> token positions
+        image_token_id = getattr(self.backbone.config, "image_token_id", None)
+        if image_token_id is None:
+            image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+
+        batch_patch_feats = []
+        batch_pooled_feats = []
+        for i in range(b):
+            mask_i = (inputs["input_ids"][i] == image_token_id)
+            if mask_i.any():
+                batch_patch_feats.append(last_hidden[i][mask_i])
+            else:
+                batch_patch_feats.append(last_hidden[i, :-1, :])
+
+            attn_mask_i = inputs["attention_mask"][i].bool()
+            valid_indices = attn_mask_i.nonzero()
+            last_idx = valid_indices[-1].item() if len(valid_indices) > 0 else -1
+            batch_pooled_feats.append(last_hidden[i, last_idx, :])
+
+        if len(batch_patch_feats) == 1 or all(p.shape[0] == batch_patch_feats[0].shape[0] for p in batch_patch_feats):
+            patch_feats = torch.stack(batch_patch_feats, dim=0)
+        else:
+            patch_feats = batch_patch_feats[0].unsqueeze(0)
+        pooled_feats = torch.stack(batch_pooled_feats, dim=0)
+
+        # 7. Derive exact patch grid size (gh, gw)
+        if "image_grid_thw" in inputs and inputs["image_grid_thw"] is not None:
+            grid_t = inputs["image_grid_thw"]
+            if grid_t.dim() == 1:
+                gh = int(grid_t[1].item()) // 2
+                gw = int(grid_t[2].item()) // 2
+            else:
+                gh = int(grid_t[0, 1].item()) // 2
+                gw = int(grid_t[0, 2].item()) // 2
+        elif grid_hw is not None:
+            gh, gw = grid_hw
+        else:
+            gh = max(1, int(math.isqrt(patch_feats.shape[1])))
+            gw = patch_feats.shape[1] // gh
+
+        return {
+            "patch_feats": patch_feats,
+            "pooled_feats": pooled_feats,
+            "grid_hw": (gh, gw),
+        }
+
     def forward(
         self,
-        images: torch.Tensor,
+        images: Optional[Union[torch.Tensor, List[Any], Any]] = None,
         queries: Optional[List[str]] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         grid_hw: Optional[Tuple[int, int]] = None,
         cursor_xy: Optional[torch.Tensor] = None,
         memory_state: Optional[RollingMemoryState] = None,
+        patch_feats: Optional[torch.Tensor] = None,
+        pooled_feats: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Single-pass forward step with dynamic image_grid_thw non-square patch alignment.
 
         Exact non-square patch grid (H_patches, W_patches) = (H_grid // 2, W_grid // 2)
         matching native screen aspect ratios.
         """
-        b = images.shape[0]
-        device = images.device
-
-        # Dynamic image_grid_thw alignment from input dimensions if not explicitly passed
-        if image_grid_thw is not None and image_grid_thw.dim() == 1:
-            image_grid_thw = image_grid_thw.unsqueeze(0)
-
-        if image_grid_thw is None and grid_hw is None and images.dim() == 4:
-            h, w = images.shape[2], images.shape[3]
-            h_grid = max(2, (h // 28) * 2)
-            w_grid = max(2, (w // 28) * 2)
-            image_grid_thw = torch.tensor([[1, h_grid, w_grid]], dtype=torch.long, device=device).repeat(b, 1)
-            grid_hw = (h_grid // 2, w_grid // 2)
-        elif image_grid_thw is not None and grid_hw is None:
-            grid_hw = (int(image_grid_thw[0, 1].item()) // 2, int(image_grid_thw[0, 2].item()) // 2)
-        elif grid_hw is not None and image_grid_thw is None:
-            image_grid_thw = torch.tensor([[1, grid_hw[0] * 2, grid_hw[1] * 2]], dtype=torch.long, device=device).repeat(b, 1)
-
-        # 1. Forward through frozen backbone
-        if isinstance(self.backbone, MockQwenBackbone):
-            out = self.backbone(images, image_grid_thw=image_grid_thw, grid_hw=grid_hw)
-            patch_feats = out["patch_hidden"]
-            pooled_feats = out["pooled"]
-            gw, gh = out["grid_size"]
+        # 1. Extract or use precomputed backbone features
+        if patch_feats is None or pooled_feats is None:
+            feats = self.extract_features(
+                images=images,
+                queries=queries,
+                image_grid_thw=image_grid_thw,
+                grid_hw=grid_hw,
+            )
+            patch_feats = feats["patch_feats"]
+            pooled_feats = feats["pooled_feats"]
+            gh, gw = feats["grid_hw"]
         else:
-            with torch.no_grad():
-                backbone_kwargs: Dict[str, Any] = {
-                    "pixel_values": images,
-                    "output_hidden_states": True,
-                    "return_dict": True,
-                }
-                if image_grid_thw is not None:
-                    backbone_kwargs["image_grid_thw"] = image_grid_thw
-                outputs = self.backbone(**backbone_kwargs)
-                last_hidden = outputs.hidden_states[-1]
-                pooled_feats = last_hidden[:, -1, :].to(device)
-                patch_feats = last_hidden[:, :-1, :].to(device)
-                if image_grid_thw is not None:
-                    gh = int(image_grid_thw[0, 1].item()) // 2
-                    gw = int(image_grid_thw[0, 2].item()) // 2
-                elif grid_hw is not None:
-                    gh, gw = grid_hw
-                else:
-                    gh = max(1, int(math.isqrt(patch_feats.shape[1])))
-                    gw = patch_feats.shape[1] // gh
+            if grid_hw is not None:
+                gh, gw = grid_hw
+            else:
+                gh = max(1, int(math.isqrt(patch_feats.shape[1])))
+                gw = patch_feats.shape[1] // gh
+
+        b = patch_feats.shape[0]
+        device = patch_feats.device
+
+        # Align feature dtypes with adapter projections
+        adapter_dtype = next(self.patch_proj.parameters()).dtype
+        patch_feats = patch_feats.to(device=device, dtype=adapter_dtype)
+        pooled_feats = pooled_feats.to(device=device, dtype=adapter_dtype)
 
         # 2. Project features to pointer and query representations
         k_patches = patch_feats.shape[1]
@@ -869,16 +1034,16 @@ def run_overfit_sanity(
             model.load_state_dict(trainable_state, strict=False)
             w, h = s["width"], s["height"]
             img_raw = s["image"]
-            if hasattr(img_raw, "resize"):
-                arr = np.array(img_raw.resize((w, h)), dtype=np.float32).transpose(2, 0, 1) / 255.0
-                img_t = torch.from_numpy(arr).unsqueeze(0).to(device)
-            else:
-                img_t = torch.randn(1, 3, h, w, device=device)
+            instr = s.get("instruction", "Click target control")
 
-            h_grid = max(2, (h // 28) * 2)
-            w_grid = max(2, (w // 28) * 2)
-            grid_thw = torch.tensor([[1, h_grid, w_grid]], dtype=torch.long, device=device)
-            gh, gw = h_grid // 2, w_grid // 2
+            # Extract backbone features once per sample (under no_grad)
+            feats = model.extract_features(
+                images=img_raw,
+                queries=[instr],
+            )
+            patch_feats = feats["patch_feats"]
+            pooled_feats = feats["pooled_feats"]
+            gh, gw = feats["grid_hw"]
 
             t_coord = torch.tensor([s["target_coord"]], dtype=torch.float32, device=device)
             t_act = torch.tensor([s["target_action"]], dtype=torch.long, device=device)
@@ -891,7 +1056,11 @@ def run_overfit_sanity(
             opt = torch.optim.AdamW(trainable_params, lr=lr)
             for _ in range(steps_per_res):
                 opt.zero_grad()
-                out = model(img_t, image_grid_thw=grid_thw, grid_hw=(gh, gw))
+                out = model(
+                    patch_feats=patch_feats,
+                    pooled_feats=pooled_feats,
+                    grid_hw=(gh, gw),
+                )
                 loss_coord = 5.0 * F.l1_loss(out["target_coords"], t_coord) + 10.0 * F.mse_loss(out["target_coords"], t_coord)
                 loss_act = F.cross_entropy(out["action_logits"], t_act)
                 loss_patch = F.cross_entropy(out["attn_logits"].squeeze(1), target_patch)
@@ -958,13 +1127,18 @@ def run_overfit_sanity(
             target_coords[:, 0] + 0.05, target_coords[:, 1] + 0.05
         ], dim=-1)
 
+        feats = model.extract_features(images=images, image_grid_thw=grid_thw, grid_hw=(gh, gw))
+        patch_feats = feats["patch_feats"]
+        pooled_feats = feats["pooled_feats"]
+        gh, gw = feats["grid_hw"]
+
         opt = torch.optim.AdamW(trainable_params, lr=lr)
         initial_loss = 0.0
         final_loss = 0.0
 
         for step in range(steps_per_res):
             opt.zero_grad()
-            out = model(images, image_grid_thw=grid_thw, grid_hw=(gh, gw))
+            out = model(patch_feats=patch_feats, pooled_feats=pooled_feats, grid_hw=(gh, gw))
             loss_coord = 5.0 * F.l1_loss(out["target_coords"], target_coords) + 10.0 * F.mse_loss(out["target_coords"], target_coords)
             loss_act = F.cross_entropy(out["action_logits"], target_actions)
             loss_patch = F.cross_entropy(out["attn_logits"].squeeze(1), target_patch)
@@ -1196,7 +1370,7 @@ def run_ddp_training(
             target_coords = batch["target_coord"].to(device)
 
             optimizer.zero_grad()
-            outputs = model(images)
+            outputs = model(images, queries=batch.get("instruction"))
 
             # Compute Unified Multi-Task Loss with FP32 upcast
             loss_dict = criterion(
