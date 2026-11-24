@@ -141,10 +141,13 @@ def run_evaluation(
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
         except ImportError:
-            print("[BENCHMARK] gui_actor package not installed; installing via --no-deps from GitHub...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-deps", "git+https://github.com/microsoft/GUI-Actor.git"])
-            import importlib
-            importlib.invalidate_caches()
+            ms_repo_dir = Path("/tmp/GUI-Actor")
+            if not ms_repo_dir.exists():
+                print("[BENCHMARK] Cloning https://github.com/microsoft/GUI-Actor.git to /tmp/GUI-Actor to bypass Python 3.13 pip gate...")
+                subprocess.check_call(["git", "clone", "--depth", "1", "https://github.com/microsoft/GUI-Actor.git", str(ms_repo_dir)])
+            ms_src = str(ms_repo_dir / "src")
+            if ms_src not in sys.path:
+                sys.path.insert(0, ms_src)
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
 
