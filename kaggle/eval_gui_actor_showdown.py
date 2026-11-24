@@ -323,21 +323,19 @@ def run_evaluation(
         if not hasattr(ms_model.config, "pointer_pad_token_id") or ms_model.config.pointer_pad_token_id is None:
             ms_model.config.pointer_pad_token_id = 151669
 
-        # Wrap ms_model generate & validate & forward to strip mm_token_type_ids
-        if hasattr(ms_model, "_validate_model_kwargs"):
-            orig_validate = ms_model._validate_model_kwargs
-            def safe_validate(model_kwargs):
-                model_kwargs.pop("mm_token_type_ids", None)
-                return orig_validate(model_kwargs)
-            ms_model._validate_model_kwargs = safe_validate
+        # Bypass _validate_model_kwargs to allow all multimodal arguments (pixel_values, image_grid_thw, etc.)
+        ms_model._validate_model_kwargs = lambda model_kwargs: None
 
+        import functools
         orig_generate = ms_model.generate
+        @functools.wraps(orig_generate)
         def safe_generate(*args, **kwargs):
             kwargs.pop("mm_token_type_ids", None)
             return orig_generate(*args, **kwargs)
         ms_model.generate = safe_generate
 
         orig_forward = ms_model.forward
+        @functools.wraps(orig_forward)
         def safe_forward(*args, **kwargs):
             kwargs.pop("mm_token_type_ids", None)
             return orig_forward(*args, **kwargs)
