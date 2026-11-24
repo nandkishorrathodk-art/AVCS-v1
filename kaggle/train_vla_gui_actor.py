@@ -666,6 +666,7 @@ def pull_hf_preflight_samples(n_samples: int = 16) -> List[Dict[str, Any]]:
         logger.info(f"[HF-PREFLIGHT] Streaming real desktop samples from showlab/ShowUI-desktop...")
         try:
             ds_showui = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
+            seen_points = set()
             for item in ds_showui:
                 if len(samples) >= n_samples:
                     break
@@ -673,17 +674,68 @@ def pull_hf_preflight_samples(n_samples: int = 16) -> List[Dict[str, Any]]:
                 if img is None:
                     continue
                 w, h = img.size
-                bbox = item.get("bbox") or item.get("target_bbox") or [int(w * 0.5 - 40), int(h * 0.5 - 20), int(w * 0.5 + 40), int(h * 0.5 + 20)]
-                norm_bbox = [bbox[0] / max(w, 1), bbox[1] / max(h, 1), bbox[2] / max(w, 1), bbox[3] / max(h, 1)]
-                cx = (norm_bbox[0] + norm_bbox[2]) / 2.0
-                cy = (norm_bbox[1] + norm_bbox[3]) / 2.0
+
+                raw_bbox = item.get("bbox") or item.get("target_bbox")
+                raw_pt = item.get("point") or item.get("target_coord")
+
+                # Parse normalized click coordinates [cx, cy]
+                if raw_pt and len(raw_pt) == 2:
+                    px = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
+                    py = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
+                    cx, cy = px, py
+                elif raw_bbox and len(raw_bbox) == 4:
+                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
+                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
+                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
+                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                    cx = (b0 + b2) / 2.0
+                    cy = (b1 + b3) / 2.0
+                else:
+                    continue
+
+                # Ensure diversity by skipping duplicate click points
+                pt_key = (round(cx, 3), round(cy, 3))
+                if pt_key in seen_points:
+                    continue
+                seen_points.add(pt_key)
+
+                # Parse normalized bounding box [x1, y1, x2, y2]
+                if raw_bbox and len(raw_bbox) == 4:
+                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
+                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
+                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
+                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                    norm_bbox = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
+                else:
+                    norm_bbox = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
+
+                # Ensure minimum bbox hit envelope (at least 0.04 x 0.04)
+                bw = norm_bbox[2] - norm_bbox[0]
+                bh = norm_bbox[3] - norm_bbox[1]
+                if bw < 0.04:
+                    norm_bbox[0] = max(0.0, cx - 0.02)
+                    norm_bbox[2] = min(1.0, cx + 0.02)
+                if bh < 0.04:
+                    norm_bbox[1] = max(0.0, cy - 0.02)
+                    norm_bbox[3] = min(1.0, cy + 0.02)
+
+                # Scale retina/4K displays (e.g. 3360x2100) down to standard desktop canvas (max_dim=1280)
+                # to prevent allocating 9,000 visual tokens in SDPA attention while preserving exact [0, 1] coords
+                max_dim = 1280
+                if max(w, h) > max_dim:
+                    scale = max_dim / max(w, h)
+                    sw = max(28, (int(round(w * scale)) // 28) * 28)
+                    sh = max(28, (int(round(h * scale)) // 28) * 28)
+                    img = img.resize((sw, sh), Image.Resampling.BILINEAR)
+                    w, h = sw, sh
+
                 samples.append({
                     "id": f"showui_{len(samples)}",
                     "image": img,
                     "width": w,
                     "height": h,
                     "source": "showlab/ShowUI-desktop",
-                    "instruction": item.get("instruction") or item.get("query") or item.get("task") or "Click the target control",
+                    "instruction": item.get("instruction") or item.get("query") or item.get("task") or "Click target control",
                     "target_action": 0,  # left_click
                     "target_coord": [cx, cy],
                     "target_bbox": norm_bbox,
@@ -791,8 +843,20 @@ def run_overfit_sanity(
     model.to(device)
     model.train()
 
+    if torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    init_state = {k: v.clone() for k, v in model.state_dict().items()}
+    # Memory optimization: Store only trainable adapter weights on CPU (~15 MB)
+    # Never clone the 7.5GB frozen backbone in GPU VRAM to prevent CUDA OOM
+    head_keys = ["patch_proj", "query_proj", "pointer", "action_heads"]
+    trainable_state = {
+        k: v.detach().cpu().clone()
+        for k, v in model.state_dict().items()
+        if any(h in k for h in head_keys)
+    }
     results: Dict[str, Any] = {}
 
     if samples is not None and len(samples) > 0:
@@ -802,7 +866,7 @@ def run_overfit_sanity(
         hits = 0
 
         for idx, s in enumerate(samples):
-            model.load_state_dict(init_state)
+            model.load_state_dict(trainable_state, strict=False)
             w, h = s["width"], s["height"]
             img_raw = s["image"]
             if hasattr(img_raw, "resize"):
@@ -869,7 +933,7 @@ def run_overfit_sanity(
     ]
 
     for (h, w) in target_resolutions:
-        model.load_state_dict(init_state)
+        model.load_state_dict(trainable_state, strict=False)
 
         # Non-square patch grid: Qwen2.5-VL merges 2x2 14x14 patches into 28x28 tokens
         h_grid = max(2, (h // 28) * 2)
@@ -1176,6 +1240,12 @@ def run_ddp_training(
 
 
 def main():
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
     parser = argparse.ArgumentParser(description="Kaggle Dual-T4 DDP Training for GUI-Actor on Frozen Qwen2.5-VL")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Per-GPU batch size")
