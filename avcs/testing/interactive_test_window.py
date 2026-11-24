@@ -176,11 +176,13 @@ class InteractiveTestApp:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AVCS Phase B Interactive Test Target Window")
-    parser.add_argument("--state-file", required=True, help="Path to state JSON file")
-    parser.add_argument("--title", default="AVCS_M8_LIVE_TEST_TARGET", help="Window title")
+    parser.add_argument("--state-file", default=None, help="Path to state JSON file (default: runs/interactive_test_state.json)")
+    parser.add_argument("--title", default="AVCS_M8_LIVE_TEST_TARGET", help="Window title (default: AVCS_M8_LIVE_TEST_TARGET)")
     args = parser.parse_args()
 
-    app = InteractiveTestApp(state_file=Path(args.state_file), window_title=args.title)
+    state_path = Path(args.state_file) if args.state_file else Path("runs/interactive_test_state.json")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    app = InteractiveTestApp(state_file=state_path, window_title=args.title)
     app.run()
 
 

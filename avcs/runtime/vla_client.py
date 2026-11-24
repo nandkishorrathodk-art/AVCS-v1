@@ -37,7 +37,7 @@ class VLAClient:
         self,
         server_url: str = "http://localhost:8000",
         use_websocket: bool = True,
-        jpeg_quality: int = 75,
+        jpeg_quality: int = 68,
         timeout_s: float = 15.0,
     ) -> None:
         self.server_url = server_url.rstrip("/")
@@ -118,25 +118,39 @@ class VLAClient:
 
     def act(
         self,
-        frame: Union[np.ndarray, Image.Image],
+        frame: Union[np.ndarray, Image.Image, bytes, bytearray, memoryview],
         instruction: str = "Perform a left click on the primary target",
         width: int = 1280,
         height: int = 800,
+        seq: Optional[Union[int, str]] = None,
     ) -> Dict[str, Any]:
-        """Dispatches screen frame to VLA server and receives predicted action."""
-        # 1. Compress with low-latency Turbo JPEG
-        t_enc_start = time.time()
-        jpeg_bytes = encode_turbo_jpeg(frame, quality=self.jpeg_quality)
-        t_enc_ms = (time.time() - t_enc_start) * 1000.0
+        """Dispatches screen frame to VLA server and receives predicted action.
+
+        Supports raw numpy arrays, PIL Images, or pre-compressed JPEG bytes/memoryview
+        for zero-copy transmission.
+        """
+        # 1. Compress with low-latency Turbo JPEG (or zero-copy passthrough if already JPEG)
+        t_enc_start = time.perf_counter()
+        if isinstance(frame, (bytes, bytearray, memoryview)):
+            b = bytes(frame)
+            if len(b) >= 2 and b[0] == 0xFF and b[1] == 0xD8:
+                jpeg_bytes = b
+                t_enc_ms = 0.0
+            else:
+                jpeg_bytes = encode_turbo_jpeg(frame, quality=self.jpeg_quality)
+                t_enc_ms = (time.perf_counter() - t_enc_start) * 1000.0
+        else:
+            jpeg_bytes = encode_turbo_jpeg(frame, quality=self.jpeg_quality)
+            t_enc_ms = (time.perf_counter() - t_enc_start) * 1000.0
 
         if self.use_websocket:
             try:
-                return self._act_websocket(jpeg_bytes, instruction, width, height, t_enc_ms)
+                return self._act_websocket(jpeg_bytes, instruction, width, height, t_enc_ms, seq=seq)
             except Exception as exc:
                 logger.warning(f"WebSocket execution failed ({exc}); falling back to HTTP /act...")
                 self.close()
 
-        return self._act_http(jpeg_bytes, instruction, width, height, t_enc_ms)
+        return self._act_http(jpeg_bytes, instruction, width, height, t_enc_ms, seq=seq)
 
     def _act_websocket(
         self,
@@ -145,26 +159,34 @@ class VLAClient:
         width: int,
         height: int,
         t_enc_ms: float,
+        seq: Optional[Union[int, str]] = None,
     ) -> Dict[str, Any]:
         ws = self._ensure_ws_connected(instruction, width, height)
 
         # Build framed packet: [4-byte header_len] [header JSON] [jpeg binary]
-        header_bytes = json.dumps({
+        header_dict: Dict[str, Any] = {
             "instruction": instruction,
             "width": width,
             "height": height,
-        }).encode("utf-8")
+        }
+        if seq is not None:
+            header_dict["seq"] = seq
+
+        header_bytes = json.dumps(header_dict).encode("utf-8")
         packet = len(header_bytes).to_bytes(4, byteorder="big") + header_bytes + jpeg_bytes
 
-        t_net_start = time.time()
+        t_net_start = time.perf_counter()
         ws.send_binary(packet)
         raw_msg = ws.recv()
-        t_roundtrip_ms = (time.time() - t_net_start) * 1000.0
+        t_roundtrip_ms = (time.perf_counter() - t_net_start) * 1000.0
 
         result = json.loads(raw_msg)
         result["compression_ms"] = round(t_enc_ms, 2)
         result["roundtrip_ms"] = round(t_roundtrip_ms, 2)
         result["payload_bytes"] = len(jpeg_bytes)
+        result["total_e2e_ms"] = round(t_enc_ms + t_roundtrip_ms, 2)
+        if seq is not None and "seq" not in result:
+            result["seq"] = seq
         return result
 
     def _act_http(
@@ -174,14 +196,19 @@ class VLAClient:
         width: int,
         height: int,
         t_enc_ms: float,
+        seq: Optional[Union[int, str]] = None,
     ) -> Dict[str, Any]:
         b64_str = base64.b64encode(jpeg_bytes).decode("utf-8")
-        payload = json.dumps({
+        payload_dict: Dict[str, Any] = {
             "instruction": instruction,
             "image_base64": b64_str,
             "width": width,
             "height": height,
-        }).encode("utf-8")
+        }
+        if seq is not None:
+            payload_dict["seq"] = seq
+
+        payload = json.dumps(payload_dict).encode("utf-8")
 
         http_url = self._resolve_http_url()
         req = urllib.request.Request(
@@ -190,12 +217,15 @@ class VLAClient:
             headers={"Content-Type": "application/json"},
         )
 
-        t_net_start = time.time()
+        t_net_start = time.perf_counter()
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-        t_roundtrip_ms = (time.time() - t_net_start) * 1000.0
+        t_roundtrip_ms = (time.perf_counter() - t_net_start) * 1000.0
 
         result["compression_ms"] = round(t_enc_ms, 2)
         result["roundtrip_ms"] = round(t_roundtrip_ms, 2)
         result["payload_bytes"] = len(jpeg_bytes)
+        result["total_e2e_ms"] = round(t_enc_ms + t_roundtrip_ms, 2)
+        if seq is not None and "seq" not in result:
+            result["seq"] = seq
         return result

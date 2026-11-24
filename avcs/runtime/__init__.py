@@ -17,8 +17,20 @@ from avcs.runtime.skills_vault.cache import (
     UIStateAnchor,
 )
 from avcs.runtime.streamer import AceStreamer
-from avcs.runtime.turbo_jpeg import decode_turbo_jpeg, encode_turbo_jpeg
+from avcs.runtime.turbo_jpeg import (
+    decode_turbo_jpeg,
+    decode_turbo_jpeg_to_numpy,
+    encode_turbo_jpeg,
+)
 from avcs.runtime.vla_client import VLAClient
+from avcs.runtime.vla_engine import FastVLAInferenceEngine
+from avcs.runtime.deployment_spec import (
+    CUDAGraphCaptureBlueprint,
+    LatencyBudgetBreakdown,
+    QuantizationConfig,
+    QuantizationPrecision,
+    TRTLLMEngineProfile,
+)
 
 __all__ = [
     "AceAgent",
@@ -30,10 +42,17 @@ __all__ = [
     "AnchorVerifiedSkillCache",
     "CognitivePlanner",
     "CustomLLMClient",
+    "CUDAGraphCaptureBlueprint",
     "decode_turbo_jpeg",
+    "decode_turbo_jpeg_to_numpy",
     "encode_turbo_jpeg",
+    "FastVLAInferenceEngine",
+    "LatencyBudgetBreakdown",
+    "QuantizationConfig",
+    "QuantizationPrecision",
     "SkillRecord",
     "StepRecord",
+    "TRTLLMEngineProfile",
     "UIStateAnchor",
     "VLAClient",
 ]

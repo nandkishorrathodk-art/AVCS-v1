@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import wave
@@ -96,6 +97,18 @@ class VoiceProfile:
             pitch=45,
             amplitude=175,
             word_gap_ms=4,
+        )
+
+    @classmethod
+    def natural(cls) -> "VoiceProfile":
+        """Clean, natural American English voice profile without robotic accents or native distortions."""
+        return cls(
+            language="en-us",
+            speed_wpm=160,
+            pitch=50,
+            amplitude=180,
+            word_gap_ms=2,
+            voice_variant="natural-en",
         )
 
 
@@ -295,6 +308,255 @@ class EspeakNgEngine(TtsEngine):
                 pass
 
 
+class NeuralVoiceModelEngine(TtsEngine):
+    """Deep learning neural voice model engine.
+
+    Synthesizes rich, human-quality neural speech using transformer-based neural vocoder models
+    (Microsoft Neural Voice models: en-US-AriaNeural, en-US-GuyNeural, en-US-JennyNeural).
+    Produces natural prosody, breathing, intonation, and zero robotic native-ness.
+    """
+
+    name = "neural-voice"
+
+    def __init__(self, voice_model: str = "en-US-AriaNeural") -> None:
+        self.voice_model = voice_model
+        self._current_alias: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def available(self) -> bool:
+        try:
+            import edge_tts
+            return True
+        except ImportError:
+            return False
+
+    def synthesize(self, text: str, profile: VoiceProfile) -> PcmClip:
+        if not self.available():
+            raise EngineNotAvailable("edge_tts neural speech package is not available")
+        text = (text or "").strip()
+        if not text:
+            return PcmClip(samples=np.zeros(0, dtype=np.int16), sample_rate=24000)
+
+        import asyncio
+        import edge_tts
+
+        voice = profile.voice_variant if profile.voice_variant and "Neural" in profile.voice_variant else self.voice_model
+
+        rate_delta = int(round((profile.speed_wpm - 165) / 1.65))
+        rate_str = f"{rate_delta:+d}%" if rate_delta != 0 else "+0%"
+
+        async def _synthesize():
+            communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+            audio_bytes = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_bytes.extend(chunk["data"])
+            return bytes(audio_bytes)
+
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        mp3_bytes = ex.submit(lambda: asyncio.run(_synthesize())).result(timeout=20)
+                else:
+                    mp3_bytes = loop.run_until_complete(_synthesize())
+            except RuntimeError:
+                mp3_bytes = asyncio.run(_synthesize())
+
+            clip = PcmClip(samples=np.zeros(len(mp3_bytes), dtype=np.int16), sample_rate=24000)
+            clip._mp3_data = mp3_bytes
+            return clip
+        except Exception as exc:
+            raise SynthesisError(f"Neural voice model synthesis failed: {exc}") from exc
+
+    def play(self, clip: PcmClip) -> bool:
+        if clip.is_empty:
+            return False
+        mp3_data = getattr(clip, "_mp3_data", None)
+        if not mp3_data:
+            wav_bytes = clip.to_wav_bytes()
+            if sys.platform == "win32":
+                try:
+                    import winsound
+                    winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+                    return True
+                except Exception:
+                    return False
+            return False
+
+        if sys.platform != "win32":
+            return False
+
+        import ctypes
+        import tempfile
+        import time
+
+        fd, path = tempfile.mkstemp(suffix=".mp3", prefix="avcs_neural_play_")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(mp3_data)
+
+        winmm = ctypes.windll.winmm
+        alias = f"avcs_voice_{int(time.time() * 1000) % 100000}"
+        with self._lock:
+            self._current_alias = alias
+
+        try:
+            winmm.mciSendStringW(f'open "{path}" type mpegvideo alias {alias}', None, 0, None)
+            winmm.mciSendStringW(f'play {alias} wait', None, 0, None)
+            winmm.mciSendStringW(f'close {alias}', None, 0, None)
+            return True
+        except Exception as exc:
+            raise AudioDeviceError(f"Neural voice playback error: {exc}") from exc
+        finally:
+            with self._lock:
+                if self._current_alias == alias:
+                    self._current_alias = None
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def stop(self) -> None:
+        if sys.platform == "win32":
+            import ctypes
+            winmm = ctypes.windll.winmm
+            with self._lock:
+                if self._current_alias:
+                    try:
+                        winmm.mciSendStringW(f"stop {self._current_alias}", None, 0, None)
+                        winmm.mciSendStringW(f"close {self._current_alias}", None, 0, None)
+                    except Exception:
+                        pass
+                    self._current_alias = None
+
+
+class WindowsNaturalSpeechEngine(TtsEngine):
+    """Natural, high-clarity speech synthesis for Windows using SAPI5 / Windows Media.
+
+    Provides clean, natural English pronunciation with zero robotic native-ness or awkward phonetics.
+    Outputs high-quality 22.05kHz mono PCM and plays via hardware audio with stop/barge-in support.
+    """
+
+    name = "windows-natural"
+
+    def __init__(self, voice_name: Optional[str] = None) -> None:
+        self.voice_name = voice_name
+        self._available = False
+        if sys.platform == "win32":
+            co_init = False
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                co_init = True
+            except Exception:
+                pass
+            try:
+                import win32com.client
+                speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                self._available = True
+            except Exception:
+                self._available = False
+            finally:
+                if co_init:
+                    try:
+                        import pythoncom
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
+
+    def available(self) -> bool:
+        return self._available and sys.platform == "win32"
+
+    def synthesize(self, text: str, profile: VoiceProfile) -> PcmClip:
+        if not self.available():
+            raise EngineNotAvailable("Windows SAPI5 voice engine is not available on this platform")
+        text = (text or "").strip()
+        if not text:
+            return PcmClip(samples=np.zeros(0, dtype=np.int16), sample_rate=22050)
+
+        import win32com.client
+        import tempfile
+        import os
+        import wave
+
+        co_init = False
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            co_init = True
+        except Exception:
+            pass
+
+        fd, path = tempfile.mkstemp(suffix=".wav", prefix="avcs_natural_tts_")
+        os.close(fd)
+        try:
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            if self.voice_name:
+                for v in speaker.GetVoices():
+                    if self.voice_name.lower() in v.GetDescription().lower():
+                        speaker.Voice = v
+                        break
+            else:
+                for v in speaker.GetVoices():
+                    desc = v.GetDescription().lower()
+                    if "zira" in desc or "natural" in desc or "jenny" in desc or "aria" in desc:
+                        speaker.Voice = v
+                        break
+
+            rate_val = int(round((profile.speed_wpm - 160) / 15.0))
+            speaker.Rate = max(-10, min(10, rate_val))
+            speaker.Volume = max(0, min(100, int(profile.amplitude / 2.0)))
+
+            stream = win32com.client.Dispatch("SAPI.SpFileStream")
+            stream.Open(path, 3)  # 3 = SSFMCreateForWrite
+            speaker.AudioOutputStream = stream
+            speaker.Speak(text)
+            stream.Close()
+
+            with open(path, "rb") as f:
+                data = f.read()
+            if not data:
+                raise SynthesisError("SAPI produced empty audio")
+            return PcmClip.from_wav_bytes(data)
+        except Exception as exc:
+            raise SynthesisError(f"Windows natural speech synthesis failed: {exc}") from exc
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            if co_init:
+                try:
+                    import pythoncom
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def play(self, clip: PcmClip) -> bool:
+        if clip.is_empty:
+            return False
+        if sys.platform != "win32":
+            return False
+        try:
+            import winsound
+            wav_bytes = clip.to_wav_bytes()
+            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+            return True
+        except Exception as exc:
+            raise AudioDeviceError(f"Audio playback error: {exc}") from exc
+
+    def stop(self) -> None:
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.PlaySound(None, 0)
+            except Exception:
+                pass
+
+
 class BrowserEngine(TtsEngine):
     """A mouth for a browser page instead of the local sound card.
 
@@ -436,8 +698,16 @@ class Speaker:
         if engine is not None:
             self.engine = engine
         else:
-            espeak = EspeakNgEngine()
-            self.engine = espeak if espeak.available() else NullEngine()
+            neural = NeuralVoiceModelEngine()
+            if neural.available():
+                self.engine = neural
+            else:
+                win_nat = WindowsNaturalSpeechEngine()
+                if win_nat.available():
+                    self.engine = win_nat
+                else:
+                    espeak = EspeakNgEngine()
+                    self.engine = espeak if espeak.available() else NullEngine()
 
     @property
     def engine_name(self) -> str:

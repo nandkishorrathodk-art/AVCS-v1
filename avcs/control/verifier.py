@@ -495,79 +495,53 @@ class VisualRippleVerifier:
             res.elapsed_ms = (time.perf_counter() - t_global) * 1000.0
             return res
 
-        # Tier 2: Micro-Jitter Retry (Hitbox Border Offset)
-        # Offset by +4 pixels (approx +0.003 normalized) to avoid dead border zones
-        offsets = [(0.003, 0.003), (-0.003, -0.003), (0.003, -0.003)]
-        for ox, oy in offsets:
-            jitter_target = (float(np.clip(tx + ox, 0.0, 1.0)), float(np.clip(ty + oy, 0.0, 1.0)))
-            pre_retry = self.eye.observe()
-            self._move_cursor(jitter_target[0], jitter_target[1])
-
-            if action_type == "double_click":
-                self.driver.double_click(button=button)
-            else:
-                self.driver.click(button=button)
-
-            res_jitter = self.verify_action(
-                f"retry_{action_type}@{jitter_target}",
-                jitter_target,
-                pre_retry,
-                is_window_launch=is_launch,
+        # Titlebar and Window Chrome Protection:
+        # Strictly BAN micro-jitter retries and spiral clicks in top window chrome / tab bar
+        # where y < 40px (normalized ty < 0.05, e.g. close buttons, tabs, menu bar)
+        if ty < 0.05:
+            res.status = VerificationStatus.ESCALATE_BLOCKED
+            res.recovery_attempt = 1
+            res.causal_summary = (
+                f"Micro-jitter retry strictly banned in window chrome / titlebar (ty={ty:.3f} < 0.05). "
+                "Escalating to System 2 without firing blind clicks."
             )
-            if res_jitter.is_successful:
-                res_jitter.status = VerificationStatus.VERIFIED
-                res_jitter.recovery_attempt = 2
-                res_jitter.causal_summary = f"Recovered via Tier 2 micro-jitter offset ({ox:+.3f},{oy:+.3f})."
-                return res_jitter
-
-        if max_recovery_tier < 3:
-            res.status = VerificationStatus.RETRY_MICRO_JITTER
+            res.elapsed_ms = (time.perf_counter() - t_global) * 1000.0
             return res
 
-        # Keyboard activation is only safe when the caller names the intended key.
-        if keyboard_fallback_key is not None and action_type == "click":
-            pre_kb = self.eye.observe()
-            if hasattr(self.driver, "press_key"):
-                self.driver.press_key(keyboard_fallback_key)
-            res_kb = self.verify_action(
-                f"keyboard_{keyboard_fallback_key}", target, pre_kb
-            )
-            if res_kb.is_successful:
-                res_kb.status = VerificationStatus.VERIFIED
-                res_kb.recovery_attempt = 3
-                res_kb.causal_summary = (
-                    f"Recovered via explicit keyboard activation "
-                    f"({keyboard_fallback_key})."
-                )
-                return res_kb
+        # Tier 2: Single Guarded Re-check (Hitbox Border Offset)
+        # Offset by +4 pixels (approx +0.003 normalized) with 150ms dwell to allow UI animation to settle
+        time.sleep(0.15)
+        ox, oy = (0.003, 0.003)
+        jitter_target = (float(np.clip(tx + ox, 0.0, 1.0)), float(np.clip(ty + oy, 0.0, 1.0)))
+        pre_retry = self.eye.observe()
+        self._move_cursor(jitter_target[0], jitter_target[1])
 
-        if max_recovery_tier < 4:
-            res.status = (
-                VerificationStatus.KEYBOARD_FALLBACK
-                if keyboard_fallback_key is not None
-                else VerificationStatus.RETRY_MICRO_JITTER
-            )
-            return res
+        if action_type == "double_click":
+            self.driver.double_click(button=button)
+        else:
+            self.driver.click(button=button)
 
-        # Tier 4: Saccadic Re-grounding (Re-acquire target)
-        if action_type == "click" and hasattr(self.eye, "look_at") and getattr(self.eye, "_active_query", None):
-            reground_res = self.eye.look_at(self.eye._active_query)
-            if reground_res.target_coord != target:
-                new_target = reground_res.target_coord
-                pre_reground = self.eye.observe()
-                self._move_cursor(new_target[0], new_target[1])
-                self.driver.click(button=button)
-                res_reground = self.verify_action(
-                    f"reground_click@{new_target}", new_target, pre_reground
-                )
-                if res_reground.is_successful:
-                    res_reground.status = VerificationStatus.VERIFIED
-                    res_reground.recovery_attempt = 4
-                    res_reground.causal_summary = f"Recovered via Tier 4 saccadic re-grounding to {new_target}."
-                    return res_reground
+        res_jitter = self.verify_action(
+            f"retry_{action_type}@{jitter_target}",
+            jitter_target,
+            pre_retry,
+            is_window_launch=is_launch,
+        )
+        if res_jitter.is_successful:
+            res_jitter.status = VerificationStatus.VERIFIED
+            res_jitter.recovery_attempt = 2
+            res_jitter.causal_summary = f"Recovered via single guarded retry at offset ({ox:+.3f},{oy:+.3f})."
+            return res_jitter
 
-        # Tier 5: Escalate Blocked
+        # Escalation to System 2: Guarded retry exhausted; suppress blind click spam
         res.status = VerificationStatus.ESCALATE_BLOCKED
+        res.recovery_attempt = 3
+        res.causal_summary = (
+            "Guarded ripple re-check unconfirmed; blind clicking suppressed. "
+            "Escalating frame to DAgger queue and System 2."
+        )
+        res.elapsed_ms = (time.perf_counter() - t_global) * 1000.0
+        return res
         res.recovery_attempt = 5
         res.causal_summary = "All 5 recovery tiers exhausted; target unresponsive or blocked."
         res.elapsed_ms = (time.perf_counter() - t_global) * 1000.0

@@ -34,6 +34,7 @@ class ScreenCapture:
         self.monitor = monitor
         self._sct = None
         self._seq: int = 0
+        self._hdesk = None
 
     def open(self) -> "ScreenCapture":
         try:
@@ -47,6 +48,7 @@ class ScreenCapture:
                     u32 = ctypes.windll.user32
                     hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
                     if hdesk:
+                        self._hdesk = hdesk
                         u32.SetThreadDesktop(hdesk)
                 except Exception:
                     pass
@@ -85,6 +87,19 @@ class ScreenCapture:
                 self._sct.close()
             finally:
                 self._sct = None
+        if getattr(self, "_hdesk", None):
+            try:
+                import ctypes
+                ctypes.windll.user32.CloseDesktop(self._hdesk)
+            except Exception:
+                pass
+            self._hdesk = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "ScreenCapture":
         return self.open()
@@ -233,6 +248,8 @@ class Win32FastCapture:
         self._seq: int = 0
 
     def open(self) -> "Win32FastCapture":
+        if self._is_open:
+            return self
         if sys.platform != "win32":
             raise CaptureError("Win32FastCapture is only supported on Windows")
         try:
@@ -240,6 +257,8 @@ class Win32FastCapture:
             from ctypes import wintypes
         except ImportError as exc:
             raise CaptureError("ctypes is required for Win32FastCapture") from exc
+
+        self._cleanup_handles()
 
         self._user32 = ctypes.windll.user32
         self._gdi32 = ctypes.windll.gdi32
@@ -258,6 +277,8 @@ class Win32FastCapture:
         self._gdi32.CreateDIBSection.restype = wintypes.HBITMAP
         self._gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
         self._gdi32.SelectObject.restype = wintypes.HGDIOBJ
+        self._gdi32.GetStockObject.argtypes = [ctypes.c_int]
+        self._gdi32.GetStockObject.restype = wintypes.HGDIOBJ
         self._gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
         self._gdi32.DeleteObject.restype = wintypes.BOOL
         self._gdi32.DeleteDC.argtypes = [wintypes.HDC]
@@ -345,46 +366,51 @@ class Win32FastCapture:
         bmi.bmiHeader.biBitCount = 32
         bmi.bmiHeader.biCompression = 0  # BI_RGB
 
-        self._h_screen_dc = self._user32.GetDC(0)
-        if not self._h_screen_dc:
-            raise CaptureError("Failed to acquire Windows screen DC")
+        try:
+            self._h_screen_dc = self._user32.GetDC(0)
+            if not self._h_screen_dc:
+                raise CaptureError("Failed to acquire Windows screen DC")
 
-        self._h_mem_dc = self._gdi32.CreateCompatibleDC(self._h_screen_dc)
-        if not self._h_mem_dc:
-            self._user32.ReleaseDC(0, self._h_screen_dc)
-            self._h_screen_dc = None
-            raise CaptureError("Failed to create Windows compatible DC")
+            self._h_mem_dc = self._gdi32.CreateCompatibleDC(self._h_screen_dc)
+            if not self._h_mem_dc:
+                raise CaptureError("Failed to create Windows compatible DC")
 
-        self._bits_ptr = ctypes.c_void_p()
-        self._h_bitmap = self._gdi32.CreateDIBSection(
-            self._h_mem_dc,
-            ctypes.byref(bmi),
-            0,
-            ctypes.byref(self._bits_ptr),
-            None,
-            0,
-        )
-        if not self._h_bitmap or not self._bits_ptr:
+            self._bits_ptr = ctypes.c_void_p()
+            self._h_bitmap = self._gdi32.CreateDIBSection(
+                self._h_mem_dc,
+                ctypes.byref(bmi),
+                0,
+                ctypes.byref(self._bits_ptr),
+                None,
+                0,
+            )
+            if not self._h_bitmap or not self._bits_ptr:
+                raise CaptureError("Failed to allocate Win32 DIBSection")
+
+            self._h_old_bitmap = self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
+            HGDI_ERROR = 0xFFFFFFFFFFFFFFFF if ctypes.sizeof(ctypes.c_void_p) == 8 else 0xFFFFFFFF
+            if not self._h_old_bitmap or self._h_old_bitmap in (0, -1, HGDI_ERROR):
+                self._h_old_bitmap = None
+                raise CaptureError("Failed to select Win32 DIBSection bitmap into DC")
+
+            if self._dst_w != self._src_w or self._dst_h != self._src_h:
+                HALFTONE = 4
+                self._gdi32.SetStretchBltMode(self._h_mem_dc, HALFTONE)
+                self._gdi32.SetBrushOrgEx(self._h_mem_dc, 0, 0, None)
+
+            buffer_from_memory = ctypes.pythonapi.PyMemoryView_FromMemory
+            buffer_from_memory.restype = ctypes.py_object
+            buffer_from_memory.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int]
+
+            self._mem_view = buffer_from_memory(self._bits_ptr, self._dst_w * self._dst_h * 4, 0x200)
+            self._raw_np = np.frombuffer(self._mem_view, dtype=np.uint8).reshape((self._dst_h, self._dst_w, 4))
+            self._raw_flat = self._raw_np.reshape(-1, 4)
+            self._rgb_buffer = np.empty((self._dst_h, self._dst_w, 3), dtype=np.uint8)
+            self._rgb_flat = self._rgb_buffer.reshape(-1, 3)
+            self._is_open = True
+        except Exception:
             self._cleanup_handles()
-            raise CaptureError("Failed to allocate Win32 DIBSection")
-
-        self._h_old_bitmap = self._gdi32.SelectObject(self._h_mem_dc, self._h_bitmap)
-
-        if self._dst_w != self._src_w or self._dst_h != self._src_h:
-            HALFTONE = 4
-            self._gdi32.SetStretchBltMode(self._h_mem_dc, HALFTONE)
-            self._gdi32.SetBrushOrgEx(self._h_mem_dc, 0, 0, None)
-
-        buffer_from_memory = ctypes.pythonapi.PyMemoryView_FromMemory
-        buffer_from_memory.restype = ctypes.py_object
-        buffer_from_memory.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int]
-
-        self._mem_view = buffer_from_memory(self._bits_ptr, self._dst_w * self._dst_h * 4, 0x200)
-        self._raw_np = np.frombuffer(self._mem_view, dtype=np.uint8).reshape((self._dst_h, self._dst_w, 4))
-        self._raw_flat = self._raw_np.reshape(-1, 4)
-        self._rgb_buffer = np.empty((self._dst_h, self._dst_w, 3), dtype=np.uint8)
-        self._rgb_flat = self._rgb_buffer.reshape(-1, 3)
-        self._is_open = True
+            raise
         return self
 
     def grab(self, copy: bool = True, out: Optional[np.ndarray] = None) -> np.ndarray:
@@ -425,19 +451,23 @@ class Win32FastCapture:
                     self._user32.ReleaseDC(0, self._h_screen_dc)
                 except Exception:
                     pass
-            self._h_screen_dc = self._user32.GetDC(0)
-            if self._dst_w == self._src_w and self._dst_h == self._src_h:
-                ret = self._gdi32.BitBlt(
-                    self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
-                    self._h_screen_dc, self._src_x, self._src_y, SRCCOPY,
-                )
+            self._h_screen_dc = self._user32.GetDC(0) if self._user32 else None
+            if self._h_screen_dc:
+                if self._dst_w == self._src_w and self._dst_h == self._src_h:
+                    ret = self._gdi32.BitBlt(
+                        self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                        self._h_screen_dc, self._src_x, self._src_y, SRCCOPY,
+                    )
+                else:
+                    ret = self._gdi32.StretchBlt(
+                        self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
+                        self._h_screen_dc, self._src_x, self._src_y,
+                        self._src_w, self._src_h, SRCCOPY,
+                    )
             else:
-                ret = self._gdi32.StretchBlt(
-                    self._h_mem_dc, 0, 0, self._dst_w, self._dst_h,
-                    self._h_screen_dc, self._src_x, self._src_y,
-                    self._src_w, self._src_h, SRCCOPY,
-                )
+                ret = False
             if not ret:
+                self._cleanup_handles()
                 raise CaptureError("Win32 BitBlt/StretchBlt failed")
         self._gdi32.GdiFlush()
 
@@ -480,12 +510,33 @@ class Win32FastCapture:
         return self._seq
 
     def _cleanup_handles(self) -> None:
-        if self._gdi32 and self._h_mem_dc and hasattr(self, "_h_old_bitmap") and self._h_old_bitmap:
+        import ctypes
+        HGDI_ERROR = 0xFFFFFFFFFFFFFFFF if ctypes.sizeof(ctypes.c_void_p) == 8 else 0xFFFFFFFF
+        if self._gdi32 and self._h_mem_dc:
+            if hasattr(self, "_h_old_bitmap") and self._h_old_bitmap and self._h_old_bitmap not in (0, -1, HGDI_ERROR):
+                try:
+                    self._gdi32.SelectObject(self._h_mem_dc, self._h_old_bitmap)
+                except Exception:
+                    pass
+                self._h_old_bitmap = None
+            elif self._h_bitmap:
+                try:
+                    stock_bmp = self._gdi32.GetStockObject(21)  # DEFAULT_BITMAP
+                    if stock_bmp:
+                        self._gdi32.SelectObject(self._h_mem_dc, stock_bmp)
+                except Exception:
+                    pass
+        self._raw_np = None
+        self._raw_flat = None
+        self._rgb_buffer = None
+        self._rgb_flat = None
+        if self._mem_view is not None:
             try:
-                self._gdi32.SelectObject(self._h_mem_dc, self._h_old_bitmap)
+                self._mem_view.release()
             except Exception:
                 pass
-            self._h_old_bitmap = None
+            self._mem_view = None
+        self._bits_ptr = None
         if self._gdi32 and self._h_bitmap:
             try:
                 self._gdi32.DeleteObject(self._h_bitmap)
@@ -510,16 +561,16 @@ class Win32FastCapture:
             except Exception:
                 pass
             self._h_desk = None
-        self._raw_np = None
-        self._raw_flat = None
-        self._rgb_buffer = None
-        self._rgb_flat = None
-        self._mem_view = None
-        self._bits_ptr = None
         self._is_open = False
 
     def close(self) -> None:
         self._cleanup_handles()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "Win32FastCapture":
         return self.open()
@@ -583,6 +634,8 @@ class ThreadedScreenCapture:
         return self
 
     def _worker(self) -> None:
+        hdesk = None
+        u32 = None
         if sys.platform == "win32":
             try:
                 import ctypes
@@ -592,30 +645,37 @@ class ThreadedScreenCapture:
                     u32.SetThreadDesktop(hdesk)
             except Exception:
                 pass
-        sleep_interval = 1.0 / max(1.0, self.target_fps * 1.2) if self.target_fps > 0 else 0.005
-        has_grab_seq = hasattr(self.source, "grab_with_sequence") and callable(self.source.grab_with_sequence)
-        while self._running:
-            try:
-                if has_grab_seq:
-                    frame, src_seq = self.source.grab_with_sequence()
-                else:
-                    frame = self.source.grab()
-                    src_seq = None
-                now = time.perf_counter()
-                with self._cond:
-                    self._latest_frame = frame
-                    if src_seq is not None:
-                        self._seq = max(self._seq + 1, src_seq)
+        try:
+            sleep_interval = 1.0 / max(1.0, self.target_fps * 1.2) if self.target_fps > 0 else 0.005
+            has_grab_seq = hasattr(self.source, "grab_with_sequence") and callable(self.source.grab_with_sequence)
+            while self._running:
+                try:
+                    if has_grab_seq:
+                        frame, src_seq = self.source.grab_with_sequence()
                     else:
-                        self._seq += 1
-                    self._last_grab_time = now
-                    self._last_error = None
-                    self._cond.notify_all()
-            except Exception as exc:
-                with self._cond:
-                    self._last_error = exc
-                    self._cond.notify_all()
-            time.sleep(sleep_interval)
+                        frame = self.source.grab()
+                        src_seq = None
+                    now = time.perf_counter()
+                    with self._cond:
+                        self._latest_frame = frame
+                        if src_seq is not None:
+                            self._seq = max(self._seq + 1, src_seq)
+                        else:
+                            self._seq += 1
+                        self._last_grab_time = now
+                        self._last_error = None
+                        self._cond.notify_all()
+                except Exception as exc:
+                    with self._cond:
+                        self._last_error = exc
+                        self._cond.notify_all()
+                time.sleep(sleep_interval)
+        finally:
+            if hdesk and u32:
+                try:
+                    u32.CloseDesktop(hdesk)
+                except Exception:
+                    pass
 
     def grab(self) -> np.ndarray:
         frame, _ = self.grab_with_sequence()
@@ -654,6 +714,12 @@ class ThreadedScreenCapture:
             self._thread = None
         if hasattr(self.source, "close") and callable(self.source.close):
             self.source.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def trigger_motion(self, x: float, y: float) -> None:
         """Forwards motion triggers to underlying source if supported."""

@@ -330,7 +330,7 @@ class ConvGRUCell(nn.Module):
       - Reset gate:    r_t = sigmoid(W_xr * x_t + W_hr * h_{t-1} + b_r)
       - Update gate:   z_t = sigmoid(W_xz * x_t + W_hz * h_{t-1} + b_z), b_z initialized to +1.0
       - Candidate:     h_tilde = tanh(W_xh * x_t + W_hh * (r_t * h_{t-1}) + b_h)
-      - Output state:  h_t = (1 - z_t) * h_{t-1} + z_t * h_tilde
+      - Output state:  h_t = z_t * h_{t-1} + (1 - z_t) * h_tilde
 
     Parameter Target: ~221.4k parameters (Calculated: 221,376).
     """
@@ -392,8 +392,8 @@ class ConvGRUCell(nn.Module):
         candidate_input = torch.cat([x_t, r_t * h_prev], dim=1)  # (B, 128, 16, 16)
         h_tilde = torch.tanh(self.candidate(candidate_input))    # Candidate state
 
-        # Final state update: (1 - z_t) * h_{t-1} + z_t * h_tilde
-        h_t = (1.0 - z_t) * h_prev + z_t * h_tilde
+        # Final state update: h_t = z_t * h_prev + (1.0 - z_t) * h_tilde
+        h_t = z_t * h_prev + (1.0 - z_t) * h_tilde
         return h_t
 
 
@@ -565,14 +565,11 @@ class StreamingVisualCortexV2(nn.Module):
 
         if prev_state is None:
             do_hard_reset = True
-        elif dropped_frame:
-            do_hard_reset = True
-            delta_t = max(0.0, float(timestamp - prev_state.timestamp))
         else:
-            delta_t = float(timestamp - prev_state.timestamp)
-            delta_t = max(delta_t, 0.0)
-            if delta_t >= self.max_state_gap_seconds:
+            raw_delta = float(timestamp - prev_state.timestamp)
+            if dropped_frame or raw_delta < 0.0 or raw_delta >= self.max_state_gap_seconds:
                 do_hard_reset = True
+            delta_t = max(0.0, raw_delta)
 
         # 4. Hidden State Decay & Feature Delta
         if do_hard_reset or prev_state is None:
@@ -593,11 +590,19 @@ class StreamingVisualCortexV2(nn.Module):
         else:
             # Smooth exponential decay: h_decayed = h_{t-1} * exp(-lambda * delta_t) with lambda = 0.5
             decay_factor = math.exp(-self.decay_lambda * delta_t)
-            h_prev = prev_state.hidden * decay_factor
-            prev_f = prev_state.previous_features
+            h_prev = prev_state.hidden.to(device=f_t.device, dtype=f_t.dtype) * decay_factor
+            prev_f = prev_state.previous_features.to(device=f_t.device, dtype=f_t.dtype)
             f_delta = torch.abs(f_t - prev_f)
-            z_pre_latent = prev_state.latent
-            prev_predicted_latent = prev_state.predicted_next_latent
+            z_pre_latent = (
+                prev_state.latent.to(device=f_t.device, dtype=f_t.dtype)
+                if prev_state.latent is not None
+                else None
+            )
+            prev_predicted_latent = (
+                prev_state.predicted_next_latent.to(device=f_t.device, dtype=f_t.dtype)
+                if prev_state.predicted_next_latent is not None
+                else None
+            )
             step_count = prev_state.step_count + 1
 
         # 5. Temporal Recurrent Ingestion: Ingest optical feature difference alongside f_t

@@ -1,7 +1,31 @@
 """AVCS Visual Cortex subsystem."""
 
 from avcs.cortex.gate import StabilityGateResult, VisualCortexGate
-from avcs.cortex.model import CortexTemporalState, CortexV2Output, StreamingVisualCortexV2
+from avcs.cortex.model import (
+    ACTION_VOCAB_10,
+    MODIFIER_KEYS,
+    CortexTemporalState,
+    CortexV2Output,
+    FlowMatchingDragExpert,
+    GUIActorPatchPointer,
+    GUIPointerOutput,
+    LiteTrain,
+    ParallelActionHeads,
+    ParallelActionOutput,
+    PrunedTokens,
+    PureRGBVLAOutput,
+    PureRGBVLAPolicy,
+    RollingKVMemory,
+    RollingMemoryState,
+    ShowUITokenPruner,
+    StreamingVisualCortexV2,
+    UnifiedMultiTaskLoss,
+    VLACortexConfig,
+    VLACortexModel,
+    VLACortexOutput,
+    VLA_ACTIONS,
+    overfit_check,
+)
 from avcs.cortex.preprocessor import EdgeLuminancePreprocessor
 
 __all__ = [
@@ -11,4 +35,24 @@ __all__ = [
     "CortexTemporalState",
     "CortexV2Output",
     "EdgeLuminancePreprocessor",
+    "VLACortexConfig",
+    "VLACortexModel",
+    "VLACortexOutput",
+    "VLA_ACTIONS",
+    "ACTION_VOCAB_10",
+    "MODIFIER_KEYS",
+    "PrunedTokens",
+    "ShowUITokenPruner",
+    "GUIPointerOutput",
+    "GUIActorPatchPointer",
+    "ParallelActionOutput",
+    "ParallelActionHeads",
+    "FlowMatchingDragExpert",
+    "RollingMemoryState",
+    "RollingKVMemory",
+    "PureRGBVLAOutput",
+    "PureRGBVLAPolicy",
+    "LiteTrain",
+    "UnifiedMultiTaskLoss",
+    "overfit_check",
 ]

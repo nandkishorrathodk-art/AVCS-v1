@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import io
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -83,7 +84,7 @@ class VisualCortexGate:
         cortex: Optional[Union[StreamingVisualCortexV2, EyeStream, Any]] = None,
         device: str = "cpu",
         stability_threshold: float = 0.015,
-        spinner_threshold: float = 0.50,
+        spinner_threshold: float = 0.65,
         change_threshold: float = 0.10,
         source: str = "synthetic",
         load_weights: bool = False,
@@ -193,6 +194,10 @@ class VisualCortexGate:
         raw_rgb = self._convert_to_numpy_rgb(input_data)
 
         H, W = raw_rgb.shape[:2]
+        if H <= 0 or W <= 0:
+            raw_rgb = np.full((128, 128, 3), 128, dtype=np.uint8)
+            H, W = 128, 128
+
         if (H, W) != (128, 128):
             sy = float(H) / 128.0
             sx = float(W) / 128.0
@@ -203,7 +208,7 @@ class VisualCortexGate:
             frame_small = raw_rgb
 
         t_frame = torch.from_numpy(np.ascontiguousarray(frame_small)).float()
-        if t_frame.max() > 1.0:
+        if t_frame.numel() > 0 and t_frame.max() > 1.0:
             t_frame = t_frame / 255.0
         t_frame = t_frame.permute(2, 0, 1).unsqueeze(0).to(self.device)  # (1, 3, 128, 128)
 
@@ -233,7 +238,7 @@ class VisualCortexGate:
                 return StabilityGateResult(
                     is_stable=frame.is_stable,
                     surprise_score=round(frame.surprise_score, 4),
-                    spinner_active=not frame.is_stable,
+                    spinner_active=bool(getattr(frame, "spinner_active", False)),
                     spatial_delta=round(frame.surprise_score / 10.0, 5),
                     latency_ms=round(dt_ms, 2),
                     details="UI settled and stable." if frame.is_stable else "Live EyeStream optical drift detected.",
@@ -249,7 +254,7 @@ class VisualCortexGate:
                 eye_state = self.cortex.observe(frame=raw_rgb)
                 dt_ms = (time.perf_counter() - t_f0) * 1000.0
                 is_stable = bool(eye_state.is_stable and (eye_state.motion_magnitude < self.stability_threshold))
-                spinner_active = eye_state.stability in ("busy", "tracking", "dynamic_video")
+                spinner_active = bool(getattr(eye_state, "spinner_active", False) or getattr(eye_state, "stability", "") == "spinner")
                 details = f"HumanEye sensory gate: stability={eye_state.stability}, motion={eye_state.motion_magnitude:.4f}, surprise={eye_state.surprise_score:.4f}"
                 return StabilityGateResult(
                     is_stable=is_stable,
@@ -273,14 +278,23 @@ class VisualCortexGate:
             current_features = out.temporal_state.previous_features
             self.temporal_state = out.temporal_state
 
-            if self.prev_features is not None:
+            if (
+                self.prev_features is not None
+                and self.prev_features.shape == current_features.shape
+                and self.prev_features.device == current_features.device
+            ):
                 spatial_delta = float(torch.abs(current_features - self.prev_features).mean().item())
             else:
                 spatial_delta = 0.0
             self.prev_features = current_features.clone()
 
+            if not math.isfinite(spatial_delta):
+                spatial_delta = 0.0
+
             surprise = float(np.clip(spatial_delta * 10.0, 0.0, 1.0))
             spinner_prob = float(torch.sigmoid(out.spinner_activity_logit[0, 0]).item())
+            if not math.isfinite(spinner_prob):
+                spinner_prob = 0.0
             spinner_active = (spinner_prob >= self.spinner_threshold) and (spatial_delta >= 0.01)
             is_stable = (spatial_delta < self.stability_threshold) and not spinner_active
 
@@ -354,32 +368,58 @@ class VisualCortexGate:
         # Localized ROI around action.coordinate (50px radius) for rapid sub-2ms click ripple verification
         coord = getattr(action, "coordinate", None) or getattr(action, "start_coordinate", None)
         if coord and len(coord) == 2:
-            cx, cy = int(coord[0]), int(coord[1])
-            arr1 = self._convert_to_numpy_rgb(pre_obs)
-            arr2 = self._convert_to_numpy_rgb(post_obs)
-            h, w = arr1.shape[:2]
-            r = 50
-            bx1, by1 = max(0, cx - r), max(0, cy - r)
-            bx2, by2 = min(w, cx + r), min(h, cy + r)
-            if bx2 > bx1 and by2 > by1:
-                crop1 = arr1[by1:by2, bx1:bx2]
-                crop2 = arr2[by1:by2, bx1:bx2]
-                diff = np.abs(crop2.astype(np.int16) - crop1.astype(np.int16))
-                changed_pixels = int(np.count_nonzero(diff > 5))
-                delta_score = changed_pixels / float(crop1.size)
-                has_ripple = changed_pixels > 0
-                dt_ms = (time.perf_counter() - t0) * 1000.0
-                details = (
-                    f"Visual cortex localized ROI ripple probe (50px ROI at ({cx}, {cy})): "
-                    f"delta={delta_score:.4f} (ripple {'detected' if has_ripple else 'not detected'}) in {dt_ms:.2f}ms."
-                )
-                return Stage1Result(
-                    passed=has_ripple,
-                    optical_delta=round(delta_score, 4),
-                    latency_ms=round(dt_ms, 2),
-                    ripple_detected=has_ripple,
-                    details=details,
-                )
+            try:
+                raw_x, raw_y = float(coord[0]), float(coord[1])
+            except (ValueError, TypeError):
+                raw_x, raw_y = None, None
+
+            if raw_x is not None and raw_y is not None and math.isfinite(raw_x) and math.isfinite(raw_y):
+                arr1 = self._convert_to_numpy_rgb(pre_obs)
+                arr2 = self._convert_to_numpy_rgb(post_obs)
+                h1, w1 = arr1.shape[:2]
+                h2, w2 = arr2.shape[:2]
+                min_w = min(w1, w2)
+                min_h = min(h1, h2)
+                if min_w > 0 and min_h > 0:
+                    # Support normalized [0.0, 1.0] coordinates, canonical 1280x800, and pixel coordinates
+                    if 0.0 <= raw_x <= 1.0 and 0.0 <= raw_y <= 1.0 and (
+                        isinstance(coord[0], float) or isinstance(coord[1], float) or (0.0 < raw_x < 1.0 or 0.0 < raw_y < 1.0)
+                    ):
+                        cx = int(round(raw_x * min_w))
+                        cy = int(round(raw_y * min_h))
+                    elif (raw_x > min_w or raw_y > min_h) and (raw_x <= 1280 and raw_y <= 800):
+                        cx = int(round(raw_x * min_w / 1280.0))
+                        cy = int(round(raw_y * min_h / 800.0))
+                    else:
+                        cx = int(round(raw_x))
+                        cy = int(round(raw_y))
+
+                    cx = max(0, min(min_w - 1, cx))
+                    cy = max(0, min(min_h - 1, cy))
+                    r = 50
+                    bx1, by1 = max(0, cx - r), max(0, cy - r)
+                    bx2, by2 = min(min_w, cx + r), min(min_h, cy + r)
+                    if bx2 > bx1 and by2 > by1:
+                        crop1 = arr1[by1:by2, bx1:bx2]
+                        crop2 = arr2[by1:by2, bx1:bx2]
+                        diff = np.abs(crop2.astype(np.int16) - crop1.astype(np.int16))
+                        changed_pixels = int(np.count_nonzero(diff > 5))
+                        num_elements = float(crop1.size)
+                        delta_score = changed_pixels / num_elements if num_elements > 0 else 0.0
+                        has_ripple = changed_pixels > 0
+                        if has_ripple:
+                            dt_ms = (time.perf_counter() - t0) * 1000.0
+                            details = (
+                                f"Visual cortex localized ROI ripple probe (50px ROI at ({cx}, {cy})): "
+                                f"delta={delta_score:.4f} (ripple detected) in {dt_ms:.2f}ms."
+                            )
+                            return Stage1Result(
+                                passed=True,
+                                optical_delta=round(delta_score, 4),
+                                latency_ms=round(dt_ms, 2),
+                                ripple_detected=True,
+                                details=details,
+                            )
 
         # HumanEye visual cortex branch
         if hasattr(self.cortex, "observe") and not hasattr(self.cortex, "temporal_cell"):
@@ -416,15 +456,23 @@ class VisualCortexGate:
             timestamp=time.time() + 0.04,
         )
 
-        f1 = out1.temporal_state.previous_features
-        f2 = out2.temporal_state.previous_features
+        f1 = getattr(out1.temporal_state, "previous_features", None)
+        f2 = getattr(out2.temporal_state, "previous_features", None)
 
         # Optical feature delta: |f2 - f1|
-        spatial_delta = float(torch.abs(f2 - f1).mean().item())
+        if f1 is not None and f2 is not None and f1.shape == f2.shape and f1.device == f2.device:
+            spatial_delta = float(torch.abs(f2 - f1).mean().item())
+        else:
+            spatial_delta = 0.0
+
+        if not math.isfinite(spatial_delta):
+            spatial_delta = 0.0
         surprise_score = float(np.clip(spatial_delta * 10.0, 0.0, 1.0))
 
         # Head 3: Post-action visual response probability
         post_action_prob = float(torch.sigmoid(out2.post_action_response_logit[0, 0]).item())
+        if not math.isfinite(post_action_prob):
+            post_action_prob = 0.0
 
         # Physical ripple detected if optical feature delta exceeds noise floor
         has_ripple = (spatial_delta >= 0.0005) or (surprise_score >= 0.005) or (post_action_prob >= 0.50 and spatial_delta > 0.0)

@@ -1670,11 +1670,26 @@ class AceRunner:
                             f"Visual closed-loop verification: No screen change detected after {action.kind.value} at {action.coordinate}. Marking verification unconfirmed."
                         )
                         if action.coordinate:
+                            cy = action.coordinate[1]
+                            is_chrome_zone = cy < 40
+                            if is_chrome_zone:
+                                logger.warning(
+                                    f"[SAFE RECOVERY GUARD] Click at {action.coordinate} was in window chrome / titlebar (y={cy} < 40). "
+                                    "Blind retries suppressed. Logging to DAgger intervention queue and escalating to System 2."
+                                )
                             stuck_points.append({
                                 "step": step_idx,
                                 "action": action.to_dict(),
-                                "reason": "No optical ripple detected after click",
+                                "reason": "Window chrome click unconfirmed; blind retries suppressed" if is_chrome_zone else "No optical ripple detected after click",
+                                "chrome_zone": is_chrome_zone,
                             })
+                            if self.enable_dagger_recovery:
+                                self.dagger_interventions.append({
+                                    "step": step_idx,
+                                    "failure_type": "chrome_deadzone" if is_chrome_zone else "optical_ripple_failure",
+                                    "details": f"Unconfirmed click at {action.coordinate} (y={cy})",
+                                    "action": action.to_dict(),
+                                })
 
                 # Post-action settling delay
                 WIN_KEYS = {"win", "windows", "super", "lwin", "rwin", "cmd", "command"}
@@ -1822,7 +1837,8 @@ def main() -> None:
     parser.add_argument("--local-model", type=str, default="Qwen2.5-VL-3B-Instruct", help="Local VAM model identifier.")
     parser.add_argument("--display-target", type=str, default="primary", help="Target display: 'primary', 'virtual', or monitor index 0, 1, ...")
     parser.add_argument("--cortex", type=str, default="cortex_v2", choices=["cortex_v2", "human_eye", "none"], help="Visual cortex sensory gate: 'cortex_v2' (StreamingVisualCortexV2 ConvGRU), 'human_eye' (HumanEye), or 'none'.")
-    parser.add_argument("--grounder", "--enable-grounder", dest="enable_grounder", action="store_true", help="Force enable Fast Brain (local GoalConditionedGrounder) for direct actuation.")
+    parser.add_argument("--vla-server", "--vla-url", dest="vla_server", type=str, default=os.environ.get("AVCS_VLA_SERVER_URL", ""), help="Remote VLA server URL (e.g. https://...trycloudflare.com or ws://...) for WebSocket Fast Brain.")
+    parser.add_argument("--grounder", "--enable-grounder", dest="enable_grounder", action="store_true", help="Force enable legacy local GoalConditionedGrounder for direct actuation.")
     parser.add_argument("--no-grounder", "--cloud-only", dest="disable_grounder", action="store_true", help="Disable local GoalConditionedGrounder and use Cloud LLM only.")
     parser.add_argument("--shadow-mode", action="store_true", help="Run local grounder in shadow mode to compare against Cloud LLM.")
     parser.add_argument("--grounder-checkpoint", type=str, default="runs/weights/goal_grounder_best.pt", help="Path to GoalConditionedGrounder weights checkpoint.")
@@ -1832,11 +1848,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Fast Brain auto-activation: automatically active if trained checkpoint is present on disk
+    # Fast Brain configuration: Remote WebSocket VLA (/ws/act) takes precedence.
+    # Legacy local grounder is ONLY used if explicitly passed via --grounder.
+    use_grounder = args.enable_grounder and not args.disable_grounder
     grounder_ckpt = Path(args.grounder_checkpoint)
-    has_grounder = grounder_ckpt.exists()
-    use_grounder = (args.enable_grounder or has_grounder) and not args.disable_grounder
-    if use_grounder and has_grounder:
+    if args.vla_server:
+        logger.info(f"Fast Brain active: Remote WebSocket VLA connected to {args.vla_server} (/ws/act)")
+    elif use_grounder and grounder_ckpt.exists():
         logger.info(f"Fast Brain active: Local GoalConditionedGrounder loaded from {grounder_ckpt} (peak_prob floor={args.min_peak_prob})")
 
     if args.local_vam:
@@ -1867,6 +1885,7 @@ def main() -> None:
         shadow_mode=args.shadow_mode,
         min_peak_probability=args.min_peak_prob,
         checkpoint_path=args.grounder_checkpoint,
+        vla_server_url=args.vla_server,
     )
     computer = WindowsComputer(target_display=disp_target)
     runner = AceRunner(

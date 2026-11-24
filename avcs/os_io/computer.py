@@ -524,6 +524,23 @@ class WindowsComputer:
         if self.native_width <= 0 or self.native_height <= 0:
             self.native_width, self.native_height = 1280, 800
 
+        # CPU-Compatible Cached GDI Capture Handles
+        self._cached_screen_dc = None
+        self._cached_mem_dc = None
+        self._cached_hbm = None
+        self._cached_buffer = None
+        self._cached_bmi = None
+        self._cached_dims = (0, 0)
+
+        # High-Speed CPU Threaded Capture Backend (sub-5ms)
+        self._threaded_capture = None
+        try:
+            from forge.vision.capture import Win32FastCapture, ThreadedScreenCapture
+            cap = Win32FastCapture(target_size=(self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT))
+            self._threaded_capture = ThreadedScreenCapture(cap).open()
+        except Exception:
+            self._threaded_capture = None
+
     def get_monitors(self) -> List[MonitorInfo]:
         """Enumerates connected display monitors with physical bounds and DPI scaling factors."""
         monitors: List[MonitorInfo] = []
@@ -684,8 +701,38 @@ class WindowsComputer:
         self.user32.GetCursorPos(ctypes.byref(pt))
         return pt.x, pt.y
 
+    def _cleanup_capture_cache(self) -> None:
+        """Releases cached GDI capture DC, bitmap, and buffer resources."""
+        if getattr(self, "_threaded_capture", None) is not None:
+            try:
+                self._threaded_capture.close()
+            except Exception:
+                pass
+            self._threaded_capture = None
+        if getattr(self, "_cached_mem_dc", None) and getattr(self, "gdi32", None):
+            try:
+                self.gdi32.DeleteDC(self._cached_mem_dc)
+            except Exception:
+                pass
+            self._cached_mem_dc = None
+        if getattr(self, "_cached_hbm", None) and getattr(self, "gdi32", None):
+            try:
+                self.gdi32.DeleteObject(self._cached_hbm)
+            except Exception:
+                pass
+            self._cached_hbm = None
+        if getattr(self, "_cached_screen_dc", None) and getattr(self, "user32", None):
+            try:
+                self.user32.ReleaseDC(0, self._cached_screen_dc)
+            except Exception:
+                pass
+            self._cached_screen_dc = None
+        self._cached_buffer = None
+        self._cached_bmi = None
+        self._cached_dims = (0, 0)
+
     def observe(self, format: str = "jpeg") -> Observation:
-        """Captures desktop, scales to 1280x800, and encodes to in-memory bytes in <8 ms."""
+        """Captures desktop via high-speed CPU threaded capture and encodes with TurboJPEG in <25 ms."""
         t0 = time.time()
         self.attach_desktop()
 
@@ -693,51 +740,86 @@ class WindowsComputer:
         left, top, width, height, _ = self.get_active_bounds()
         self.native_width, self.native_height = max(1, width), max(1, height)
 
-        hdc_screen = self.user32.GetDC(0)
-        hdc_mem = self.gdi32.CreateCompatibleDC(hdc_screen) if hdc_screen else None
-        hbm = self.gdi32.CreateCompatibleBitmap(hdc_screen, self.native_width, self.native_height) if hdc_screen else None
-        h_old = self.gdi32.SelectObject(hdc_mem, hbm) if (hdc_mem and hbm) else None
+        # 1. Fast Path: High-speed double-buffered ThreadedScreenCapture (sub-0.1ms grab)
+        if self._threaded_capture is not None:
+            try:
+                raw_np = self._threaded_capture.grab()
+                # Fast TurboJPEG encoding strictly capped at 35KB
+                from avcs.runtime.turbo_jpeg import encode_turbo_jpeg
+                encoded_bytes = encode_turbo_jpeg(raw_np, quality=68)
+                fmt_out = "jpeg"
+                t1 = time.time()
+                t_present_ns = time.monotonic_ns()
+                return Observation(
+                    image_bytes=encoded_bytes,
+                    format=fmt_out,
+                    width=self.CANONICAL_WIDTH,
+                    height=self.CANONICAL_HEIGHT,
+                    native_width=self.native_width,
+                    native_height=self.native_height,
+                    capture_time_ms=(t1 - t0) * 1000.0,
+                    raw_numpy=raw_np,
+                    frame_present_ns=t_present_ns,
+                    action_event_ns=self.last_action_event_ns,
+                )
+            except Exception:
+                pass
 
-        buffer_len = max(4, self.native_width * self.native_height * 4)
-        raw_bytes = (ctypes.c_char * buffer_len)()
+        # 2. Cached GDI DIBSection fallback path
 
-        try:
-            if hdc_screen and hdc_mem and hbm:
-                # BitBlt capture with layered window support (CAPTUREBLT) from active display bounds
-                self.gdi32.BitBlt(hdc_mem, 0, 0, self.native_width, self.native_height, hdc_screen, left, top, SRCCOPY | CAPTUREBLT)
-                self.gdi32.GdiFlush()
-
-                # Extract bits
-                bmi = BITMAPINFO()
-                bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-                bmi.bmiHeader.biWidth = self.native_width
-                bmi.bmiHeader.biHeight = -self.native_height  # Top-down DIB
-                bmi.bmiHeader.biPlanes = 1
-                bmi.bmiHeader.biBitCount = 32
-                bmi.bmiHeader.biCompression = BI_RGB
-
-                self.gdi32.GetDIBits(hdc_mem, hbm, 0, self.native_height, raw_bytes, ctypes.byref(bmi), DIB_RGB_COLORS)
-        finally:
-            if hdc_mem and h_old:
-                try:
-                    self.gdi32.SelectObject(hdc_mem, h_old)
-                except Exception:
-                    pass
-            if hdc_mem:
-                try:
-                    self.gdi32.DeleteDC(hdc_mem)
-                except Exception:
-                    pass
-            if hbm:
-                try:
-                    self.gdi32.DeleteObject(hbm)
-                except Exception:
-                    pass
+        dims = (self.native_width, self.native_height)
+        if (
+            self._cached_dims != dims
+            or self._cached_mem_dc is None
+            or self._cached_hbm is None
+            or self._cached_buffer is None
+            or self._cached_screen_dc is None
+        ):
+            self._cleanup_capture_cache()
+            hdc_screen = self.user32.GetDC(0)
             if hdc_screen:
-                try:
-                    self.user32.ReleaseDC(0, hdc_screen)
-                except Exception:
-                    pass
+                hdc_mem = self.gdi32.CreateCompatibleDC(hdc_screen)
+                hbm = self.gdi32.CreateCompatibleBitmap(hdc_screen, self.native_width, self.native_height)
+                if hdc_mem and hbm:
+                    self.gdi32.SelectObject(hdc_mem, hbm)
+                    buffer_len = max(4, self.native_width * self.native_height * 4)
+                    raw_bytes = (ctypes.c_char * buffer_len)()
+
+                    bmi = BITMAPINFO()
+                    bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+                    bmi.bmiHeader.biWidth = self.native_width
+                    bmi.bmiHeader.biHeight = -self.native_height  # Top-down DIB
+                    bmi.bmiHeader.biPlanes = 1
+                    bmi.bmiHeader.biBitCount = 32
+                    bmi.bmiHeader.biCompression = BI_RGB
+
+                    self._cached_screen_dc = hdc_screen
+                    self._cached_mem_dc = hdc_mem
+                    self._cached_hbm = hbm
+                    self._cached_buffer = raw_bytes
+                    self._cached_bmi = bmi
+                    self._cached_dims = dims
+
+        raw_bytes = None
+        if self._cached_mem_dc and self._cached_screen_dc and self._cached_buffer:
+            try:
+                # BitBlt capture with layered window support (CAPTUREBLT) from active display bounds
+                self.gdi32.BitBlt(
+                    self._cached_mem_dc, 0, 0, self.native_width, self.native_height,
+                    self._cached_screen_dc, left, top, SRCCOPY | CAPTUREBLT
+                )
+                self.gdi32.GdiFlush()
+                self.gdi32.GetDIBits(
+                    self._cached_mem_dc, self._cached_hbm, 0, self.native_height,
+                    self._cached_buffer, ctypes.byref(self._cached_bmi), DIB_RGB_COLORS
+                )
+                raw_bytes = self._cached_buffer
+            except Exception:
+                raw_bytes = None
+
+        if raw_bytes is None:
+            buffer_len = max(4, self.native_width * self.native_height * 4)
+            raw_bytes = (ctypes.c_char * buffer_len)()
 
         # Construct image and scale to canonical WXGA (1280x800) preserving aspect ratio via isotropic letterboxing
         img_native = Image.frombuffer("RGBA", (self.native_width, self.native_height), raw_bytes, "raw", "BGRA", 0, 1).convert("RGB")
@@ -754,18 +836,27 @@ class WindowsComputer:
             img = Image.new("RGB", (self.CANONICAL_WIDTH, self.CANONICAL_HEIGHT), (18, 18, 18))
             img.paste(img_resized, (pad_x, pad_y))
 
-        # Encode in-memory
-        buf = io.BytesIO()
+        # Encode in-memory with sub-4ms TurboJPEG
         if format.lower() == "webp":
+            buf = io.BytesIO()
             try:
                 img.save(buf, format="WEBP", quality=80, method=0)
+                encoded_bytes = buf.getvalue()
                 fmt_out = "webp"
             except Exception:
-                img.save(buf, format="JPEG", quality=85)
+                from avcs.runtime.turbo_jpeg import encode_turbo_jpeg
+                encoded_bytes = encode_turbo_jpeg(img, quality=68)
                 fmt_out = "jpeg"
         else:
-            img.save(buf, format="JPEG", quality=85)
-            fmt_out = "jpeg"
+            try:
+                from avcs.runtime.turbo_jpeg import encode_turbo_jpeg
+                encoded_bytes = encode_turbo_jpeg(img, quality=68)
+                fmt_out = "jpeg"
+            except Exception:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70)
+                encoded_bytes = buf.getvalue()
+                fmt_out = "jpeg"
 
         # Convert to raw RGB numpy array to bypass compression/decompression for local perception
         raw_np = np.asarray(img)
@@ -773,7 +864,7 @@ class WindowsComputer:
         t1 = time.time()
         t_present_ns = time.monotonic_ns()
         return Observation(
-            image_bytes=buf.getvalue(),
+            image_bytes=encoded_bytes,
             format=fmt_out,
             width=self.CANONICAL_WIDTH,
             height=self.CANONICAL_HEIGHT,
@@ -987,6 +1078,12 @@ class WindowsComputer:
 
     def emergency_release_hardware(self) -> None:
         """Failsafe release of any held mouse buttons, modifier keys, and cursor clipping."""
+        # Clean cached GDI capture resources
+        try:
+            self._cleanup_capture_cache()
+        except Exception:
+            pass
+
         # Release mouse buttons with current cursor position
         try:
             cx, cy = self.get_cursor_pos()

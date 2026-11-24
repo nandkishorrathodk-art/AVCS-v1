@@ -22,13 +22,20 @@ import avcs
 from avcs.events import VisualEvent
 
 
-def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> None:
+def run_demo(
+    duration_seconds: float = 5.0,
+    capture_mode: str = "desktop",
+    target_app: str | None = None,
+    fps: int = 60,
+) -> None:
     print("=" * 76)
     print("    AVCS // ARTIFICIAL VISUAL CORTEX - UNIVERSAL HUMAN EYE DEMONSTRATION    ")
     print("=" * 76)
-    print(f"Initializing Real-Time Human Eye Engine (Mode: {capture_mode}, Target: 60 FPS)...")
+    print(f"Initializing Real-Time Human Eye Engine (Mode: {capture_mode}, Target: {fps} FPS)...")
+    if target_app:
+        print(f"Target Application Focus : {target_app}")
 
-    client = avcs.eye(source=capture_mode, fps=60)
+    client = avcs.eye(source=capture_mode, fps=fps)
     events_caught: list[VisualEvent] = []
 
     # Subscribe to differential visual events
@@ -48,11 +55,26 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
         except Exception:
             pass
 
+    target_detected_count = 0
+    target_key = target_app.strip().lower() if target_app else None
+
     try:
         while time.perf_counter() - start_t < duration_seconds:
             t_tick = time.perf_counter()
             state = client.perceive()
             ticks += 1
+
+            app_tag = ""
+            if target_key:
+                matched = (
+                    target_key in state.primary_category.lower()
+                    or any(target_key in str(getattr(o, "label", "")).lower() for o in getattr(state, "moving_objects", []))
+                )
+                if matched:
+                    target_detected_count += 1
+                    app_tag = f" | Target '{target_app}': ACQUIRED"
+                else:
+                    app_tag = f" | Target '{target_app}': TRACKING"
 
             # Print continuous telemetry line
             moving_str = f"{len(state.moving_objects)} moving" if state.moving_objects else "static"
@@ -64,11 +86,12 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
                 f"Gaze: ({state.gaze_fixation[0]:.2f}, {state.gaze_fixation[1]:.2f}) | "
                 f"Motion: {state.motion_magnitude:.3f} ({moving_str}) | "
                 f"Status: {state.stability:<10}"
+                f"{app_tag}"
             )
             sys.stdout.flush()
 
             elapsed = time.perf_counter() - t_tick
-            sleep_time = max(0.0, (1.0 / 60.0) - elapsed)
+            sleep_time = max(0.0, (1.0 / float(fps)) - elapsed)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -95,6 +118,8 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
     print(f"  • Effective Vision Frame Rate : {effective_fps:.1f} FPS")
     print(f"  • Median Perception Latency   : {client.eye.p50_latency_ms:.2f} ms")
     print(f"  • Differential Events Emitted : {len(events_caught)} events")
+    if target_app:
+        print(f"  • Target Application Focus    : {target_app} (active frames: {target_detected_count}/{ticks})")
     print(f"  • Estimated Tokens Saved      : {usage['tokens_saved']:,} vision tokens")
     print(f"  • Estimated Dollar Savings    : ${usage['net_saved_usd']:.4f} USD")
     print(f"  • Cryptographic Receipt ID    : {receipt.receipt_id}")
@@ -105,7 +130,9 @@ def run_demo(duration_seconds: float = 5.0, capture_mode: str = "desktop") -> No
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AVCS Live Demonstration")
-    parser.add_argument("--seconds", type=float, default=3.0, help="Run duration in seconds")
-    parser.add_argument("--capture", type=str, default="desktop", choices=["desktop", "synthetic"])
+    parser.add_argument("--seconds", type=float, default=3.0, help="Run duration in seconds (default: 3.0)")
+    parser.add_argument("--capture", type=str, default="desktop", choices=["desktop", "synthetic"], help="Capture source mode (default: desktop)")
+    parser.add_argument("--app", "--target-app", dest="target_app", type=str, default=None, help="Dynamic target application to monitor or focus (e.g. 'Slack', 'Blender', 'Terminal')")
+    parser.add_argument("--fps", type=int, default=60, help="Target capture FPS (default: 60)")
     args = parser.parse_args()
-    run_demo(duration_seconds=args.seconds, capture_mode=args.capture)
+    run_demo(duration_seconds=args.seconds, capture_mode=args.capture, target_app=args.target_app, fps=args.fps)

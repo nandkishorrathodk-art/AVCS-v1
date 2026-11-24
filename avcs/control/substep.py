@@ -155,11 +155,10 @@ class AutonomousSubstepPlanner:
         substeps: List[PlannedSubstep] = []
 
         # Extract target app name if present
-        app_name = self._extract_app_name(clean_goal)
+        app_name = self._extract_app_name(goal.strip()) or self._extract_app_name(clean_goal)
 
         # Pattern 1: App Exploration / Test Workflow
-        # (e.g. "explore text editor", "open text editor, test typing, and close without saving",
-        #  or Hindi/English "desktop par jo text editor dikh raha hai usko open karo, usme typing test karo, aur save kiye bina close karke batao")
+        # (e.g. "explore text editor", "open text editor, test typing, and close without saving")
         is_exploration = (
             "explore" in clean_goal
             or ("typing test" in clean_goal and "close" in clean_goal)
@@ -224,7 +223,11 @@ class AutonomousSubstepPlanner:
 
         # Pattern 2: Media Player Workflow
         # (e.g. "open media player, check if playlist is loaded, and start the first track")
-        if "media player" in clean_goal or "vlc" in clean_goal or ("playlist" in clean_goal and "track" in clean_goal):
+        is_media_workflow = (
+            ("playlist" in clean_goal and ("track" in clean_goal or "song" in clean_goal or "first" in clean_goal))
+            or (("media player" in clean_goal or "music player" in clean_goal) and ("playlist" in clean_goal or "track" in clean_goal or bool(re.search(r"\bplay\b", clean_goal))))
+        )
+        if is_media_workflow:
             target_app = app_name or "media player"
             substeps.append(
                 PlannedSubstep(
@@ -250,9 +253,9 @@ class AutonomousSubstepPlanner:
             return substeps
 
         # Pattern 3: Compound Clauses (separated by "then", "and", ",", ";")
-        clauses = [c.strip() for c in re.split(r";|,|\band\b|\bthen\b", clean_goal) if c.strip()]
-        if len(clauses) > 1:
-            for clause in clauses:
+        raw_clauses = [c.strip() for c in re.split(r";|,|\band\b|\bthen\b", goal.strip(), flags=re.IGNORECASE) if c.strip()]
+        if len(raw_clauses) > 1:
+            for clause in raw_clauses:
                 step = self._parse_single_clause(clause)
                 if step:
                     substeps.append(step)
@@ -260,7 +263,7 @@ class AutonomousSubstepPlanner:
                 return substeps
 
         # Pattern 4: Single Action Clause
-        step = self._parse_single_clause(clean_goal)
+        step = self._parse_single_clause(goal.strip()) or self._parse_single_clause(clean_goal)
         if step:
             substeps.append(step)
             return substeps
@@ -276,51 +279,86 @@ class AutonomousSubstepPlanner:
         return substeps
 
     def _extract_app_name(self, text: str) -> Optional[str]:
-        """Extracts application name from instruction string."""
-        known_apps = [
-            "text editor", "notepad", "media player", "vlc player",
-            "vlc", "chrome", "browser", "calculator", "terminal",
-        ]
-        for app in known_apps:
-            if app in text:
-                return app
-        m = re.search(r"(?:open|launch)\s+([a-zA-Z0-9_\-\s]+?)(?:icon|,|$|\s+and|\s+in|\s+with)", text)
+        """Extracts application name dynamically from natural language instruction string."""
+        def _sanitize(entity: Optional[str]) -> Optional[str]:
+            if not entity:
+                return None
+            cleaned = entity.strip()
+            # Strip locative prefixes and relative clauses
+            cleaned = re.sub(
+                r"^(?:(?:desktop|screen|taskbar|window)\s+(?:on|in|from)\s+|please\s+|kindly\s+)",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+            cleaned = re.sub(
+                r"^(?:the|a|an|this|that)\s+",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+            cleaned = re.sub(
+                r"\s+(?:app|application|window|icon|program|software)$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+            cleaned = cleaned.strip(" .,;:-_'\"")
+            stopwords = {
+                "the", "a", "an", "this", "that", "it",
+                "them", "icon", "app", "application", "window", "desktop", "screen", "taskbar",
+                "close", "open", "launch", "exit", "quit"
+            }
+            if cleaned and 2 <= len(cleaned) < 50 and cleaned.lower() not in stopwords:
+                return cleaned
+            return None
+
+        # 1. Dynamic regex matching natural language clauses across verbs (open, launch, start, run, close, focus, switch to, bring up)
+        m = re.search(
+            r"(?:open|launch|start|run|close|focus|switch\s+to|bring\s+up)\s+([a-zA-Z0-9_\-\.\s]+?)(?:icon|,|$|\s+and|\s+in|\s+with|\s+app|\s+application|\s+window)",
+            text,
+            re.IGNORECASE,
+        )
         if m:
-            extracted = m.group(1).strip()
-            if extracted and len(extracted) < 30:
-                return extracted
+            clean = _sanitize(m.group(1))
+            if clean:
+                return clean
+
+        # 2. Dynamic target noun followed by app / application / window
+        m2 = re.search(r"([a-zA-Z0-9_\-\.\s]+?)\s+(?:application|app|window)\b", text, re.IGNORECASE)
+        if m2:
+            clean = _sanitize(m2.group(1))
+            if clean:
+                return clean
+
         return None
 
     def _parse_single_clause(self, clause: str) -> Optional[PlannedSubstep]:
         """Parses a single natural language clause into a PlannedSubstep."""
         c = clause.strip()
-        # Open app
-        if c.startswith("open ") or c.startswith("launch "):
-            target = re.sub(r"^(open|launch)\s+", "", c).strip()
-            target_clean = re.sub(r"\s+icon$", "", target).strip()
-            return PlannedSubstep(
-                action_type="open_app",
-                target_query=f"{target_clean} icon",
-                description=f"Launch {target_clean}",
-            )
+        if not c:
+            return None
+
         # Double click
-        if "double click" in c or "double-click" in c:
-            target = re.sub(r"^.*?double[- ]click\s+(on\s+)?", "", c).strip()
+        if "double click" in c.lower() or "double-click" in c.lower():
+            target = re.sub(r"^.*?double[- ]click\s+(?:on\s+)?", "", c, flags=re.IGNORECASE).strip()
             return PlannedSubstep(
                 action_type="double_click",
                 target_query=target,
                 description=f"Double-click {target}",
             )
+
         # Click
-        if c.startswith("click ") or "click on " in c:
-            target = re.sub(r"^.*?click\s+(on\s+)?", "", c).strip()
+        if re.search(r"^(?:click|click\s+on)\b", c, re.IGNORECASE) or re.search(r"\bclick\s+on\s+", c, re.IGNORECASE):
+            target = re.sub(r"^.*?click\s+(?:on\s+)?", "", c, flags=re.IGNORECASE).strip()
             return PlannedSubstep(
                 action_type="click",
                 target_query=target,
                 description=f"Click {target}",
             )
+
         # Type text
-        type_match = re.search(r"type\s+['\"]?([^'\"]+?)['\"]?(?:\s+into\s+['\"]?([^'\"]+)['\"]?)?$", c)
+        type_match = re.search(r"type\s+['\"]?([^'\"]+?)['\"]?(?:\s+into\s+['\"]?([^'\"]+)['\"]?)?$", c, re.IGNORECASE)
         if type_match:
             text = type_match.group(1).strip()
             field = type_match.group(2).strip() if type_match.group(2) else None
@@ -330,14 +368,53 @@ class AutonomousSubstepPlanner:
                 text_content=text,
                 description=f"Type '{text}' into {field or 'input field'}",
             )
-        # Close
-        if c.startswith("close ") or c == "close":
-            target = re.sub(r"^close\s*", "", c).strip() or "window"
+
+        # Close / Exit
+        is_close = bool(
+            re.search(r"^(?:close|exit|quit)\b", c, re.IGNORECASE)
+            or c.lower() in ("close", "exit", "quit")
+        )
+        if is_close:
+            app = self._extract_app_name(c)
+            if not app:
+                target = re.sub(r"^(?:close|exit|quit)\s*", "", c, flags=re.IGNORECASE).strip() or "window"
+                target_clean = re.sub(r"\s+(?:window|app|application)$", "", target, flags=re.IGNORECASE).strip() or "window"
+            else:
+                target_clean = app
             return PlannedSubstep(
                 action_type="close_window",
-                target_query=f"close {target}" if target != "window" else "close button",
-                description=f"Close {target}",
+                target_query=f"close {target_clean}" if target_clean.lower() != "window" else "close button",
+                description=f"Close {target_clean}",
             )
+
+        # Open / Launch / Start / Run / Focus / Switch to
+        is_open_or_switch = bool(
+            re.search(r"^(?:open|launch|start|run|focus|switch\s+to|bring\s+up)\b", c, re.IGNORECASE)
+        )
+        if is_open_or_switch:
+            app = self._extract_app_name(c)
+            if app:
+                cl = c.lower()
+                if "switch" in cl:
+                    desc = f"Switch to {app}"
+                elif "focus" in cl:
+                    desc = f"Focus {app}"
+                else:
+                    desc = f"Launch {app}"
+                return PlannedSubstep(
+                    action_type="open_app",
+                    target_query=f"{app} icon",
+                    description=desc,
+                )
+            elif c.lower().startswith("open ") or c.lower().startswith("launch "):
+                target = re.sub(r"^(?:open|launch)\s+", "", c, flags=re.IGNORECASE).strip()
+                target_clean = re.sub(r"\s+icon$", "", target, flags=re.IGNORECASE).strip()
+                return PlannedSubstep(
+                    action_type="open_app",
+                    target_query=f"{target_clean} icon",
+                    description=f"Launch {target_clean}",
+                )
+
         return None
 
 
@@ -590,23 +667,6 @@ class AutonomousGoalExecutor:
             )
 
         # Successful completion summary
-        parts: List[str] = []
-        for t in traces:
-            if t.action == "open_app":
-                app = t.target_query.replace(" icon", "")
-                parts.append(f"{app.title()} launch kiya aur window verify ho gayi.")
-            elif t.action == "focus_input":
-                parts.append("Text area locate karke focus acquire kiya (verified caret).")
-            elif t.action == "type_text":
-                parts.append("Text typing complete hui aur characters render verify hue.")
-            elif t.action == "close_window":
-                parts.append("Close button click kiya.")
-            elif t.action == "dismiss_modal":
-                parts.append(f"Prompt par '{t.target_query}' click karke dialog close kar diya.")
-            elif t.action in ("click", "double_click"):
-                parts.append(f"'{t.target_query}' click karke postcondition verify kiya.")
-
-        # English translation / natural synthesis
         eng_parts: List[str] = []
         for t in traces:
             if t.action == "open_app":

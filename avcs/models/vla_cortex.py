@@ -2379,11 +2379,11 @@ class DAggerRecoveryPolicy(nn.Module):
         self.intervention_buffer.clear()
 
 
-class AVCSPhase4MultiTaskLoss(nn.Module):
-    """Multi-task loss computation for Phase 4 Scaled Behavioral Cloning.
+class UnifiedMultiTaskLoss(nn.Module):
+    """Unified multi-task loss computation for GUI-Actor Single-Pass Pointer & Action Training.
 
     Computes:
-    1. Discrete action type classification loss (Cross-Entropy).
+    1. Discrete action type classification loss (Cross-Entropy across ACTION_VOCAB_10).
     2. GUI-Actor pointer coordinate loss (L1 loss + L2/MSE loss).
     3. Continuous scroll parameter loss (MSE loss, optional).
     4. Flow-matching ODE drag trajectory loss (Euler vector field MSE, optional).
@@ -2410,34 +2410,69 @@ class AVCSPhase4MultiTaskLoss(nn.Module):
 
     def forward(
         self,
-        model_out: Union[PureRGBVLAOutput, Dict[str, torch.Tensor]],
-        target_actions: torch.Tensor,
-        target_coords: torch.Tensor,
+        model_out: Union[PureRGBVLAOutput, Dict[str, torch.Tensor], torch.Tensor],
+        target_actions: Optional[torch.Tensor] = None,
+        target_coords: Optional[torch.Tensor] = None,
         target_scroll: Optional[torch.Tensor] = None,
         target_drag: Optional[torch.Tensor] = None,
         raw_policy: Optional[PureRGBVLAPolicy] = None,
         context: Optional[torch.Tensor] = None,
         cursor_pre_xy: Optional[torch.Tensor] = None,
+        pred_coords: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        # Support structured output (PureRGBVLAOutput or dict) and raw tensor calling signatures
+        if isinstance(model_out, (PureRGBVLAOutput, dict)):
+            pred_act_logits = model_out["action_logits"] if isinstance(model_out, dict) else model_out.action_logits
+            pred_xy = (
+                model_out.get("target_coords", model_out.get("coords", pred_coords))
+                if isinstance(model_out, dict)
+                else model_out.target_coords
+            )
+            actual_target_act = target_actions
+            actual_target_xy = target_coords
+        elif torch.is_tensor(model_out):
+            # Check if 4 positional arguments were passed:
+            # loss_fn(pred_action_logits, pred_coords, target_actions, target_coords)
+            if (
+                torch.is_tensor(target_actions)
+                and target_actions.dim() >= 2
+                and target_actions.shape[-1] == 2
+                and torch.is_tensor(target_coords)
+                and torch.is_tensor(target_scroll)
+            ):
+                pred_act_logits = model_out
+                pred_xy = target_actions
+                actual_target_act = target_coords
+                actual_target_xy = target_scroll
+            else:
+                pred_act_logits = model_out
+                pred_xy = pred_coords if pred_coords is not None else target_coords
+                actual_target_act = target_actions
+                actual_target_xy = target_coords if pred_coords is None else target_coords
+        else:
+            raise TypeError(f"Unsupported model_out type: {type(model_out)}")
+
+        if actual_target_act is None or actual_target_xy is None:
+            raise ValueError("target_actions and target_coords must be provided")
+
         # 1. Action type cross-entropy loss
-        pred_act_logits = model_out["action_logits"] if isinstance(model_out, dict) else model_out.action_logits
-        loss_act = F.cross_entropy(pred_act_logits, target_actions)
+        loss_act = F.cross_entropy(pred_act_logits, actual_target_act)
 
         # 2. GUI-Actor Pointer coordinate loss (L1 + L2)
-        pred_coords = model_out["target_coords"] if isinstance(model_out, dict) else model_out.target_coords
-        loss_coord_l1 = F.l1_loss(pred_coords, target_coords)
-        loss_coord_l2 = F.mse_loss(pred_coords, target_coords)
+        loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
+        loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
         loss_coord = self.weight_coord_l1 * loss_coord_l1 + self.weight_coord_l2 * loss_coord_l2
 
         total_loss = self.weight_action * loss_act + loss_coord
-        loss_scroll = torch.tensor(0.0, device=target_actions.device)
-        loss_drag = torch.tensor(0.0, device=target_actions.device)
+        loss_scroll = torch.tensor(0.0, device=actual_target_act.device)
+        loss_drag = torch.tensor(0.0, device=actual_target_act.device)
 
         # 3. Continuous scroll parameter loss
         if self.enable_scroll and target_scroll is not None:
-            pred_scroll = model_out["scroll_delta"] if isinstance(model_out, dict) else model_out.scroll_delta
-            loss_scroll = F.mse_loss(pred_scroll, target_scroll)
-            total_loss = total_loss + self.weight_scroll * loss_scroll
+            pred_scroll = model_out["scroll_delta"] if isinstance(model_out, dict) else getattr(model_out, "scroll_delta", None)
+            if pred_scroll is not None:
+                loss_scroll = F.mse_loss(pred_scroll, target_scroll)
+                total_loss = total_loss + self.weight_scroll * loss_scroll
 
         # 4. Conditional flow-matching drag expert trajectory loss
         if context is None:
@@ -2451,7 +2486,7 @@ class AVCSPhase4MultiTaskLoss(nn.Module):
                 loss_drag = raw_policy.drag_expert.compute_loss(
                     target_trajectory=target_drag,
                     cond=context,
-                    start_pos=cursor_pre_xy if cursor_pre_xy is not None else target_coords,
+                    start_pos=cursor_pre_xy if cursor_pre_xy is not None else actual_target_xy,
                 )
                 total_loss = total_loss + self.weight_drag * loss_drag
             except Exception:
@@ -2459,6 +2494,7 @@ class AVCSPhase4MultiTaskLoss(nn.Module):
 
         return {
             "loss": total_loss,
+            "total_loss": total_loss,
             "loss_action": loss_act,
             "loss_coord_l1": loss_coord_l1,
             "loss_coord_l2": loss_coord_l2,
@@ -2466,6 +2502,9 @@ class AVCSPhase4MultiTaskLoss(nn.Module):
             "loss_scroll": loss_scroll,
             "loss_drag": loss_drag,
         }
+
+
+AVCSPhase4MultiTaskLoss = UnifiedMultiTaskLoss
 
 
 

@@ -10,10 +10,16 @@ Audits and verifies from raw pixels:
 """
 from __future__ import annotations
 
+import argparse
 import math
+from pathlib import Path
 import sys
 import time
 from typing import Any, Dict, List, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 import torch
@@ -38,8 +44,66 @@ class DesktopSceneBuilder:
         self.height = height
         self.renderer = RealisticDesktopRenderer(width=width, height=height)
 
-    def render_desktop_canvas(self) -> Tuple[np.ndarray, Dict[str, Tuple[float, float]]]:
-        """Renders desktop wallpaper, taskbar, and application shortcut icons."""
+    def render_generic_app_window(self, app_name: str) -> np.ndarray:
+        """Procedurally renders a clean, modern application window for arbitrary targets."""
+        img = Image.new("RGB", (self.width, self.height), color=(30, 32, 36))
+        draw = ImageDraw.Draw(img)
+
+        # Title bar
+        draw.rectangle([0, 0, self.width, 32], fill=(42, 44, 50))
+        draw.text((16, 8), f"{app_name.title()} - Dynamic Application Window", fill=(220, 220, 225))
+
+        # Window controls (close, max, min) on right
+        draw.rectangle([self.width - 40, 0, self.width, 32], fill=(196, 43, 28))  # Close button
+        draw.text((self.width - 25, 8), "X", fill=(255, 255, 255))
+        draw.rectangle([self.width - 76, 0, self.width - 40, 32], fill=(55, 57, 63))  # Max
+        draw.rectangle([self.width - 64, 10, self.width - 52, 22], outline=(200, 200, 200), fill=None)
+        draw.rectangle([self.width - 112, 0, self.width - 76, 32], fill=(55, 57, 63))  # Min
+        draw.line([self.width - 100, 18, self.width - 88, 18], fill=(200, 200, 200), width=2)
+
+        # Menu bar
+        draw.rectangle([0, 32, self.width, 58], fill=(50, 52, 58))
+        menu_items = ["File", "Edit", "View", "Tools", "Help"]
+        for i, item in enumerate(menu_items):
+            draw.text((20 + i * 55, 38), item, fill=(190, 190, 195))
+
+        # Left sidebar navigation
+        sb_w = max(60, int(self.width * 0.22))
+        draw.rectangle([0, 58, sb_w, self.height - 24], fill=(36, 38, 44))
+        draw.text((14, 68), "WORKSPACE", fill=(130, 135, 145))
+        for i, nav in enumerate(["Dashboard", "Projects", "Settings", "Activity"]):
+            ny = 92 + i * 26
+            draw.rectangle([10, ny, sb_w - 10, ny + 20], fill=(48, 51, 60))
+            draw.text((16, ny + 3), nav, fill=(210, 210, 215))
+
+        # Main workspace canvas
+        cw_x = sb_w + 16
+        draw.rectangle([cw_x, 74, self.width - 20, 140], fill=(42, 45, 54), outline=(65, 70, 82))
+        draw.text((cw_x + 16, 88), f"Welcome to {app_name.title()}", fill=(255, 255, 255))
+        draw.text((cw_x + 16, 110), f"Active target context initialized dynamically.", fill=(160, 165, 175))
+
+        # Primary action button
+        btn_x0 = cw_x + 16
+        draw.rectangle([btn_x0, 160, btn_x0 + 130, 195], fill=(0, 120, 215))
+        draw.text((btn_x0 + 16, 170), f"Run {app_name[:8].title()}", fill=(255, 255, 255))
+
+        # Typeable search / input field
+        input_x0 = btn_x0 + 150
+        input_w = max(120, self.width - input_x0 - 30)
+        draw.rectangle([input_x0, 160, input_x0 + input_w, 195], fill=(22, 24, 28), outline=(80, 85, 95))
+        draw.text((input_x0 + 12, 170), f"Filter {app_name.lower()} components...", fill=(120, 125, 135))
+
+        # Status Bar
+        draw.rectangle([0, self.height - 24, self.width, self.height], fill=(24, 25, 28))
+        draw.text((12, self.height - 18), f"Ready  |  {app_name.title()} v1.0  |  UTF-8", fill=(140, 145, 155))
+
+        return np.array(img)
+
+    def render_desktop_canvas(
+        self,
+        app_targets: List[str] | None = None,
+    ) -> Tuple[np.ndarray, Dict[str, Tuple[float, float]]]:
+        """Renders desktop wallpaper, taskbar, and configurable application shortcut icons."""
         img = Image.new("RGB", (self.width, self.height), color=(35, 65, 105)) # Windows-style blue wallpaper
         draw = ImageDraw.Draw(img)
 
@@ -53,28 +117,60 @@ class DesktopSceneBuilder:
         draw.rectangle([8, self.height - 26, 32, self.height - 6], fill=(0, 120, 215))
 
         # Desktop Shortcut Icons (normalized coordinates returned)
+        targets = app_targets if app_targets is not None else ["terminal", "chrome", "vscode"]
         icons: Dict[str, Tuple[float, float]] = {}
 
-        # 1. Terminal icon (dark square with green prompt)
-        t_box = [40, 40, 80, 80]
-        draw.rectangle(t_box, fill=(20, 20, 20), outline=(80, 80, 80))
-        draw.text((48, 52), ">_", fill=(50, 220, 100))
-        draw.text((36, 84), "Terminal", fill=(220, 220, 220))
-        icons["terminal"] = ((t_box[0] + t_box[2]) / 2 / self.width, (t_box[1] + t_box[3]) / 2 / self.height)
+        # Styled icon color palette for arbitrary dynamic applications
+        palette = [
+            ((0, 122, 204), (100, 180, 255)),
+            ((234, 67, 53), (251, 188, 5)),
+            ((16, 124, 65), (80, 200, 120)),
+            ((114, 46, 209), (180, 130, 255)),
+            ((230, 110, 25), (255, 180, 80)),
+            ((20, 140, 160), (90, 210, 230)),
+        ]
 
-        # 2. Chrome icon (colored disc)
-        c_box = [40, 120, 80, 160]
-        draw.ellipse(c_box, fill=(234, 67, 53), outline=(251, 188, 5))
-        draw.ellipse([50, 130, 70, 150], fill=(66, 133, 244))
-        draw.text((38, 164), "Chrome", fill=(220, 220, 220))
-        icons["chrome"] = ((c_box[0] + c_box[2]) / 2 / self.width, (c_box[1] + c_box[3]) / 2 / self.height)
+        max_rows_per_col = max(1, (self.height - tb_h - 40) // 80)
 
-        # 3. VS Code icon (blue ribbon)
-        v_box = [40, 200, 80, 240]
-        draw.rectangle(v_box, fill=(0, 122, 204), outline=(100, 180, 255))
-        draw.text((46, 212), "{;}", fill=(255, 255, 255))
-        draw.text((36, 244), "VSCode", fill=(220, 220, 220))
-        icons["vscode"] = ((v_box[0] + v_box[2]) / 2 / self.width, (v_box[1] + v_box[3]) / 2 / self.height)
+        for idx, app_name in enumerate(targets):
+            app_clean = app_name.strip()
+            app_key = app_clean.lower()
+            col = idx // max_rows_per_col
+            row = idx % max_rows_per_col
+            x0 = 40 + col * 75
+            y0 = 40 + row * 80
+            box = [x0, y0, x0 + 40, y0 + 40]
+
+            if app_key in ("terminal", "shell", "powershell", "cmd"):
+                draw.rectangle(box, fill=(20, 20, 20), outline=(80, 80, 80))
+                draw.text((x0 + 8, y0 + 12), ">_", fill=(50, 220, 100))
+                lbl = "Terminal"
+            elif app_key in ("chrome", "browser", "firefox", "brave", "edge"):
+                draw.ellipse(box, fill=(234, 67, 53), outline=(251, 188, 5))
+                draw.ellipse([x0 + 10, y0 + 10, x0 + 30, y0 + 30], fill=(66, 133, 244))
+                lbl = "Chrome"
+            elif app_key in ("vscode", "editor", "code"):
+                draw.rectangle(box, fill=(0, 122, 204), outline=(100, 180, 255))
+                draw.text((x0 + 6, y0 + 12), "{;}", fill=(255, 255, 255))
+                lbl = "VSCode"
+            elif app_key in ("excel", "spreadsheet", "calc"):
+                draw.rectangle(box, fill=(16, 124, 65), outline=(100, 220, 150))
+                draw.text((x0 + 12, y0 + 12), "X", fill=(255, 255, 255))
+                lbl = "Excel"
+            elif app_key in ("notion", "productivity", "docs"):
+                draw.rectangle(box, fill=(240, 240, 240), outline=(100, 100, 100))
+                draw.text((x0 + 12, y0 + 12), "N", fill=(20, 20, 20))
+                lbl = "Notion"
+            else:
+                # Dynamic generic application icon
+                color_bg, color_outline = palette[idx % len(palette)]
+                draw.rectangle(box, fill=color_bg, outline=color_outline)
+                glyph = (app_clean[:2] if len(app_clean) >= 2 else app_clean[:1]).upper()
+                draw.text((x0 + 10, y0 + 12), glyph, fill=(255, 255, 255))
+                lbl = app_clean[:8].title()
+
+            draw.text((x0 - 4, y0 + 44), lbl, fill=(220, 220, 220))
+            icons[app_key] = ((box[0] + box[2]) / 2 / self.width, (box[1] + box[3]) / 2 / self.height)
 
         return np.array(img), icons
 
@@ -107,15 +203,20 @@ class DesktopSceneBuilder:
         steps: int = 6,
     ) -> List[np.ndarray]:
         """Generates an expanding window animation sequence from icon origin to full display."""
-        # Target final window image
-        if app_type == "terminal":
+        # Target final window image dynamically resolved
+        app_key = app_type.strip().lower()
+        if app_key in ("terminal", "shell", "powershell", "cmd"):
             final_screen = self.renderer.render_terminal().frame
-        elif app_type == "chrome":
+        elif app_key in ("chrome", "browser", "firefox", "brave", "edge"):
             final_screen = self.renderer.render_chrome().frame
-        elif app_type == "vscode":
+        elif app_key in ("vscode", "editor", "code"):
             final_screen = self.renderer.render_vscode().frame
+        elif app_key in ("excel", "spreadsheet", "calc"):
+            final_screen = self.renderer.render_excel().frame
+        elif app_key in ("notion", "productivity", "docs"):
+            final_screen = self.renderer.render_notion().frame
         else:
-            final_screen = self.renderer.render_terminal().frame
+            final_screen = self.render_generic_app_window(app_type)
 
         target_img = Image.fromarray(final_screen)
         base_img = Image.fromarray(base_canvas)
@@ -157,22 +258,53 @@ class DesktopSceneBuilder:
         return frames
 
 
-def run_empirical_window_transition_audit() -> Dict[str, Any]:
+def _map_app_to_expected_category(app_name: str) -> str:
+    """Dynamic heuristic mapping from arbitrary application name to expected Ventral semantic category."""
+    k = app_name.strip().lower()
+    if k in ("terminal", "shell", "powershell", "cmd", "bash", "console"):
+        return "terminal_shell"
+    if k in ("chrome", "browser", "firefox", "brave", "edge", "safari", "notion"):
+        return "browser_webpage"
+    if k in ("vscode", "code", "editor", "sublime", "pycharm", "ide"):
+        return "editor_code"
+    if k in ("excel", "spreadsheet", "calc", "sheets", "form"):
+        return "form_input"
+    if k in ("vlc", "spotify", "media", "music", "video", "player"):
+        return "media_playback"
+    if k in ("settings", "control", "preferences", "config"):
+        return "settings_panel"
+    return "browser_webpage"
+
+
+def run_empirical_window_transition_audit(
+    primary_app: str = "terminal",
+    app_targets: List[str] | None = None,
+    steps: int = 6,
+) -> Dict[str, Any]:
     print("=" * 80)
     print("   AVCS EMPIRICAL AUDIT: MULTI-STEP APP LAUNCH & WINDOW TRANSITION TRACKING   ")
     print("=" * 80)
 
+    target_apps = [a.strip() for a in app_targets] if app_targets else ["terminal", "chrome", "vscode"]
+    primary_key = primary_app.strip().lower()
+    if primary_key not in [a.lower() for a in target_apps]:
+        target_apps.insert(0, primary_app)
+
     builder = DesktopSceneBuilder(width=640, height=360)
-    desktop_canvas, icons = builder.render_desktop_canvas()
+    desktop_canvas, icons = builder.render_desktop_canvas(app_targets=target_apps)
 
     results: Dict[str, Any] = {}
+
+    target_coord = icons.get(primary_key)
+    if target_coord is None:
+        primary_key = list(icons.keys())[0]
+        target_coord = icons[primary_key]
 
     # --------------------------------------------------------------------------
     # 1. ICON CLICK & LOCAL VISUAL RIPPLE ASSERTION
     # --------------------------------------------------------------------------
-    print("\n[PART 1: ICON CLICK & LOCAL VISUAL RIPPLE ASSERTION]")
-    terminal_icon_coord = icons["terminal"]
-    clicked_canvas = builder.render_icon_click_ripple(desktop_canvas, terminal_icon_coord)
+    print(f"\n[PART 1: ICON CLICK & LOCAL VISUAL RIPPLE ASSERTION ({primary_key.upper()})]")
+    clicked_canvas = builder.render_icon_click_ripple(desktop_canvas, target_coord)
 
     # Frame capture emulator
     class MemoryCapture:
@@ -190,19 +322,20 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
     verifier = VisualRippleVerifier(eye=eye_click, driver=driver_click, ripple_radius=0.08)
 
     pre_state = eye_click.observe()
-    driver_click.move_to_normalized(terminal_icon_coord[0], terminal_icon_coord[1])
+    driver_click.move_to_normalized(target_coord[0], target_coord[1])
     driver_click.click(button="left")
-    verify_res = verifier.verify_action("click_terminal_icon", terminal_icon_coord, pre_state)
+    verify_res = verifier.verify_action(f"click_{primary_key}_icon", target_coord, pre_state)
 
-    print(f"Target Coordinate:           ({terminal_icon_coord[0]:.4f}, {terminal_icon_coord[1]:.4f})")
+    print(f"Target Coordinate:           ({target_coord[0]:.4f}, {target_coord[1]:.4f})")
     print(f"Optical Ripple Energy:       {verify_res.optical_ripple_energy:.5f} (threshold: {verifier.min_ripple_threshold})")
     print(f"Predictive Surprise Pulse:   {verify_res.surprise_pulse:.5f}")
     print(f"Verification Status:         {verify_res.status.value.upper()}")
     print(f"Causal Summary:              {verify_res.causal_summary}")
     print(f"Verification Latency:        {verify_res.elapsed_ms:.2f} ms")
 
-    assert verify_res.is_successful, "Icon click verification must succeed!"
+    assert verify_res.is_successful, f"Icon click verification for {primary_key} must succeed!"
     results["part1_ripple"] = {
+        "target_app": primary_key,
         "status": verify_res.status.value,
         "ripple_energy": verify_res.optical_ripple_energy,
         "surprise_pulse": verify_res.surprise_pulse,
@@ -212,8 +345,8 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
     # --------------------------------------------------------------------------
     # 2. MAGNOCELLULAR MOTION STREAM & OPTICAL FLOW FIELD
     # --------------------------------------------------------------------------
-    print("\n[PART 2: MAGNOCELLULAR MOTION STREAM & OPTICAL FLOW FIELD]")
-    anim_frames = builder.render_window_launch_animation(desktop_canvas, terminal_icon_coord, app_type="terminal", steps=6)
+    print(f"\n[PART 2: MAGNOCELLULAR MOTION STREAM & OPTICAL FLOW FIELD ({primary_key.upper()})]")
+    anim_frames = builder.render_window_launch_animation(desktop_canvas, target_coord, app_type=primary_key, steps=steps)
     motion_engine = MagnocellularMotionEngine(grid_rows=16, grid_cols=24)
 
     # Initial frame
@@ -267,6 +400,7 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
     print(f"Settled Motion Energy at Target Window:  {settled_motion:.4f}")
     assert peak_motion > 0.02, "Magnocellular engine must detect non-zero optical flow during opening animation!"
     results["part2_motion"] = {
+        "target_app": primary_key,
         "peak_motion": peak_motion,
         "settled_motion": settled_motion,
         "steps": motion_telemetry,
@@ -279,14 +413,16 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
     eye_ventral = HumanEye(source="synthetic", threaded_capture=False)
 
     apps_to_test = [
-        ("terminal", "terminal_shell"),
-        ("chrome", "browser_webpage"),
-        ("vscode", "editor_code"),
+        (app_name, _map_app_to_expected_category(app_name))
+        for app_name in target_apps
     ]
 
     ventral_results = {}
 
     for app_name, target_cat in apps_to_test:
+        app_k = app_name.strip().lower()
+        if app_k not in icons:
+            continue
         eye_ventral.reset()
         # Seed with 2 desktop canvas frames
         st_pre0 = eye_ventral.observe(desktop_canvas)
@@ -294,7 +430,7 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
         pre_cat = st_pre1.primary_category
         pre_conf = st_pre1.category_confidence
 
-        seq = builder.render_window_launch_animation(desktop_canvas, icons[app_name], app_type=app_name, steps=6)
+        seq = builder.render_window_launch_animation(desktop_canvas, icons[app_k], app_type=app_name, steps=steps)
 
         traj = []
         for step_idx, frame in enumerate(seq):
@@ -337,7 +473,7 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
 
     # Lifecycle:
     # 1. Desktop baseline (2 frames)
-    # 2. Window opening animation (6 frames)
+    # 2. Window opening animation (configurable steps)
     # 3. Settled window (2 frames)
     full_sequence = [desktop_canvas, desktop_canvas] + anim_frames + [anim_frames[-1]]
 
@@ -421,4 +557,28 @@ def run_empirical_window_transition_audit() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    run_empirical_window_transition_audit()
+    parser = argparse.ArgumentParser(description="AVCS Empirical Window Transition & App Launch Audit")
+    parser.add_argument(
+        "--app", "--primary-app",
+        dest="primary_app",
+        type=str,
+        default="terminal",
+        help="Primary application target to launch and audit (default: terminal)",
+    )
+    parser.add_argument(
+        "--apps",
+        type=str,
+        default="terminal,chrome,vscode",
+        help="Comma-separated application targets for desktop and ventral audits (default: terminal,chrome,vscode)",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=6,
+        help="Window expansion animation step count (default: 6)",
+    )
+    args = parser.parse_args()
+    targets = [a.strip() for a in args.apps.split(",") if a.strip()]
+    if args.primary_app not in targets:
+        targets.insert(0, args.primary_app)
+    run_empirical_window_transition_audit(primary_app=args.primary_app, app_targets=targets, steps=args.steps)

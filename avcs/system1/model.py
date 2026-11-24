@@ -16,6 +16,7 @@ Design rules, held to strictly:
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import Optional
 
 import torch
@@ -213,9 +214,10 @@ class OneModel(nn.Module):
         if queries is None:
             queries = [""] * b
         q = self.query_to_latent(self.query_encoder(queries, images.device))   # (B, latent)
-        conditioned = z_map * q.unsqueeze(-1).unsqueeze(-1)
+        scale = 1.0 / math.sqrt(q.shape[-1])
+        conditioned = (z_map * q.unsqueeze(-1).unsqueeze(-1)) * scale
         point_logits = conditioned.sum(dim=1).flatten(1)                       # (B, HW)
-        presence_logits = (z_vec * q).sum(dim=-1, keepdim=True)                # (B, 1)
+        presence_logits = torch.logsumexp(point_logits, dim=-1, keepdim=True)  # (B, 1)
 
         return OneModelOutput(
             latent=z_vec,

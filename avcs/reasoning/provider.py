@@ -557,10 +557,11 @@ CRITICAL RULES:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
-                    piece = delta.get("content")
-                    if piece:
-                        got_any = True
-                        yield piece
+                    for piece_key in ("reasoning_content", "content"):
+                        piece = delta.get(piece_key)
+                        if piece:
+                            got_any = True
+                            yield piece
         except Exception:
             if got_any:
                 return

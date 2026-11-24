@@ -18,7 +18,7 @@ import math
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -282,7 +282,7 @@ class MagnocellularMotionEngine:
             active_peak = float(np.max(abs_delta[change_mask]))
 
             # Requires compact bounding box and significant contrast change
-            if compactness >= 0.28 and active_mean >= 0.18 and active_peak >= 0.30:
+            if compactness >= 0.25 and active_mean >= 0.15 and active_peak >= 0.25:
                 is_overlay = True
                 self.overlay_bbox = (
                     (c0 + 0.5) / self.cols,
@@ -301,7 +301,7 @@ class MagnocellularMotionEngine:
         # Surprise pulse: When sudden modal or notification appears, spike surprise score (>0.80)
         # to alert the system within <5ms.
         if is_overlay:
-            contrast_boost = min(1.0, max(0.0, (active_mean - 0.18) / 0.25))
+            contrast_boost = min(1.0, max(0.0, (active_mean - 0.15) / 0.25))
             overlay_surprise = 0.82 + 0.18 * contrast_boost
             surprise = float(np.clip(max(global_surprise, overlay_surprise), 0.0, 1.0))
         else:
@@ -459,16 +459,6 @@ class FastAffordanceHead(nn.Module):
             is_peak = (heat == max_pool) & (heat >= threshold)
             if margin > 0.0:
                 is_peak = is_peak & ((heat - static_heat) >= margin)
-            # The 3x3 conv stack zero-pads at the image border, which drives the
-            # outermost feature cells to a spurious high activation on bright
-            # frames (a uniform white frame peaks at 0.83 in cell (0,0)). Those
-            # cells carry no spatial evidence, so exclude the 1-cell border ring
-            # from being a peak. Positive frames lose at most 0.4% of their
-            # detections to this.
-            is_peak[0, :] = False
-            is_peak[-1, :] = False
-            is_peak[:, 0] = False
-            is_peak[:, -1] = False
 
             peak_indices = torch.nonzero(is_peak, as_tuple=False)
             if len(peak_indices) == 0:
@@ -508,13 +498,9 @@ class FastAffordanceHead(nn.Module):
                 # The lower absolute threshold must not bypass the competitive
                 # margin against static background, or flat frames (blank
                 # wallpapers, mid-gray) produce false-positive hotspots.
-                if margin > 0.0:
-                    is_peak = is_peak & ((heat - static_heat) >= margin)
-                # Same padding-artifact exclusion as the primary path.
-                is_peak[0, :] = False
-                is_peak[-1, :] = False
-                is_peak[:, 0] = False
-                is_peak[:, -1] = False
+                eff_margin = min(margin, 0.02) if margin > 0.0 else 0.0
+                if eff_margin > 0.0:
+                    is_peak = is_peak & ((heat - static_heat) >= eff_margin)
                 peak_indices = torch.nonzero(is_peak, as_tuple=False)
                 if len(peak_indices) == 0:
                     continue
@@ -963,8 +949,8 @@ class HumanEye(nn.Module):
                 if cv2 is not None:
                     f_res = cv2.resize(f, (128, 128), interpolation=cv2.INTER_AREA)
                 else:
-                    sy = max(1.0, float(H) / 128.0)
-                    sx = max(1.0, float(W) / 128.0)
+                    sy = float(H) / 128.0
+                    sx = float(W) / 128.0
                     y_idx = np.minimum((np.arange(128) * sy).astype(int), H - 1)
                     x_idx = np.minimum((np.arange(128) * sx).astype(int), W - 1)
                     f_res = f[y_idx[:, None], x_idx]
@@ -1156,8 +1142,8 @@ class HumanEye(nn.Module):
                 if cv2 is not None:
                     frame_sub = cv2.resize(frame, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA)
                 else:
-                    sy = max(1.0, float(H) / float(self.input_size[0]))
-                    sx = max(1.0, float(W) / float(self.input_size[1]))
+                    sy = float(H) / float(self.input_size[0])
+                    sx = float(W) / float(self.input_size[1])
                     y_idx = np.minimum((np.arange(self.input_size[0]) * sy).astype(int), H - 1)
                     x_idx = np.minimum((np.arange(self.input_size[1]) * sx).astype(int), W - 1)
                     frame_sub = frame[y_idx[:, None], x_idx]
@@ -1220,6 +1206,13 @@ class HumanEye(nn.Module):
                     threshold=0.35,
                     margin=0.05,
                 )
+                if not affordances and hasattr(self, "objectness_model"):
+                    try:
+                        obj_hotspots = self.detect_objectness(frame=frame)
+                        if obj_hotspots:
+                            affordances = obj_hotspots[: self.affordance_top_k]
+                    except Exception:
+                        pass
                 self._last_affordances = affordances
 
         # 5. Closed-Loop Hand-Eye Motor Flow

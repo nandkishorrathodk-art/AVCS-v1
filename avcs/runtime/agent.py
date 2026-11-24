@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import time
@@ -156,6 +157,8 @@ class AceAgent:
         min_peak_probability: float = 0.75,
         checkpoint_path: Optional[str] = "runs/weights/goal_grounder_best.pt",
         embedded_runtime: Optional[Any] = None,
+        vla_client: Optional[Any] = None,
+        vla_server_url: Optional[str] = None,
     ) -> None:
         self.client = client or CustomLLMClient()
         self.grounder = grounder
@@ -168,6 +171,18 @@ class AceAgent:
         self._embedded_runtime_attempted = False
         self.shadow_history: List[Dict[str, Any]] = []
         self.current_session: Optional[AceAgentSession] = None
+
+        # Fast Brain remote VLA client (/ws/act persistent streaming)
+        self.vla_client = vla_client
+        if self.vla_client is None:
+            v_url = vla_server_url or os.environ.get("AVCS_VLA_SERVER_URL", "")
+            if v_url:
+                try:
+                    from avcs.runtime.vla_client import VLAClient
+                    self.vla_client = VLAClient(server_url=v_url, use_websocket=True)
+                    logger.info(f"AceAgent: Initialized Fast Brain WebSocket VLA client to {v_url} (/ws/act)")
+                except Exception as e:
+                    logger.warning(f"AceAgent: Failed to initialize VLAClient for {v_url}: {e}")
 
     def _get_embedded_runtime(self) -> Optional[Any]:
         """Lazily initializes the in-process EmbeddedVAMRuntime for fast reflexive actions."""
@@ -514,8 +529,86 @@ class AceAgent:
         blacklisted_coordinates: Optional[Any] = None,
     ) -> Tuple[Action, float]:
         """Processes visual observation and returns next physical Action with latency in ms."""
-        # 1. Gated Actuation Mode: Local Fast Brain first if enabled and not in shadow mode
-        if self.enable_grounder and not self.shadow_mode:
+        # 1. Gated Actuation Mode: Remote WebSocket VLA (Fast Brain) first if configured
+        if self.vla_client is not None and not self.shadow_mode:
+            t0 = time.perf_counter()
+            try:
+                frame_input = getattr(observation, "raw_numpy", None)
+                if frame_input is None:
+                    raw_bytes = getattr(observation, "image_bytes", None)
+                    if raw_bytes:
+                        # Zero-copy passthrough if already binary JPEG bytes
+                        if len(raw_bytes) >= 2 and raw_bytes[0] == 0xFF and raw_bytes[1] == 0xD8:
+                            frame_input = raw_bytes
+                        else:
+                            frame_input = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+
+                w = getattr(observation, "width", self.CANONICAL_WIDTH) or self.CANONICAL_WIDTH
+                h = getattr(observation, "height", self.CANONICAL_HEIGHT) or self.CANONICAL_HEIGHT
+
+                vla_res = self.vla_client.act(
+                    frame=frame_input,
+                    instruction=goal,
+                    width=w,
+                    height=h,
+                )
+                vla_lat = (time.perf_counter() - t0) * 1000.0
+
+                action_name = str(vla_res.get("action", "left_click")).lower().strip()
+                coord = vla_res.get("coordinate")
+                target_coord = (int(coord[0]), int(coord[1])) if (isinstance(coord, (list, tuple)) and len(coord) == 2) else None
+
+                is_blacklisted = False
+                if target_coord and blacklisted_coordinates:
+                    gx, gy = target_coord
+                    is_blacklisted = any(
+                        abs(gx - bx) <= 5 and abs(gy - by) <= 5
+                        for bx, by in blacklisted_coordinates
+                    )
+
+                if is_blacklisted:
+                    logger.warning(
+                        f"[FAST BRAIN VLA FALLBACK] Target coordinate {target_coord} is blacklisted due to prior deadlock. "
+                        "Falling back to Cloud LLM."
+                    )
+                else:
+                    act_kind_map = {
+                        "left_click": ActionKind.LEFT_CLICK,
+                        "right_click": ActionKind.RIGHT_CLICK,
+                        "double_click": ActionKind.DOUBLE_CLICK,
+                        "triple_click": ActionKind.TRIPLE_CLICK,
+                        "mouse_move": ActionKind.MOUSE_MOVE,
+                        "wait": ActionKind.WAIT,
+                        "stop": ActionKind.STOP,
+                        "key": ActionKind.KEY,
+                        "type": ActionKind.TYPE,
+                        "type_text": ActionKind.TYPE,
+                    }
+                    act_kind = act_kind_map.get(action_name, ActionKind.LEFT_CLICK)
+                    vla_act = Action(
+                        kind=act_kind,
+                        coordinate=target_coord,
+                        confidence=1.0,
+                        reason=f"WebSocket VLA Fast Brain '{action_name}' {target_coord} ({vla_res.get('roundtrip_ms', vla_lat):.1f}ms)",
+                        metadata={
+                            "fast_brain": True,
+                            "vla_streaming": True,
+                            "roundtrip_ms": vla_res.get("roundtrip_ms", vla_lat),
+                            "latency_ms": vla_res.get("latency_ms", 0.0),
+                        },
+                    )
+                    validated = self.validate_action(vla_act)
+                    if validated.kind != ActionKind.WAIT or act_kind == ActionKind.WAIT:
+                        logger.info(
+                            f"[FAST BRAIN DIRECT ACTUATION] WebSocket VLA predicted {validated.kind.value} {validated.coordinate} "
+                            f"in {vla_lat:.1f}ms (bypassing Cloud LLM)."
+                        )
+                        return validated, vla_lat
+            except Exception as e:
+                logger.warning(f"[FAST BRAIN FALLBACK] WebSocket VLA failed ({e}). Falling back to Cloud LLM.")
+
+        # Local Grounder fallback only if explicitly enabled
+        elif self.enable_grounder and not self.shadow_mode:
             grounder_act, grounder_lat = self.predict_with_grounder(
                 observation, goal, step_index=step_index
             )

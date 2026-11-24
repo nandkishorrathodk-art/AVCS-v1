@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from avcs.models.local_model import AceClientError, EmbeddedVAMRuntime, LocalVAMClient
 from avcs.models.vla_cortex import (
+    ACTION_VOCAB_10,
     AVCSPhase4MultiTaskLoss,
     CUDAGraphRunner,
     DAggerFailureType,
@@ -17,6 +18,7 @@ from avcs.models.vla_cortex import (
     FlowMatchingDragExpert,
     GUIActorPatchPointer,
     GUIPointerOutput,
+    LiteTrain,
     ParallelActionHeads,
     ParallelActionOutput,
     PlaybackEpisode,
@@ -28,6 +30,7 @@ from avcs.models.vla_cortex import (
     RollingKVMemory,
     RollingMemoryState,
     ShowUITokenPruner,
+    UnifiedMultiTaskLoss,
     VLACortexConfig,
     VLACortexModel,
     VLACortexOutput,
@@ -37,6 +40,7 @@ from avcs.models.vla_cortex import (
 LocalVAMEngine = LocalVAMClient
 
 __all__ = [
+    "ACTION_VOCAB_10",
     "AVCSPhase4MultiTaskLoss",
     "AceClientError",
     "CUDAGraphRunner",
@@ -47,6 +51,7 @@ __all__ = [
     "FlowMatchingDragExpert",
     "GUIActorPatchPointer",
     "GUIPointerOutput",
+    "LiteTrain",
     "LocalVAMClient",
     "LocalVAMEngine",
     "ParallelActionHeads",
@@ -60,6 +65,7 @@ __all__ = [
     "RollingKVMemory",
     "RollingMemoryState",
     "ShowUITokenPruner",
+    "UnifiedMultiTaskLoss",
     "VLACortexConfig",
     "VLACortexModel",
     "VLACortexOutput",

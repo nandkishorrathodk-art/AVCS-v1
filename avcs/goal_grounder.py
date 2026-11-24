@@ -76,7 +76,7 @@ def encode_queries(queries: Sequence[str], max_length: int = MAX_QUERY_BYTES) ->
 
 def extract_subpixel_peak(
     logits: torch.Tensor,
-    epsilon: float = 1e-7,
+    epsilon: float = 1e-6,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Extracts sub-pixel peak coordinates and peak confidence without center-collapse.
 
@@ -93,11 +93,12 @@ def extract_subpixel_peak(
         confidence: Peak sigmoid confidence values [B] in [0, 1] range
     """
     B, _, H, W = logits.shape
-    padded = F.pad(logits, (1, 1, 1, 1), mode="replicate")
-    flat_idx = logits.flatten(1).argmax(dim=-1)
-    r_star = flat_idx // W
-    c_star = flat_idx % W
+    sanitized = torch.nan_to_num(logits, nan=-1e4, posinf=1e4, neginf=-1e4)
+    flat_idx = sanitized.flatten(1).argmax(dim=-1)
+    r_star = torch.div(flat_idx, W, rounding_mode="floor")
+    c_star = flat_idx.remainder(W)
 
+    padded = F.pad(sanitized, (1, 1, 1, 1), mode="replicate")
     rp = r_star + 1
     cp = c_star + 1
 
@@ -108,14 +109,20 @@ def extract_subpixel_peak(
     l_top = padded[b_idx, 0, rp - 1, cp]
     l_bottom = padded[b_idx, 0, rp + 1, cp]
 
-    denom_x = 2.0 * (2.0 * l_c - l_right - l_left).clamp_min(epsilon)
+    curv_x = (2.0 * l_c - l_right - l_left).clamp_min(1e-6)
+    denom_x = 2.0 * curv_x
     delta_x = torch.clamp((l_right - l_left) / denom_x, -0.5, 0.5)
 
-    denom_y = 2.0 * (2.0 * l_c - l_bottom - l_top).clamp_min(epsilon)
+    curv_y = (2.0 * l_c - l_bottom - l_top).clamp_min(1e-6)
+    denom_y = 2.0 * curv_y
     delta_y = torch.clamp((l_bottom - l_top) / denom_y, -0.5, 0.5)
 
-    pred_x = (c_star.float() + 0.5 + delta_x) / float(W)
-    pred_y = (r_star.float() + 0.5 + delta_y) / float(H)
+    # Zero subpixel shifts on screen border cells to prevent duplicate artificial edge peaks
+    delta_x = torch.where((c_star == 0) | (c_star == W - 1), torch.zeros_like(delta_x), delta_x)
+    delta_y = torch.where((r_star == 0) | (r_star == H - 1), torch.zeros_like(delta_y), delta_y)
+
+    pred_x = ((c_star.float() + 0.5 + delta_x) / float(W)).clamp(0.0, 1.0)
+    pred_y = ((r_star.float() + 0.5 + delta_y) / float(H)).clamp(0.0, 1.0)
     coords = torch.stack([pred_x, pred_y], dim=-1)
     confidence = torch.sigmoid(l_c)
     return coords, confidence
@@ -156,6 +163,28 @@ class ByteQueryEncoder(nn.Module):
         return self.projection(torch.cat((mean, maximum), dim=1))
 
 
+class CombinedMaxAvgPool2d(nn.Module):
+    """Combined Max and Average Pooling (with Log-Sum-Exp support) over spatial dimensions.
+
+    Combines adaptive max pooling and average pooling: 0.5 * (avg + max)
+    to eliminate spatial dilution of localized targets while preserving background context.
+    """
+
+    def __init__(self, output_size: int = 1, mode: str = "max_avg") -> None:
+        super().__init__()
+        self.output_size = output_size
+        self.mode = mode
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mode == "lse":
+            B, C = x.shape[:2]
+            lse = torch.logsumexp(x.view(B, C, -1), dim=-1)
+            return lse.view(B, C, 1, 1)
+        avg_p = F.adaptive_avg_pool2d(x, self.output_size)
+        max_p = F.adaptive_max_pool2d(x, self.output_size)
+        return 0.5 * (avg_p + max_p)
+
+
 class GoalConditionedGrounder(nn.Module):
     """Real-Time Cross-Modal Neural Grounding Architecture (<10ms CPU).
 
@@ -186,6 +215,8 @@ class GoalConditionedGrounder(nn.Module):
 
         # 3. FiLM Query Modulation (scale and bias)
         self.query_modulation = nn.Linear(feature_dim, feature_dim * 2)
+        nn.init.zeros_(self.query_modulation.weight)
+        nn.init.zeros_(self.query_modulation.bias)
 
         # 4. 2-layer Conv Head with BatchNorm and ReLU
         self.head_conv1 = ConvBNAct(feature_dim, 32, kernel_size=3, padding=1)
@@ -195,9 +226,9 @@ class GoalConditionedGrounder(nn.Module):
             nn.Conv2d(32, 1, kernel_size=1),
         )
 
-        # 5. Existence Head (GAP + Linear)
+        # 5. Existence Head (Combined Max+Avg Pool + Linear)
         self.existence_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+            CombinedMaxAvgPool2d(1),
             nn.Flatten(1),
             nn.Linear(feature_dim, 1),
         )
@@ -313,7 +344,7 @@ class GoalConditionedGrounder(nn.Module):
 
         # FiLM Spatial Modulation
         scale, bias = self.query_modulation(query_emb).chunk(2, dim=-1)
-        scale = scale.unsqueeze(-1).unsqueeze(-1)
+        scale = torch.tanh(scale).unsqueeze(-1).unsqueeze(-1)
         bias = bias.unsqueeze(-1).unsqueeze(-1)
         modulated = feat * (1.0 + scale) + bias
 

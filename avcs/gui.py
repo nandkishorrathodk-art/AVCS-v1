@@ -7,10 +7,11 @@ dorsal affordance visualization, and physical closed-loop mouse steering.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import sys
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 try:
     import tkinter as tk
@@ -33,7 +34,13 @@ from avcs.human_eye import HumanEye, HumanEyeState
 class AVCSDesktopApp:
     """Native Computer Desktop GUI for AVCS."""
 
-    def __init__(self, root: tk.Tk, fps: int = 25, source: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        fps: int = 25,
+        source: Optional[Any] = None,
+        allow_capture: bool = False,
+    ) -> None:
         self.root = root
         self.root.title("AVCS // Artificial Visual Cortex - Desktop Station")
         self.root.geometry("1180x760")
@@ -41,7 +48,17 @@ class AVCSDesktopApp:
         self.root.configure(bg="#0d1117")
 
         self.fps = fps
-        self.eye = ScreenEye(fps=fps, source=source)
+        self.allow_capture = bool(allow_capture)
+        try:
+            self.eye = ScreenEye(fps=fps, source=source)
+        except Exception:
+            if source is None:
+                from forge.vision.capture import SyntheticScreen
+
+                source = SyntheticScreen()
+                self.eye = ScreenEye(fps=fps, source=source)
+            else:
+                raise
         self.human_eye = HumanEye(source=self.eye.source, threaded_capture=True if source is None else False)
 
         # State tracking
@@ -57,25 +74,102 @@ class AVCSDesktopApp:
         self.latest_state: Optional[CortexState] = None
         self.latest_human_state: Optional[HumanEyeState] = None
         self._canvas_img_id: Optional[int] = None
+        self._last_drawn_image: Optional[Image.Image] = None
 
         self._build_ui()
-        self._apply_capture_exclusion()
+        self._setup_hotkeys()
         self._start_perception_thread()
         self._schedule_gui_refresh()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _apply_capture_exclusion(self) -> None:
-        """Excludes this HUD window from OS screen capture to eliminate recursive mirror feedback."""
+        # Delay capture exclusion until DWM has fully registered the window.
+        # Calling SetWindowDisplayAffinity before the compositor owns the HWND
+        # silently succeeds but has no effect, leaving the HUD visible to
+        # BitBlt/mss and causing the recursive mirror feedback loop.
+        self.root.after(300, self._apply_capture_exclusion)
+        self._wda_retry_count = 0
+
+    def set_capture_affinity(self, allow_capture: bool) -> bool:
+        """Sets the Win32 window display capture affinity.
+
+        When allow_capture is False (default), the window is excluded from OS screen
+        captures via WDA_EXCLUDEFROMCAPTURE (0x11) to eliminate recursive mirror feedback.
+        When allow_capture is True, exclusion is removed via WDA_NONE (0x00), allowing
+        Windows screenshot tools (Win+Shift+S, Snipping Tool, OBS, ShareX) to capture the window.
+        """
+        self.allow_capture = bool(allow_capture)
+        if hasattr(self, "var_capture"):
+            self.var_capture.set(self.allow_capture)
+        if hasattr(self, "status_capture_badge"):
+            if self.allow_capture:
+                self.status_capture_badge.config(text="CAPTURE: ALLOWED [T]", fg="#3fb950")
+            else:
+                self.status_capture_badge.config(text="CAPTURE: EXCLUDED [T]", fg="#8b949e")
+
         if sys.platform == "win32":
             try:
                 import ctypes
                 self.root.update_idletasks()
-                hwnd = int(self.root.wm_frame(), 16)
-                # WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
-                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+                hwnd = self._resolve_top_hwnd()
+
+                u32 = ctypes.windll.user32
+                if hasattr(u32, "SetWindowDisplayAffinity"):
+                    u32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                    u32.SetWindowDisplayAffinity.restype = ctypes.c_bool
+                    # WDA_NONE = 0x00000000; WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
+                    desired = 0x00000000 if self.allow_capture else 0x00000011
+                    res = u32.SetWindowDisplayAffinity(hwnd, desired)
+                    if res:
+                        # Verify the affinity was actually applied by reading it back.
+                        u32.GetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+                        u32.GetWindowDisplayAffinity.restype = ctypes.c_bool
+                        actual = ctypes.c_uint32(0)
+                        if u32.GetWindowDisplayAffinity(hwnd, ctypes.byref(actual)):
+                            self._wda_active = (actual.value == 0x00000011)
+                            return actual.value == desired
+                        self._wda_active = not self.allow_capture
+                    return bool(res)
             except Exception:
                 pass
+        self._wda_active = False
+        return False
+
+    def _resolve_top_hwnd(self) -> int:
+        """Resolves the top-level Win32 HWND for this Tk root window."""
+        import ctypes
+        hwnd = 0
+        try:
+            raw_frame = self.root.wm_frame()
+            hwnd = int(str(raw_frame), 0) if str(raw_frame).startswith(("0x", "0X")) else int(str(raw_frame))
+        except Exception:
+            pass
+        if not hwnd:
+            hwnd = int(self.root.winfo_id())
+            u32 = ctypes.windll.user32
+            u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            u32.GetAncestor.restype = ctypes.c_void_p
+            top_hwnd = u32.GetAncestor(hwnd, 2)
+            if top_hwnd:
+                hwnd = top_hwnd
+        return hwnd
+
+    def toggle_capture_affinity(self, event: Optional[tk.Event] = None) -> bool:
+        """Toggles between capture-allowed and capture-excluded."""
+        return self.set_capture_affinity(not self.allow_capture)
+
+    def _apply_capture_exclusion(self) -> None:
+        """Initializes OS screen capture affinity for this HUD window.
+
+        On first call after the DWM delay, retries up to 3 times at 500ms
+        intervals if SetWindowDisplayAffinity does not stick.  This handles
+        the race where the compositor has not yet fully registered the HWND.
+        """
+        success = self.set_capture_affinity(self.allow_capture)
+        retry = getattr(self, "_wda_retry_count", 0)
+        if not success and not self.allow_capture and retry < 3:
+            self._wda_retry_count = retry + 1
+            self.root.after(500, self._apply_capture_exclusion)
 
     def _build_ui(self) -> None:
         # Top Header Bar
@@ -100,6 +194,16 @@ class AVCSDesktopApp:
             padx=10,
         )
         self.status_badge.pack(side=tk.RIGHT)
+
+        self.status_capture_badge = tk.Label(
+            header,
+            text="CAPTURE: ALLOWED [T]" if self.allow_capture else "CAPTURE: EXCLUDED [T]",
+            font=("Segoe UI", 9, "bold"),
+            fg="#3fb950" if self.allow_capture else "#8b949e",
+            bg="#161b22",
+            padx=8,
+        )
+        self.status_capture_badge.pack(side=tk.RIGHT)
 
         # Main Layout: Canvas on Left (70%), Control Panel on Right (30%)
         main_body = tk.Frame(self.root, bg="#0d1117", padx=12, pady=12)
@@ -333,6 +437,50 @@ class AVCSDesktopApp:
             command=self._on_top_toggle,
         ).pack(anchor=tk.W)
 
+        self.var_capture = tk.BooleanVar(value=self.allow_capture)
+        self.chk_capture = tk.Checkbutton(
+            sec4,
+            text="Allow Screen Capture (Snipping Tool / OBS) [T / F11]",
+            variable=self.var_capture,
+            fg="#c9d1d9",
+            bg="#161b22",
+            selectcolor="#0d1117",
+            activebackground="#161b22",
+            command=self._on_capture_toggle,
+        )
+        self.chk_capture.pack(anchor=tk.W)
+
+        btn_cap_box = tk.Frame(sec4, bg="#161b22")
+        btn_cap_box.pack(fill=tk.X, pady=(6, 2))
+
+        self.btn_toggle_capture = tk.Button(
+            btn_cap_box,
+            text="Toggle Capture (T / F11)",
+            font=("Segoe UI", 8, "bold"),
+            bg="#21262d",
+            fg="#c9d1d9",
+            activebackground="#30363d",
+            relief=tk.FLAT,
+            command=self.toggle_capture_affinity,
+            padx=4,
+            pady=3,
+        )
+        self.btn_toggle_capture.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        self.btn_save_snapshot = tk.Button(
+            btn_cap_box,
+            text="Save Screenshot (Ctrl+S / P)",
+            font=("Segoe UI", 8, "bold"),
+            bg="#238636",
+            fg="#ffffff",
+            activebackground="#2ea043",
+            relief=tk.FLAT,
+            command=self.save_snapshot,
+            padx=4,
+            pady=3,
+        )
+        self.btn_save_snapshot.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
     def _make_stat_row(self, parent: tk.Widget, label_text: str, val_text: str, val_color: str) -> tk.Label:
         row = tk.Frame(parent, bg="#161b22")
         row.pack(fill=tk.X, pady=2)
@@ -350,6 +498,79 @@ class AVCSDesktopApp:
     def _on_top_toggle(self) -> None:
         self.always_on_top = self.var_top.get()
         self.root.attributes("-topmost", self.always_on_top)
+
+    def _on_capture_toggle(self) -> None:
+        self.set_capture_affinity(self.var_capture.get())
+
+    def _setup_hotkeys(self) -> None:
+        """Registers hotkeys for capture toggle and saving snapshots."""
+        # Capture display affinity toggle hotkeys (T, F11)
+        self.root.bind("<F11>", lambda e: self.toggle_capture_affinity())
+        self.root.bind("<Key-t>", self._on_key_toggle_capture)
+        self.root.bind("<Key-T>", self._on_key_toggle_capture)
+
+        # Snapshot / screenshot hotkeys (Ctrl+S, F12, PrintScreen, P)
+        self.root.bind("<Control-s>", lambda e: self.save_snapshot())
+        self.root.bind("<Control-S>", lambda e: self.save_snapshot())
+        self.root.bind("<F12>", lambda e: self.save_snapshot())
+        self.root.bind("<Print>", lambda e: self.save_snapshot())
+        self.root.bind("<Key-p>", self._on_key_save_snapshot)
+        self.root.bind("<Key-P>", self._on_key_save_snapshot)
+
+    def _on_key_toggle_capture(self, event: tk.Event) -> None:
+        """Key handler to avoid triggering when typing in input boxes."""
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        self.toggle_capture_affinity()
+
+    def _on_key_save_snapshot(self, event: tk.Event) -> None:
+        """Key handler to avoid triggering when typing in input boxes."""
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        self.save_snapshot()
+
+    def save_snapshot(
+        self,
+        path: Optional[Union[str, Path, tk.Event]] = None,
+        event: Optional[tk.Event] = None,
+    ) -> Optional[str]:
+        """Saves a snapshot of the current perception visual frame to disk."""
+        if isinstance(path, tk.Event):
+            event = path
+            path = None
+
+        target_img = getattr(self, "_last_drawn_image", None)
+        if target_img is None and self.latest_frame is not None:
+            target_img = Image.fromarray(self.latest_frame)
+
+        if target_img is None:
+            if hasattr(self, "motor_status_lbl"):
+                self.motor_status_lbl.config(
+                    text="No visual frame available yet to save snapshot.",
+                    fg="#d29922",
+                )
+            return None
+
+        if path is not None:
+            filepath = Path(path)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            snap_dir = Path("runs/screenshots")
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"avcs_hud_{timestamp}.png"
+            filepath = snap_dir / filename
+
+        try:
+            target_img.save(filepath)
+            msg = f"Screenshot saved: {filepath.name}"
+            if hasattr(self, "motor_status_lbl"):
+                self.motor_status_lbl.config(text=msg, fg="#3fb950")
+            return str(filepath)
+        except Exception as e:
+            if hasattr(self, "motor_status_lbl"):
+                self.motor_status_lbl.config(text=f"Failed to save screenshot: {e}", fg="#f85149")
+        return None
 
     def on_canvas_click(self, event: tk.Event) -> None:
         cw = max(1, self.canvas.winfo_width())
@@ -549,8 +770,53 @@ class AVCSDesktopApp:
         cw = max(100, self.canvas.winfo_width())
         ch = max(100, self.canvas.winfo_height())
 
-        img = Image.fromarray(frame).resize((cw, ch), Image.BILINEAR)
+        # Anti-recursion shield: When allow_capture is enabled (or before WDA kicks in),
+        # mask out the HUD window's footprint on the screen capture to eliminate the
+        # infinite mirror / Droste recursion feedback loop.
+        source_frame = frame
+        hud_box_screen: Optional[Tuple[int, int, int, int]] = None
+        if self.allow_capture or not getattr(self, "_wda_active", False):
+            try:
+                fh, fw = frame.shape[:2]
+                sw = max(1, self.root.winfo_screenwidth())
+                sh = max(1, self.root.winfo_screenheight())
+                scale_x = fw / sw
+                scale_y = fh / sh
+
+                rx = int(self.root.winfo_rootx() * scale_x)
+                ry = int(self.root.winfo_rooty() * scale_y)
+                rw = int(self.root.winfo_width() * scale_x)
+                rh = int(self.root.winfo_height() * scale_y)
+
+                x1 = max(0, min(fw, rx))
+                y1 = max(0, min(fh, ry))
+                x2 = max(0, min(fw, rx + rw))
+                y2 = max(0, min(fh, ry + rh))
+
+                if x2 > x1 and y2 > y1:
+                    source_frame = frame.copy()
+                    source_frame[y1:y2, x1:x2] = (13, 17, 23)
+                    hud_box_screen = (x1, y1, x2, y2)
+            except Exception:
+                source_frame = frame
+
+        img = Image.fromarray(source_frame).resize((cw, ch), Image.BILINEAR)
         draw = ImageDraw.Draw(img)
+
+        # Draw anti-recursion shield badge on HUD's own footprint in canvas
+        if hud_box_screen is not None and (self.allow_capture or not getattr(self, "_wda_active", False)):
+            try:
+                fh, fw = frame.shape[:2]
+                hx1, hy1, hx2, hy2 = hud_box_screen
+                bx1 = int((hx1 / fw) * cw)
+                by1 = int((hy1 / fh) * ch)
+                bx2 = int((hx2 / fw) * cw)
+                by2 = int((hy2 / fh) * ch)
+                draw.rectangle([bx1, by1, bx2, by2], fill="#161b22", outline="#58a6ff", width=2)
+                draw.text((bx1 + 10, by1 + 10), "AVCS CORTEX HUD // ACTIVE DESKTOP STATION", fill="#58a6ff")
+                draw.text((bx1 + 10, by1 + 26), "Anti-Recursion Shield Active", fill="#8b949e")
+            except Exception:
+                pass
 
         # 1. Draw Dorsal Affordance Hotspots (Dual-Stroke for high contrast on light/dark themes)
         if self.show_affordances and state.action_hotspots:
@@ -617,6 +883,18 @@ class AVCSDesktopApp:
             draw.rectangle([px1, py1, px2, py2], outline="#ffd700", width=2)
             draw.text((px1, max(0, py1 - 13)), f"FOVEA: {insp.element_kind.upper()} ({insp.confidence:.0%})", fill="#ffd700")
 
+        # 6. Warning banner when capture exclusion is off (recursive mirror expected)
+        if self.allow_capture:
+            banner_y = ch - 28
+            draw.rectangle([0, banner_y, cw, ch], fill="#b3200080")
+            draw.text(
+                (8, banner_y + 6),
+                "MIRROR MODE: Press T to exclude HUD from capture",
+                fill="#ffffff",
+            )
+
+        self._last_drawn_image = img.copy()
+
         # Convert to PhotoImage and update canvas item without memory leak
         photo = ImageTk.PhotoImage(image=img)
         if self._canvas_img_id is None:
@@ -662,11 +940,28 @@ class AVCSDesktopApp:
             pass
 
 
-def launch_gui() -> None:
+def launch_gui(
+    root: Optional[Any] = None,
+    fps: int = 25,
+    source: Optional[Any] = None,
+    mainloop: Optional[bool] = None,
+    allow_capture: bool = False,
+    **kwargs: Any,
+) -> AVCSDesktopApp:
     """Launches the AVCS Desktop Station GUI application."""
-    root = tk.Tk()
-    app = AVCSDesktopApp(root=root, fps=25)
-    root.mainloop()
+    if isinstance(root, bool):
+        allow_capture = root
+        root = None
+    elif isinstance(root, (int, float)):
+        fps = int(root)
+        root = None
+    should_loop = mainloop if mainloop is not None else (root is None)
+    if root is None:
+        root = tk.Tk()
+    app = AVCSDesktopApp(root=root, fps=fps, source=source, allow_capture=allow_capture)
+    if should_loop:
+        root.mainloop()
+    return app
 
 
 if __name__ == "__main__":

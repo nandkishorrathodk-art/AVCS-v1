@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import argparse
 import collections
 import gc
 import json
@@ -23,11 +24,84 @@ import time
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+from PIL import Image, ImageDraw
 import psutil
 import torch
 
 from avcs.controller import AVCSController, SceneObservation
 from forge.vision.cortex.benchmark_real_desktop import RealisticDesktopRenderer
+
+
+def render_dynamic_app_screen(
+    renderer: RealisticDesktopRenderer,
+    app_name: str,
+    width: int = 1280,
+    height: int = 720,
+) -> np.ndarray:
+    """Procedurally renders or dynamically dispatches high-fidelity application frames."""
+    app_key = app_name.strip().lower()
+    if app_key in ("vscode", "editor", "code", "pycharm"):
+        return renderer.render_vscode().frame
+    if app_key in ("chrome", "browser", "firefox", "brave", "edge", "safari"):
+        return renderer.render_chrome().frame
+    if app_key in ("excel", "spreadsheet", "calc", "sheets"):
+        return renderer.render_excel().frame
+    if app_key in ("notion", "productivity", "docs", "notes"):
+        return renderer.render_notion().frame
+    if app_key in ("terminal", "shell", "powershell", "cmd"):
+        return renderer.render_terminal().frame
+
+    # Procedurally generate realistic dynamic application workspace canvas
+    img = Image.new("RGB", (width, height), color=(32, 34, 38))
+    draw = ImageDraw.Draw(img)
+
+    # Window titlebar
+    draw.rectangle([0, 0, width, 40], fill=(45, 48, 54))
+    draw.text((20, 12), f"{app_name.title()} - Dynamic Target Application Workspace", fill=(225, 225, 230))
+
+    # Window controls (close, max, min)
+    draw.rectangle([width - 50, 0, width, 40], fill=(196, 43, 28))
+    draw.text((width - 32, 12), "X", fill=(255, 255, 255))
+    draw.rectangle([width - 96, 0, width - 50, 40], fill=(60, 63, 70))
+    draw.rectangle([width - 80, 14, width - 66, 26], outline=(200, 200, 200), fill=None)
+    draw.rectangle([width - 142, 0, width - 96, 40], fill=(60, 63, 70))
+    draw.line([width - 126, 24, width - 112, 24], fill=(200, 200, 200), width=2)
+
+    # Ribbon / Menu bar
+    draw.rectangle([0, 40, width, 76], fill=(54, 57, 64))
+    for i, item in enumerate(["File", "Edit", "View", "Tools", "Window", "Help"]):
+        draw.text((24 + i * 85, 50), item, fill=(200, 200, 205))
+
+    # Navigation sidebar
+    sb_w = 240
+    draw.rectangle([0, 76, sb_w, height - 32], fill=(38, 41, 47))
+    draw.text((20, 92), f"{app_name.upper()} EXPLORER", fill=(140, 145, 155))
+    for i, nav in enumerate(["Dashboard", "Streams", "Pipelines", "Metrics", "Settings"]):
+        ny = 124 + i * 36
+        draw.rectangle([12, ny, sb_w - 12, ny + 28], fill=(48, 52, 60))
+        draw.text((24, ny + 6), nav, fill=(215, 215, 220))
+
+    # Main application workspace
+    cw_x = sb_w + 24
+    draw.rectangle([cw_x, 96, width - 30, 200], fill=(44, 48, 56), outline=(70, 75, 88))
+    draw.text((cw_x + 24, 116), f"Active Workspace: {app_name.title()} Environment", fill=(255, 255, 255))
+    draw.text((cw_x + 24, 144), f"Dynamic visual sensory stream online. Model context bound.", fill=(160, 165, 175))
+
+    # Interactive action button
+    btn_x = cw_x + 24
+    draw.rectangle([btn_x, 230, btn_x + 180, 275], fill=(0, 120, 215))
+    draw.text((btn_x + 20, 244), f"Execute {app_name[:10].title()}", fill=(255, 255, 255))
+
+    # Typeable search / filter omnibox
+    search_x = btn_x + 210
+    draw.rectangle([search_x, 230, width - 60, 275], fill=(24, 26, 30), outline=(90, 95, 108))
+    draw.text((search_x + 16, 244), f"Search {app_name.lower()} components or input commands...", fill=(130, 135, 145))
+
+    # Bottom status bar
+    draw.rectangle([0, height - 32, width, height], fill=(24, 26, 29))
+    draw.text((16, height - 24), f"Ready  |  Target: {app_name.title()}  |  Single-Thread CPU Soak  |  UTF-8", fill=(140, 145, 155))
+
+    return np.array(img)
 
 
 def format_percentiles(arr: np.ndarray) -> Dict[str, float]:
@@ -142,16 +216,18 @@ def run_profiling_session(
     dynamic_stimuli: bool = False,
     num_iterations: int = 250,
     warmup_iterations: int = 20,
+    app_targets: List[str] | None = None,
+    cpu_threads: int = 1,
 ) -> Dict[str, Any]:
     print(f"\n{'='*78}")
     print(f" Starting Soak Profiling Session: {name}")
-    print(f" Iterations: {num_iterations} | 1 CPU Thread | Dynamic Stimuli: {dynamic_stimuli}")
+    print(f" Iterations: {num_iterations} | {cpu_threads} CPU Thread(s) | Dynamic Stimuli: {dynamic_stimuli}")
     print(f"{'='*78}")
 
-    torch.set_num_threads(1)
+    torch.set_num_threads(cpu_threads)
     if hasattr(torch, "set_num_interop_threads"):
         try:
-            torch.set_num_interop_threads(1)
+            torch.set_num_interop_threads(cpu_threads)
         except Exception:
             pass
 
@@ -167,16 +243,14 @@ def run_profiling_session(
 
     # Pre-render dynamic frames if needed to simulate live UI interactions
     dynamic_frames = []
+    targets = [a.strip() for a in app_targets] if app_targets else ["vscode", "chrome", "excel", "notion", "terminal"]
     if dynamic_stimuli:
         renderer = RealisticDesktopRenderer(width=1280, height=720)
         apps = [
-            renderer.render_vscode().frame,
-            renderer.render_chrome().frame,
-            renderer.render_excel().frame,
-            renderer.render_notion().frame,
-            renderer.render_terminal().frame,
+            render_dynamic_app_screen(renderer, t, width=1280, height=720)
+            for t in targets
         ]
-        # Generate 250 dynamic frames with varying simulated cursor motion & UI updates
+        # Generate dynamic frames with varying simulated cursor motion & UI updates
         for i in range(num_iterations + warmup_iterations):
             base_frame = apps[i % len(apps)].copy()
             # Simulate a moving cursor/highlight to induce optical flow and prevent static screen lock
@@ -267,8 +341,9 @@ def run_profiling_session(
         "session_name": name,
         "capture_backend": backend_name,
         "iterations": num_iterations,
-        "cpu_threads": 1,
+        "cpu_threads": cpu_threads,
         "dynamic_stimuli": dynamic_stimuli,
+        "app_targets": targets if dynamic_stimuli else None,
         "total_elapsed_sec": round(total_elapsed_sec, 3),
         "sustained_fps": round(sustained_fps, 2),
         "instantaneous_p50_fps": round(p50_fps, 2),
@@ -301,7 +376,16 @@ def run_profiling_session(
     return result
 
 
-def main():
+def main(argv: List[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="AVCS System 1: CPU Latency & Memory Soak Profiler")
+    parser.add_argument("--iterations", type=int, default=200, help="Number of profiling iterations per suite (default: 200)")
+    parser.add_argument("--warmup", type=int, default=20, help="Number of warmup iterations (default: 20)")
+    parser.add_argument("--apps", type=str, default="vscode,chrome,excel,notion,terminal", help="Comma-separated application targets for dynamic stimuli")
+    parser.add_argument("--mode", choices=["both", "live", "dynamic"], default="both", help="Profiling mode: live, dynamic, or both (default: both)")
+    parser.add_argument("--output", type=str, default="runs/profiling/agent15_cpu_soak_report.json", help="Path to write benchmark JSON report")
+    parser.add_argument("--threads", type=int, default=1, help="PyTorch CPU threads (default: 1)")
+    args = parser.parse_args(argv)
+
     print("=" * 78)
     print("   AVCS SYSTEM 1: CPU LATENCY & MEMORY SOAK PROFILER (AGENT 15)")
     print("=" * 78)
@@ -311,29 +395,11 @@ def main():
     print(f"CPU Physical / Logical Cores: {psutil.cpu_count(logical=False)} / {psutil.cpu_count(logical=True)}")
     print(f"Total System RAM: {psutil.virtual_memory().total / (1024**3):.1f} GB")
     print(f"PyTorch Version: {torch.__version__}")
-    print(f"Single-Thread CPU Enforcement: torch.set_num_threads(1)")
+    print(f"Single-Thread CPU Enforcement: torch.set_num_threads({args.threads})")
 
-    # Suite 1: Live Desktop Perception Soak (Win32FastCapture, 200 iterations)
-    res_live = run_profiling_session(
-        name="Live Desktop Capture (Win32FastCapture)",
-        dynamic_stimuli=False,
-        num_iterations=200,
-        warmup_iterations=20,
-    )
+    app_targets = [a.strip() for a in args.apps.split(",") if a.strip()]
 
-    # Suite 2: Continuous Dynamic Desktop Perception Soak (Realistic 5-App GUI Diversity, 200 iterations)
-    res_dynamic = run_profiling_session(
-        name="Continuous Dynamic Desktop (5-App Realistic GUI Diversity)",
-        dynamic_stimuli=True,
-        num_iterations=200,
-        warmup_iterations=20,
-    )
-
-    out_dir = Path("runs/profiling")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "agent15_cpu_soak_report.json"
-
-    combined = {
+    combined: Dict[str, Any] = {
         "timestamp": time.time(),
         "platform": {
             "system": platform.system(),
@@ -344,10 +410,32 @@ def main():
             "ram_gb": round(psutil.virtual_memory().total / (1024**3), 2),
             "torch_version": torch.__version__,
         },
-        "live_desktop_soak": res_live,
-        "dynamic_desktop_soak": res_dynamic,
     }
 
+    if args.mode in ("both", "live"):
+        res_live = run_profiling_session(
+            name="Live Desktop Capture (Win32FastCapture)",
+            dynamic_stimuli=False,
+            num_iterations=args.iterations,
+            warmup_iterations=args.warmup,
+            cpu_threads=args.threads,
+        )
+        combined["live_desktop_soak"] = res_live
+
+    if args.mode in ("both", "dynamic"):
+        app_summary = f"{len(app_targets)}-App GUI Diversity" if len(app_targets) > 1 else app_targets[0]
+        res_dynamic = run_profiling_session(
+            name=f"Continuous Dynamic Desktop ({app_summary})",
+            dynamic_stimuli=True,
+            num_iterations=args.iterations,
+            warmup_iterations=args.warmup,
+            app_targets=app_targets,
+            cpu_threads=args.threads,
+        )
+        combined["dynamic_desktop_soak"] = res_dynamic
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(combined, f, indent=2)
 

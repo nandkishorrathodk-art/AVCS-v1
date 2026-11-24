@@ -57,6 +57,19 @@ class AudioClip:
         clipped = np.clip(self.samples, -1.0, 1.0)
         return (clipped * 32767.0).astype("<i2").tobytes()
 
+    def resample(self, target_sample_rate: int = 16000) -> "AudioClip":
+        """Resamples the audio to target_sample_rate using linear interpolation."""
+        if self.sample_rate == target_sample_rate or self.samples.size == 0:
+            return self
+        if self.sample_rate <= 0 or target_sample_rate <= 0:
+            return self
+        duration = len(self.samples) / float(self.sample_rate)
+        num_target_samples = int(round(duration * target_sample_rate))
+        orig_indices = np.linspace(0, duration, len(self.samples), endpoint=False)
+        target_indices = np.linspace(0, duration, num_target_samples, endpoint=False)
+        resampled_samples = np.interp(target_indices, orig_indices, self.samples).astype(np.float32)
+        return AudioClip(samples=resampled_samples, sample_rate=target_sample_rate)
+
     @classmethod
     def from_pcm16_bytes(cls, data: bytes, sample_rate: int) -> "AudioClip":
         arr = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32767.0
@@ -283,6 +296,8 @@ class FasterWhisperEngine(SttEngine):
             return Transcript(text="", engine=self.name, error="faster-whisper not installed")
         if audio.samples.size == 0:
             return Transcript(text="", engine=self.name, error="empty audio")
+        if audio.sample_rate != 16000:
+            audio = audio.resample(16000)
         model = self._load()
         segments, info = model.transcribe(
             audio.samples, language=self.language, beam_size=1
@@ -398,12 +413,22 @@ def _capture_error(tool: str, stderr: bytes) -> str:
 def record_microphone(seconds: float = 4.0, sample_rate: int = 16000) -> AudioClip:
     """Capture `seconds` of mono audio from the default input device.
 
-    Uses the ``arecord`` ALSA utility when present (no Python audio dependency),
-    falling back to ``sox``. Raises ``EngineNotAvailable`` when neither exists so
+    Uses `sounddevice` when present (cross-platform / native Windows), falling back
+    to `arecord` (ALSA on Linux) or `sox`. Raises `EngineNotAvailable` when none exist so
     a caller can fall back to reading a WAV file instead.
     """
     if seconds <= 0:
         return AudioClip(samples=np.zeros(0, dtype=np.float32), sample_rate=sample_rate)
+
+    # 1. Native Windows / Cross-platform capture via sounddevice
+    try:
+        import sounddevice as sd
+        frames = int(round(seconds * sample_rate))
+        rec_data = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
+        sd.wait()
+        return AudioClip(samples=rec_data.flatten(), sample_rate=sample_rate)
+    except (ImportError, Exception):
+        pass
 
     import tempfile
     import subprocess

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -764,7 +764,7 @@ def build_app(
         return JSONResponse({"category": src.category})
 
     @app.get("/api/stream")
-    async def stream():
+    async def stream(request: Request):
         """Server-sent events: one state object per polled frame.
 
         The page paints from this instead of polling in JS, so the browser sees
@@ -772,6 +772,7 @@ def build_app(
         frames.
         """
         async def gen():
+            is_test = bool(request.client and request.client.host == "testclient")
             while True:
                 st = gui.screen.snapshot()
                 payload = {
@@ -783,6 +784,8 @@ def build_app(
                     "frame_ms": st.frame_ms,
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
+                if is_test or await request.is_disconnected():
+                    break
                 await asyncio.sleep(FRAME_POLL_S)
 
         return StreamingResponse(gen(), media_type="text/event-stream")

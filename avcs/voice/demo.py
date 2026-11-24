@@ -99,7 +99,7 @@ def build_assistant(args) -> Assistant:
     elif args.no_audio:
         speaker = Speaker(engine=NullTtsEngine(), profile=_voice_profile(args))
     else:
-        speaker = Speaker(engine=EspeakNgEngine(), profile=_voice_profile(args))
+        speaker = Speaker(engine=None, profile=_voice_profile(args))
 
     stt = (
         default_stt_engine(model_path=args.vosk_model, language=args.stt_language)

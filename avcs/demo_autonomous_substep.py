@@ -76,7 +76,7 @@ def run_autonomous_substep_demo() -> None:
     print("[Scenario B] Blocker Handling: Unexpected Modal Dialog on Screen")
     print("-" * 76)
     sim_screen.trigger_blocker("Session expired. Please re-authenticate.")
-    goal_b = "company portal pe jaakar latest monthly report download karo"
+    goal_b = "navigate to company portal and download latest monthly report"
     print(f"System 2 (Manager Directive): '{goal_b}'\n")
 
     print("AVCS System 1 Autonomous Action Loop:")
