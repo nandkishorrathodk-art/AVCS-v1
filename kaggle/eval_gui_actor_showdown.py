@@ -137,6 +137,28 @@ def run_evaluation(
 
     if is_ms_gui_actor:
         print(f"\n[BENCHMARK] Loading Microsoft Reference Baseline: {model_name}...")
+        # Patch transformers.trainer.ALL_LAYERNORM_LAYERS if missing on newer transformers versions
+        try:
+            import transformers.trainer
+            if not hasattr(transformers.trainer, "ALL_LAYERNORM_LAYERS"):
+                try:
+                    from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+                    transformers.trainer.ALL_LAYERNORM_LAYERS = ALL_LAYERNORM_LAYERS
+                except Exception:
+                    transformers.trainer.ALL_LAYERNORM_LAYERS = [torch.nn.LayerNorm]
+        except Exception:
+            pass
+
+        # Pre-populate gui_actor.trainer with lightweight rank0_print to avoid broken dependencies
+        import types
+        if "gui_actor.trainer" not in sys.modules:
+            mock_trainer = types.ModuleType("gui_actor.trainer")
+            def rank0_print(*args, **kwargs):
+                if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                    print(*args, **kwargs)
+            mock_trainer.rank0_print = rank0_print
+            sys.modules["gui_actor.trainer"] = mock_trainer
+
         try:
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
