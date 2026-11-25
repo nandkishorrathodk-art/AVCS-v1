@@ -333,14 +333,22 @@ def run_evaluation(
             ms_model.rope_deltas = None
 
         import functools
+        import inspect
 
-        # In modern transformers, visual.forward returns BaseModelOutputWithPooling.
-        # modeling_qwen25vl.py line 173 expects self.visual() to return a Tensor with .shape[0].
+        # In modern transformers, visual.forward returns BaseModelOutputWithPooling:
+        # - last_hidden_state: unmerged pre-merger patch tokens (e.g. 4x tokens, dim 1280)
+        # - pooler_output: post-merger visual tokens matching image_token_id count (dim 2048)
+        # modeling_qwen25vl.py line 173 expects self.visual() to return the merged Tensor.
         if hasattr(ms_model, "visual") and hasattr(ms_model.visual, "forward"):
             orig_visual_forward = ms_model.visual.forward
             @functools.wraps(orig_visual_forward)
             def safe_visual_forward(*args, **kwargs):
                 out = orig_visual_forward(*args, **kwargs)
+                if hasattr(out, "pooler_output") and out.pooler_output is not None:
+                    if isinstance(out.pooler_output, torch.Tensor):
+                        return out.pooler_output
+                    if isinstance(out.pooler_output, (tuple, list)) and len(out.pooler_output) > 0:
+                        return torch.cat(list(out.pooler_output), dim=0)
                 if hasattr(out, "last_hidden_state") and isinstance(out.last_hidden_state, torch.Tensor):
                     return out.last_hidden_state
                 elif isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], torch.Tensor):
@@ -349,6 +357,64 @@ def run_evaluation(
             ms_model.visual.forward = safe_visual_forward
             if hasattr(ms_model, "model") and hasattr(ms_model.model, "visual"):
                 ms_model.model.visual.forward = safe_visual_forward
+
+        # Compat shim for get_rope_index (moved to model.get_rope_index and added mm_token_type_ids in v5)
+        rope_owner = ms_model if hasattr(ms_model, "get_rope_index") else getattr(ms_model, "model", None)
+        if rope_owner is not None and hasattr(rope_owner, "get_rope_index"):
+            orig_get_rope_index = rope_owner.get_rope_index
+            rope_params = list(inspect.signature(orig_get_rope_index).parameters.keys())
+            if "mm_token_type_ids" in rope_params or not hasattr(ms_model, "get_rope_index"):
+                def compat_get_rope_index(input_ids, image_grid_thw=None, video_grid_thw=None, attention_mask=None):
+                    if "mm_token_type_ids" in rope_params:
+                        mm_tok = torch.zeros_like(input_ids, dtype=torch.int32)
+                        img_tok_id = getattr(ms_model.config, "image_token_id", 151655)
+                        vid_tok_id = getattr(ms_model.config, "video_token_id", 151656)
+                        mm_tok[input_ids == img_tok_id] = 1
+                        mm_tok[input_ids == vid_tok_id] = 2
+                        return orig_get_rope_index(
+                            input_ids=input_ids,
+                            mm_token_type_ids=mm_tok,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            attention_mask=attention_mask,
+                        )
+                    return orig_get_rope_index(
+                        input_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        attention_mask=attention_mask,
+                    )
+                ms_model.get_rope_index = compat_get_rope_index
+
+        # Compat shim for past_key_values <-> cache between transformers v4/v5
+        if hasattr(ms_model, "model") and hasattr(ms_model.model, "forward"):
+            orig_base_forward = ms_model.model.forward
+            base_fwd_params = set(inspect.signature(orig_base_forward).parameters.keys())
+            if "cache" in base_fwd_params and "past_key_values" not in base_fwd_params:
+                @functools.wraps(orig_base_forward)
+                def safe_base_forward(*args, **kwargs):
+                    if "past_key_values" in kwargs:
+                        kwargs["cache"] = kwargs.pop("past_key_values")
+                    out = orig_base_forward(*args, **kwargs)
+                    if not hasattr(out, "past_key_values") and hasattr(out, "cache"):
+                        type(out).past_key_values = property(lambda self: getattr(self, "cache", None))
+                    return out
+                ms_model.model.forward = safe_base_forward
+
+        try:
+            from gui_actor.modeling_qwen25vl import QwenVLwithVisionHeadOutputWithPast
+            out_init_params = set(inspect.signature(QwenVLwithVisionHeadOutputWithPast.__init__).parameters.keys())
+            if "cache" in out_init_params and "past_key_values" not in out_init_params:
+                orig_out_init = QwenVLwithVisionHeadOutputWithPast.__init__
+                def safe_out_init(self, lm_loss=None, pointer_loss=None, pointer_scores=None, *args, **kwargs):
+                    if "past_key_values" in kwargs and "cache" not in kwargs:
+                        kwargs["cache"] = kwargs.pop("past_key_values")
+                    return orig_out_init(self, lm_loss=lm_loss, pointer_loss=pointer_loss, pointer_scores=pointer_scores, *args, **kwargs)
+                QwenVLwithVisionHeadOutputWithPast.__init__ = safe_out_init
+                if not hasattr(QwenVLwithVisionHeadOutputWithPast, "past_key_values"):
+                    QwenVLwithVisionHeadOutputWithPast.past_key_values = property(lambda self: getattr(self, "cache", None))
+        except Exception:
+            pass
 
         # Bypass _validate_model_kwargs to allow all multimodal arguments (pixel_values, image_grid_thw, etc.)
         ms_model._validate_model_kwargs = lambda model_kwargs: None
@@ -361,9 +427,12 @@ def run_evaluation(
         ms_model.generate = safe_generate
 
         orig_forward = ms_model.forward
+        orig_fwd_params = set(inspect.signature(orig_forward).parameters.keys())
         @functools.wraps(orig_forward)
         def safe_forward(*args, **kwargs):
             kwargs.pop("mm_token_type_ids", None)
+            if "cache" in kwargs and "cache" not in orig_fwd_params and "past_key_values" in orig_fwd_params:
+                kwargs["past_key_values"] = kwargs.pop("cache")
             return orig_forward(*args, **kwargs)
         ms_model.forward = safe_forward
     else:
