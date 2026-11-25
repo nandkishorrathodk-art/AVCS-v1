@@ -704,16 +704,50 @@ class GroundingDataset(Dataset):
             target_hf = hf_samples if dataset_source == "hf_showui" else max(0, hf_samples - len(self.samples))
             if stream_hf and target_hf > 0:
                 is_dist = dist.is_available() and dist.is_initialized()
-                rank = dist.get_rank() if is_dist else 0
+                env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+                env_rank = dist.get_rank() if is_dist else int(os.environ.get("RANK", "0"))
+                cache_file = os.path.join(
+                    self.cache_dir,
+                    f"cache_stage1_v2_{target_hf}_max{self.max_elements_per_image}.pt",
+                )
+                done_sentinel = cache_file + ".done"
+
                 if is_dist:
-                    if rank == 0:
+                    if env_rank == 0:
                         self._ingest_from_hf(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
                             cache_dir=self.cache_dir,
                         )
                     dist.barrier()
-                    if rank != 0:
+                    if env_rank != 0:
+                        self._ingest_from_hf(
+                            target_hf,
+                            max_elements_per_image=self.max_elements_per_image,
+                            cache_dir=self.cache_dir,
+                        )
+                elif env_world_size > 1:
+                    # Pre-NCCL file-based synchronization: zero NCCL watchdog timeout risk during long downloads
+                    if env_rank == 0:
+                        if os.path.exists(done_sentinel) and not os.path.exists(cache_file):
+                            os.remove(done_sentinel)
+                        self._ingest_from_hf(
+                            target_hf,
+                            max_elements_per_image=self.max_elements_per_image,
+                            cache_dir=self.cache_dir,
+                        )
+                        try:
+                            os.makedirs(self.cache_dir, exist_ok=True)
+                            with open(done_sentinel, "w", encoding="utf-8") as sf:
+                                sf.write(str(len(self.samples)))
+                        except Exception:
+                            pass
+                    else:
+                        wait_start = time.time()
+                        while not os.path.exists(done_sentinel):
+                            if time.time() - wait_start > 7200:
+                                raise TimeoutError(f"Rank {env_rank} timed out waiting for cache sentinel {done_sentinel}")
+                            time.sleep(2.0)
                         self._ingest_from_hf(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
@@ -1099,14 +1133,16 @@ class GroundingDataset(Dataset):
                     repo_added += 1
 
                     if len(ingested_hf) % 500 == 0:
+                        ts = time.strftime("%H:%M:%S")
                         print(
-                            f"[HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
+                            f"[{ts}] [HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
                             f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped, {filtered_non_landscape} non-landscape)",
                             flush=True,
                         )
 
+                ts = time.strftime("%H:%M:%S")
                 print(
-                    f"[HF-INGEST] Finished {repo_name}: +{repo_added} samples "
+                    f"[{ts}] [HF-INGEST] Finished {repo_name}: +{repo_added} samples "
                     f"(total={len(ingested_hf)}, unique_screens={len(elements_per_img)})",
                     flush=True,
                 )
@@ -1762,6 +1798,23 @@ def run_ddp_training(
     max_val_samples: int = 200,
     cache_dir: Optional[str] = None,
 ) -> None:
+    # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
+    full_dataset = GroundingDataset(
+        dataset_paths=dataset_paths,
+        max_samples=max_samples,
+        target_size=(800, 1280),
+        allow_synthetic_fallback=not fail_closed,
+        stream_hf=stream_hf,
+        hf_samples=hf_samples,
+        max_elements_per_image=max_elements_per_image,
+        dataset_source=dataset_source,
+        cache_dir=cache_dir,
+    )
+    train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
+    val_eval_dataset = copy.copy(val_dataset)
+    if len(val_dataset) > max_val_samples:
+        val_eval_dataset.samples = val_dataset.samples[:max_val_samples]
+
     rank, world_size, local_rank, is_distributed = setup_distributed()
 
     if rank == 0:
@@ -1769,10 +1822,16 @@ def run_ddp_training(
         print("  AVCS STEP 6.2: DDP TRAINING FOR QWEN2.5-VL-3B FROZEN BACKBONE + GUI-ACTOR  ")
         print("=" * 80)
         print(f"Distributed Setup: World Size = {world_size}, Rank = {rank}, Local Rank = {local_rank}")
+        total_cnt = max(1, len(train_dataset) + len(val_dataset))
+        print(
+            f"Dataset Partitioning ({dataset_source}): Train Samples = {len(train_dataset)} ({len(train_dataset)/total_cnt*100:.1f}%), "
+            f"Held-Out Val Samples = {len(val_dataset)} ({len(val_dataset)/total_cnt*100:.1f}%) "
+            f"[Epoch-End Eval Capped at {len(val_eval_dataset)} samples] (Partitioned by unique screenshots)"
+        )
 
     device = torch.device(f"cuda:{local_rank}" if (torch.cuda.is_available() and not dry_run) else "cpu")
 
-    # 1. Initialize Model with 512-dim widened projections (~3.98M params)
+    # 2. Initialize Model with 512-dim widened projections (~3.98M params)
     model = QwenGUIActorModel(
         dry_run=dry_run,
         pointer_hidden_dim=512,
@@ -1796,31 +1855,6 @@ def run_ddp_training(
     if is_distributed:
         device_ids = [local_rank] if device.type == "cuda" else None
         model = DDP(model, device_ids=device_ids, find_unused_parameters=True)
-
-    # 2. Dataset Partitioning into Train & Held-Out Unique Screenshot Validation Sets
-    full_dataset = GroundingDataset(
-        dataset_paths=dataset_paths,
-        max_samples=max_samples,
-        target_size=(800, 1280),
-        allow_synthetic_fallback=not fail_closed,
-        stream_hf=stream_hf,
-        hf_samples=hf_samples,
-        max_elements_per_image=max_elements_per_image,
-        dataset_source=dataset_source,
-        cache_dir=cache_dir,
-    )
-    train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
-    val_eval_dataset = copy.copy(val_dataset)
-    if len(val_dataset) > max_val_samples:
-        val_eval_dataset.samples = val_dataset.samples[:max_val_samples]
-
-    if rank == 0:
-        total_cnt = max(1, len(train_dataset) + len(val_dataset))
-        print(
-            f"Dataset Partitioning ({dataset_source}): Train Samples = {len(train_dataset)} ({len(train_dataset)/total_cnt*100:.1f}%), "
-            f"Held-Out Val Samples = {len(val_dataset)} ({len(val_dataset)/total_cnt*100:.1f}%) "
-            f"[Epoch-End Eval Capped at {len(val_eval_dataset)} samples] (Partitioned by unique screenshots)"
-        )
 
     sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
     drop_last = len(train_dataset) >= batch_size
@@ -2070,11 +2104,29 @@ def main():
     parser.add_argument("--max-elements-per-image", type=int, default=5, help="Maximum elements per unique screenshot (default: 5)")
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
+    parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
     parser.add_argument("--dataset-paths", nargs="*", default=None, help="Explicit dataset JSONL / directory paths")
     parser.add_argument("--enable-token-pruning", action="store_true", help="Enable ShowUI token pruner (PAUSED by default)")
     parser.add_argument("--enable-rolling-kv", action="store_true", help="Enable rolling KV memory (PAUSED by default)")
     args = parser.parse_args()
+
+    # 0. Pre-cache dataset only mode (CPU-only, zero GPU/DDP overhead)
+    if args.prepare_data_only:
+        should_stream = not args.no_stream_hf if args.no_stream_hf else args.stream_hf
+        ds = GroundingDataset(
+            dataset_paths=args.dataset_paths,
+            max_samples=args.max_samples,
+            target_size=(800, 1280),
+            allow_synthetic_fallback=not args.fail_closed,
+            stream_hf=should_stream,
+            hf_samples=args.hf_samples,
+            max_elements_per_image=args.max_elements_per_image,
+            dataset_source=args.dataset_source,
+            cache_dir=args.cache_dir,
+        )
+        print(f"[PREPARE-DATA-ONLY] Complete: {len(ds)} samples cached and ready in {ds.cache_dir}")
+        sys.exit(0)
 
     # 1. Overfit sanity / HF preflight mode
     if args.overfit_sanity or args.hf_preflight:
