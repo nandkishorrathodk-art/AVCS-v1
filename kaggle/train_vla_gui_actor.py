@@ -226,7 +226,7 @@ class QwenGUIActorModel(nn.Module):
         query_dim: int = 512,
         dry_run: bool = False,
         load_in_4bit: bool = False,
-        backbone_dtype: str = "fp16",
+        backbone_dtype: str = "bf16",
         use_token_pruning: bool = False,
         target_token_budget: int = 400,
         use_rolling_kv: bool = False,
@@ -1837,7 +1837,7 @@ def run_ddp_training(
     cache_dir: Optional[str] = None,
     log_interval: int = 10,
     max_train_samples: Optional[int] = None,
-    backbone_dtype: str = "fp16",
+    backbone_dtype: str = "bf16",
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -1978,8 +1978,17 @@ def run_ddp_training(
             loss_finite = bool(torch.isfinite(loss).item())
             step_ok_local = (not step_overflow) and loss_finite
 
-            # Always execute backward so DDP collectives stay synchronized across all ranks
-            backward_loss = loss if step_ok_local else sum(p.sum() * 0.0 for p in trainable_params)
+            # Always run backward through the connected forward graph (never raw parameters)
+            # so DDP find_unused_parameters=True never marks unused parameters ready twice.
+            backward_loss = (
+                loss
+                if step_ok_local
+                else (
+                    outputs["action_logits"].sum() * 0.0
+                    + outputs["target_coords"].sum() * 0.0
+                    + outputs["attn_logits"].sum() * 0.0
+                )
+            )
             backward_loss.backward()
 
             grad_finite = all(
@@ -2210,7 +2219,7 @@ def main():
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
     parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap on training samples per epoch for step-by-step staging")
     parser.add_argument("--log-interval", type=int, default=10, help="Print training progress every N steps (default: 10)")
-    parser.add_argument("--backbone-dtype", type=str, default="fp16", choices=["fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision (fp16 or bf16)")
+    parser.add_argument("--backbone-dtype", type=str, default="bf16", choices=["fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision (bf16 default prevents FP16 overflow on T4; fp16 optional)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
     parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")

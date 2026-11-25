@@ -700,3 +700,43 @@ def test_fp16_overflow_and_nan_guard_prevents_weight_poisoning():
     assert torch.isfinite(out["attn_logits"]).all()
     assert torch.isfinite(out["target_coords"]).all()
     assert torch.isfinite(out["action_logits"]).all()
+
+
+def test_ddp_zero_loss_fallback_no_double_ready_hook(tmp_path: Path):
+    """Verifies DDP zero-loss fallback backward through connected outputs never double-marks unused parameters."""
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    store_file = tmp_path / "ddp_zero_fallback_store"
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file:///{store_file.as_posix()}",
+        rank=0,
+        world_size=1,
+    )
+    try:
+        model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=512, query_dim=512)
+        ddp_model = DDP(model, find_unused_parameters=True)
+        opt = torch.optim.AdamW([p for p in ddp_model.parameters() if p.requires_grad], lr=1e-3)
+
+        for step_ok in (False, True):
+            opt.zero_grad()
+            imgs = torch.randn(2, 3, 256, 256)
+            out = ddp_model(imgs)
+            if step_ok:
+                loss = (
+                    out["action_logits"].sum()
+                    + out["target_coords"].sum()
+                    + out["attn_logits"].sum()
+                )
+            else:
+                loss = (
+                    out["action_logits"].sum() * 0.0
+                    + out["target_coords"].sum() * 0.0
+                    + out["attn_logits"].sum() * 0.0
+                )
+            loss.backward()
+            if step_ok:
+                opt.step()
+    finally:
+        dist.destroy_process_group()
