@@ -376,12 +376,17 @@ class QwenGUIActorModel(nn.Module):
         pil_images: List[Image.Image] = []
         if isinstance(images, torch.Tensor):
             b_imgs = images.shape[0]
+            imgs_cpu = images.detach().cpu()
             for i in range(b_imgs):
-                arr = images[i].detach().cpu().permute(1, 2, 0).numpy()
-                if arr.max() <= 1.0:
-                    arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+                t_i = imgs_cpu[i]
+                if t_i.dtype == torch.uint8:
+                    arr = t_i.permute(1, 2, 0).numpy()
                 else:
-                    arr = arr.clip(0, 255).astype(np.uint8)
+                    arr = t_i.permute(1, 2, 0).numpy()
+                    if arr.max() <= 1.0:
+                        arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+                    else:
+                        arr = arr.clip(0, 255).astype(np.uint8)
                 pil_images.append(Image.fromarray(arr))
         elif isinstance(images, list):
             for item in images:
@@ -1246,9 +1251,11 @@ class GroundingDataset(Dataset):
 
         if img_tensor is None and img_bytes is not None:
             try:
-                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB").resize(
-                    (self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR
-                )
+                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                if pil_img.size != (self.target_size[1], self.target_size[0]):
+                    pil_img = pil_img.resize(
+                        (self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR
+                    )
                 arr = np.array(pil_img, dtype=np.uint8).transpose(2, 0, 1)
                 img_tensor = torch.from_numpy(arr)
             except Exception as e:
@@ -1797,6 +1804,8 @@ def run_ddp_training(
     dataset_source: str = "hf_showui",
     max_val_samples: int = 200,
     cache_dir: Optional[str] = None,
+    log_interval: int = 10,
+    max_train_samples: Optional[int] = None,
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -1811,6 +1820,8 @@ def run_ddp_training(
         cache_dir=cache_dir,
     )
     train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
+    if max_train_samples is not None and len(train_dataset) > max_train_samples:
+        train_dataset.samples = train_dataset.samples[:max_train_samples]
     val_eval_dataset = copy.copy(val_dataset)
     if len(val_dataset) > max_val_samples:
         val_eval_dataset.samples = val_dataset.samples[:max_val_samples]
@@ -1826,7 +1837,8 @@ def run_ddp_training(
         print(
             f"Dataset Partitioning ({dataset_source}): Train Samples = {len(train_dataset)} ({len(train_dataset)/total_cnt*100:.1f}%), "
             f"Held-Out Val Samples = {len(val_dataset)} ({len(val_dataset)/total_cnt*100:.1f}%) "
-            f"[Epoch-End Eval Capped at {len(val_eval_dataset)} samples] (Partitioned by unique screenshots)"
+            f"[Epoch-End Eval Capped at {len(val_eval_dataset)} samples] (Partitioned by unique screenshots)",
+            flush=True,
         )
 
     device = torch.device(f"cuda:{local_rank}" if (torch.cuda.is_available() and not dry_run) else "cpu")
@@ -1891,6 +1903,7 @@ def run_ddp_training(
 
     # 4. Training Loop
     model.train()
+    total_steps_per_epoch = len(dataloader)
     for epoch in range(1, epochs + 1):
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -1905,9 +1918,11 @@ def run_ddp_training(
         epoch_patch_acc = 0.0
         step_count = 0
         t0 = time.time()
+        data_t0 = time.time()
 
         for batch in dataloader:
-            images = batch["image"].to(device)
+            data_time = time.time() - data_t0
+            images = batch["image"].to(device) if dry_run else batch["image"]
             target_actions = batch["target_action"].to(device)
             target_coords = batch["target_coord"].to(device)
             target_bboxes = batch["target_bbox"].to(device)
@@ -1937,6 +1952,21 @@ def run_ddp_training(
             epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
             step_count += 1
 
+            if rank == 0 and log_interval > 0 and (step_count == 1 or step_count % log_interval == 0):
+                elapsed_so_far = time.time() - t0
+                sec_per_step = elapsed_so_far / step_count
+                eta_min = ((total_steps_per_epoch - step_count) * sec_per_step) / 60.0
+                ts = time.strftime("%H:%M:%S")
+                print(
+                    f"[{ts}] [Epoch {epoch}/{epochs} | Step {step_count}/{total_steps_per_epoch}] "
+                    f"Loss: {epoch_loss / step_count:.4f} | "
+                    f"Patch CE: {epoch_patch_ce / step_count:.4f} (Acc: {(epoch_patch_acc / step_count) * 100:.1f}%) | "
+                    f"Coord L1: {epoch_coord_l1 / step_count:.4f} | "
+                    f"{sec_per_step:.2f}s/step (data={data_time:.2f}s) | ETA: {eta_min:.1f}m",
+                    flush=True,
+                )
+
+            data_t0 = time.time()
             if dry_run and step_count >= 5:
                 break
 
@@ -1959,7 +1989,8 @@ def run_ddp_training(
                 f"Coord L2 (w={criterion.weight_coord_l2:.1f}): {avg_w_coord_l2:.4f} + "
                 f"Action CE (w={criterion.weight_action:.1f}): {avg_w_action:.4f} = {w_sum:.4f}] | "
                 f"Raw: [Patch CE: {avg_patch_ce:.4f}, Coord L1: {avg_coord_l1:.4f}] | "
-                f"Train Patch Acc: {avg_patch_acc:.1f}% | Time: {elapsed:.2f}s | Steps: {step_count}"
+                f"Train Patch Acc: {avg_patch_acc:.1f}% | Time: {elapsed:.2f}s | Steps: {step_count}",
+                flush=True,
             )
 
         # Distributed Held-Out Validation Evaluation at Epoch End (Capped at 200 samples; prevents NCCL timeout)
@@ -1975,7 +2006,7 @@ def run_ddp_training(
 
             with torch.no_grad():
                 for v_batch in val_dataloader:
-                    v_imgs = v_batch["image"].to(device)
+                    v_imgs = v_batch["image"]
                     v_coords = v_batch["target_coord"].to(device)
                     v_actions = v_batch["target_action"].to(device)
                     v_bboxes = v_batch["target_bbox"].to(device)
@@ -2035,7 +2066,8 @@ def run_ddp_training(
             if rank == 0:
                 print(
                     f"[VAL] Epoch [{epoch}/{epochs}] Val Strict (0px) Acc: {val_strict_acc * 100:.2f}% "
-                    f"({val_hits}/{val_total}) | Val Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}"
+                    f"({val_hits}/{val_total}) | Val Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}",
+                    flush=True,
                 )
             unwrapped.train()
 
@@ -2057,7 +2089,7 @@ def run_ddp_training(
                 "stats": stats,
                 "val_strict_acc": val_strict_acc,
             }, ckpt_file)
-            print(f"Saved trainable adapter checkpoint to: {ckpt_file}")
+            print(f"Saved trainable adapter checkpoint to: {ckpt_file}", flush=True)
 
         if is_distributed:
             dist.barrier()
@@ -2066,7 +2098,7 @@ def run_ddp_training(
             break
 
     if rank == 0:
-        print("\nDDP Training completed successfully.")
+        print("\nDDP Training completed successfully.", flush=True)
 
     cleanup_distributed()
 
@@ -2103,6 +2135,8 @@ def main():
     parser.add_argument("--hf-samples", type=int, default=20000, help="Target real desktop samples from showlab/ShowUI-desktop (default: 20000)")
     parser.add_argument("--max-elements-per-image", type=int, default=5, help="Maximum elements per unique screenshot (default: 5)")
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
+    parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap on training samples per epoch for step-by-step staging")
+    parser.add_argument("--log-interval", type=int, default=10, help="Print training progress every N steps (default: 10)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
     parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
@@ -2185,6 +2219,8 @@ def main():
         dataset_source=args.dataset_source,
         max_val_samples=args.max_val_samples,
         cache_dir=args.cache_dir,
+        log_interval=args.log_interval,
+        max_train_samples=args.max_train_samples,
     )
 
 
