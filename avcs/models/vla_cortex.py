@@ -2391,10 +2391,10 @@ class UnifiedMultiTaskLoss(nn.Module):
 
     def __init__(
         self,
-        weight_action: float = 1.0,
-        weight_coord_l1: float = 15.0,
-        weight_coord_l2: float = 35.0,
-        weight_patch_ce: float = 3.0,
+        weight_action: float = 0.5,
+        weight_coord_l1: float = 10.0,
+        weight_coord_l2: float = 10.0,
+        weight_patch_ce: float = 5.0,
         weight_scroll: float = 2.0,
         weight_drag: float = 5.0,
         enable_flow_drag: bool = False,
@@ -2422,6 +2422,7 @@ class UnifiedMultiTaskLoss(nn.Module):
         cursor_pre_xy: Optional[torch.Tensor] = None,
         pred_coords: Optional[torch.Tensor] = None,
         target_patch_idx: Optional[torch.Tensor] = None,
+        target_bboxes: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         # Support structured output (PureRGBVLAOutput or dict) and raw tensor calling signatures
         if isinstance(model_out, (PureRGBVLAOutput, dict)):
@@ -2464,7 +2465,9 @@ class UnifiedMultiTaskLoss(nn.Module):
         # 2. GUI-Actor Pointer coordinate loss (L1 + L2)
         loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
         loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
-        loss_coord = self.weight_coord_l1 * loss_coord_l1 + self.weight_coord_l2 * loss_coord_l2
+        weighted_coord_l1 = self.weight_coord_l1 * loss_coord_l1
+        weighted_coord_l2 = self.weight_coord_l2 * loss_coord_l2
+        loss_coord = weighted_coord_l1 + weighted_coord_l2
 
         # 3. Patch Classification Cross-Entropy Loss (Direct supervision on patch cross-attention)
         loss_patch_ce = torch.tensor(0.0, device=actual_target_act.device)
@@ -2488,23 +2491,57 @@ class UnifiedMultiTaskLoss(nn.Module):
             b_sz = attn_logits_2d.shape[0]
             k_patches = attn_logits_2d.shape[1]
 
-            if target_patch_idx is None and patch_coords is not None:
+            if patch_coords is not None:
                 if patch_coords.dim() == 2:
                     patch_coords_exp = patch_coords.unsqueeze(0).expand(b_sz, -1, -1)
                 else:
                     patch_coords_exp = patch_coords
+            else:
+                patch_coords_exp = None
 
-                if patch_coords_exp.shape[1] == k_patches:
+            # Multi-positive bounding box supervision if target_bboxes is supplied
+            if target_bboxes is not None and patch_coords_exp is not None and patch_coords_exp.shape[1] == k_patches:
+                target_probs = torch.zeros_like(attn_logits_2d)
+                for b_i in range(b_sz):
+                    bx1 = target_bboxes[b_i, 0].item()
+                    by1 = target_bboxes[b_i, 1].item()
+                    bx2 = target_bboxes[b_i, 2].item()
+                    by2 = target_bboxes[b_i, 3].item()
+                    x_min, x_max = min(bx1, bx2), max(bx1, bx2)
+                    y_min, y_max = min(by1, by2), max(by1, by2)
+
+                    px = patch_coords_exp[b_i, :, 0]
+                    py = patch_coords_exp[b_i, :, 1]
+                    in_bbox = (px >= x_min) & (px <= x_max) & (py >= y_min) & (py <= y_max)
+                    num_pos = in_bbox.sum()
+                    if num_pos > 0:
+                        target_probs[b_i, in_bbox] = 1.0 / num_pos.float()
+                    else:
+                        # Fallback to single nearest patch centroid
+                        target_exp = actual_target_xy[b_i].unsqueeze(0)
+                        dists = torch.sum((patch_coords_exp[b_i] - target_exp) ** 2, dim=-1)
+                        nearest_idx = torch.argmin(dists)
+                        target_probs[b_i, nearest_idx] = 1.0
+
+                loss_patch_ce = F.cross_entropy(attn_logits_2d, target_probs)
+                pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)
+                pred_hits = target_probs.gather(1, pred_patch_idx.unsqueeze(1)).squeeze(1) > 0
+                patch_top1_acc = pred_hits.float().mean()
+            else:
+                # Single nearest patch supervision fallback
+                if target_patch_idx is None and patch_coords_exp is not None and patch_coords_exp.shape[1] == k_patches:
                     target_exp = actual_target_xy.unsqueeze(1)
                     dists = torch.sum((patch_coords_exp - target_exp) ** 2, dim=-1)
                     target_patch_idx = torch.argmin(dists, dim=-1)
 
-            if target_patch_idx is not None and target_patch_idx.shape[0] == b_sz:
-                loss_patch_ce = F.cross_entropy(attn_logits_2d, target_patch_idx)
-                pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)
-                patch_top1_acc = (pred_patch_idx == target_patch_idx).float().mean()
+                if target_patch_idx is not None and target_patch_idx.shape[0] == b_sz:
+                    loss_patch_ce = F.cross_entropy(attn_logits_2d, target_patch_idx)
+                    pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)
+                    patch_top1_acc = (pred_patch_idx == target_patch_idx).float().mean()
 
-        total_loss = self.weight_action * loss_act + loss_coord + self.weight_patch_ce * loss_patch_ce
+        weighted_act = self.weight_action * loss_act
+        weighted_patch_ce = self.weight_patch_ce * loss_patch_ce
+        total_loss = weighted_act + loss_coord + weighted_patch_ce
         loss_scroll = torch.tensor(0.0, device=actual_target_act.device)
         loss_drag = torch.tensor(0.0, device=actual_target_act.device)
 
@@ -2542,6 +2579,11 @@ class UnifiedMultiTaskLoss(nn.Module):
             "loss_coord": loss_coord,
             "loss_patch_ce": loss_patch_ce,
             "patch_top1_acc": patch_top1_acc,
+            "weighted_action": weighted_act,
+            "weighted_coord_l1": weighted_coord_l1,
+            "weighted_coord_l2": weighted_coord_l2,
+            "weighted_coord": loss_coord,
+            "weighted_patch_ce": weighted_patch_ce,
             "loss_scroll": loss_scroll,
             "loss_drag": loss_drag,
         }

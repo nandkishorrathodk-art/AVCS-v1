@@ -451,3 +451,218 @@ def test_overfit_sanity_with_hf_sample_structure():
     assert res["hf_preflight"]["converged"] is True
     assert res["hf_preflight"]["strict_accuracy"] >= 0.95
     assert res["hf_preflight"]["hits"] == 4
+
+
+def test_split_train_val_prevents_inversion_on_skewed_screenshots():
+    """Verifies bin-packed unique-screenshot split yields ~90% train / ~10% val even with oversized single-image groups."""
+    ds = GroundingDataset(dataset_source="synthetic", max_samples=10, allow_synthetic_fallback=True)
+    skewed_samples = []
+    # 1 oversized image with 2,714 rows (mirrors synth_desktop_canvas.jpg in local dataset)
+    for i in range(2714):
+        skewed_samples.append({
+            "instruction": f"Click {i}",
+            "action_idx": 0,
+            "target_xy": [0.5, 0.5],
+            "target_bbox": [0.45, 0.45, 0.55, 0.55],
+            "image_id": "synth_desktop_canvas.jpg",
+        })
+    # 150 normal screenshots with 10 elements each
+    for s_idx in range(150):
+        for e_idx in range(10):
+            skewed_samples.append({
+                "instruction": f"Click {s_idx}_{e_idx}",
+                "action_idx": 0,
+                "target_xy": [0.2, 0.3],
+                "target_bbox": [0.15, 0.25, 0.25, 0.35],
+                "image_id": f"win11_frame_{s_idx:04d}.jpg",
+            })
+    ds.samples = skewed_samples
+
+    train_ds, val_ds = ds.split_train_val(val_ratio=0.10, seed=42)
+    total = len(ds)
+    train_pct = len(train_ds) / total
+    val_pct = len(val_ds) / total
+
+    assert 0.88 <= train_pct <= 0.92, f"Expected ~90% train, got {train_pct:.3f}"
+    assert 0.08 <= val_pct <= 0.12, f"Expected ~10% val, got {val_pct:.3f}"
+
+    # Verify zero screenshot overlap between train and val
+    train_ids = {s["image_id"] for s in train_ds.samples}
+    val_ids = {s["image_id"] for s in val_ds.samples}
+    assert len(train_ids.intersection(val_ids)) == 0
+    assert "synth_desktop_canvas.jpg" in train_ids
+
+
+def test_unified_multitask_loss_multi_positive_bbox_and_components_sum():
+    """Verifies weighted loss components sum cleanly to total_loss, Patch CE >= 60%, and multi-positive bbox supervision."""
+    from avcs.models.vla_cortex import UnifiedMultiTaskLoss
+
+    criterion = UnifiedMultiTaskLoss(
+        weight_action=0.5,
+        weight_coord_l1=10.0,
+        weight_coord_l2=10.0,
+        weight_patch_ce=5.0,
+    )
+
+    # 2x2 grid of patches at centers [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]
+    patch_coords = torch.tensor([
+        [0.25, 0.25],
+        [0.75, 0.25],
+        [0.25, 0.75],
+        [0.75, 0.75],
+    ], dtype=torch.float32)
+
+    # Batch size 2; item 0 target bbox covers top two patches (0 and 1)
+    target_bboxes = torch.tensor([
+        [0.10, 0.10, 0.90, 0.40],  # Contains patch 0 and patch 1
+        [0.60, 0.60, 0.90, 0.90],  # Contains patch 3
+    ], dtype=torch.float32)
+    target_coords = torch.tensor([[0.50, 0.25], [0.75, 0.75]], dtype=torch.float32)
+    target_actions = torch.tensor([0, 0], dtype=torch.long)
+
+    # Model predicts patch 1 for item 0 (inside top bbox!) and patch 3 for item 1
+    attn_logits = torch.tensor([
+        [1.0, 5.0, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 5.0],
+    ], dtype=torch.float32).unsqueeze(1)
+    model_out = {
+        "action_logits": torch.randn(2, 10),
+        "target_coords": torch.tensor([[0.40, 0.30], [0.70, 0.70]], dtype=torch.float32),
+        "attn_logits": attn_logits,
+        "patch_coords": patch_coords,
+    }
+
+    loss_dict = criterion(
+        model_out=model_out,
+        target_actions=target_actions,
+        target_coords=target_coords,
+        target_bboxes=target_bboxes,
+    )
+
+    # Multi-positive hit check: patch 1 is inside item 0's bbox and patch 3 is inside item 1's bbox -> 100% hit
+    assert loss_dict["patch_top1_acc"].item() == pytest.approx(1.0)
+
+    # Exact summation check
+    reconstructed = (
+        loss_dict["weighted_patch_ce"]
+        + loss_dict["weighted_coord_l1"]
+        + loss_dict["weighted_coord_l2"]
+        + loss_dict["weighted_action"]
+    )
+    assert loss_dict["total_loss"].item() == pytest.approx(reconstructed.item(), rel=1e-5)
+
+    # Dominance check on realistic random-init logits
+    rand_out = {
+        "action_logits": torch.zeros(2, 10),
+        "target_coords": torch.tensor([[0.40, 0.30], [0.70, 0.70]], dtype=torch.float32),
+        "attn_logits": torch.zeros(2, 1, 100),
+        "patch_coords": torch.rand(100, 2),
+    }
+    rand_loss = criterion(
+        model_out=rand_out,
+        target_actions=target_actions,
+        target_coords=target_coords,
+        target_bboxes=target_bboxes,
+    )
+    patch_share = rand_loss["weighted_patch_ce"].item() / rand_loss["total_loss"].item()
+    assert patch_share >= 0.60, f"Expected Patch CE >= 60% of total loss, got {patch_share:.3f}"
+
+
+def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
+    """Verifies hf_showui streaming, visual thumbnail capping, unreadable image skip, and disk caching."""
+    from PIL import Image
+    import sys
+    import types
+
+    img_a = Image.new("RGB", (800, 600), color=(10, 20, 30))
+    img_b = Image.new("RGB", (1024, 768), color=(200, 210, 220))
+
+    fake_rows = [
+        # 3 elements on img_a -> capped at max_elements_per_image=2
+        {"image": img_a, "point": [100, 100], "instruction": "Click A1"},
+        {"image": img_a, "point": [200, 200], "instruction": "Click A2"},
+        {"image": img_a, "point": [300, 300], "instruction": "Click A3"},
+        # Unreadable/corrupted image -> skipped safely
+        {"image": None, "point": [100, 100], "instruction": "Bad image"},
+        # Held-out leakage -> filtered
+        {"image": img_b, "point": [100, 100], "instruction": "showdown-clicks-dev test"},
+        # 2 elements on img_b -> kept
+        {"image": img_b, "bbox": [100, 100, 300, 200], "instruction": "Click B1"},
+        {"image": img_b, "bbox": [400, 400, 500, 450], "instruction": "Click B2"},
+    ]
+
+    class FakeStreamDS(list):
+        def shuffle(self, seed=42, buffer_size=2000):
+            return self
+
+    fake_datasets_mod = types.ModuleType("datasets")
+    call_count = {"n": 0}
+
+    def fake_load_dataset(*args, **kwargs):
+        call_count["n"] += 1
+        return FakeStreamDS(fake_rows)
+
+    fake_datasets_mod.load_dataset = fake_load_dataset
+
+    with patch.dict(sys.modules, {"datasets": fake_datasets_mod}):
+        ds = GroundingDataset(
+            dataset_source="hf_showui",
+            hf_samples=10,
+            max_elements_per_image=2,
+            cache_dir=str(tmp_path),
+            allow_synthetic_fallback=False,
+        )
+        assert call_count["n"] == 1
+        # Expected: 2 from img_a + 2 from img_b = 4 samples
+        assert len(ds) == 4
+        assert ds.leakage_filtered_count == 1
+        assert "image_bytes" in ds.samples[0]
+
+        # Verify __getitem__ JPEG decode shape & range
+        item = ds[0]
+        assert item["image"].shape == (3, 800, 1280)
+        assert item["image"].dtype == torch.float32
+        assert 0.0 <= item["image"].min().item() <= item["image"].max().item() <= 1.0
+
+        # Second load should hit disk cache without invoking load_dataset again
+        ds_cached = GroundingDataset(
+            dataset_source="hf_showui",
+            hf_samples=10,
+            max_elements_per_image=2,
+            cache_dir=str(tmp_path),
+            allow_synthetic_fallback=False,
+        )
+        assert call_count["n"] == 1
+        assert len(ds_cached) == 4
+
+
+def test_run_ddp_training_loss_breakdown_and_val_logging(tmp_path: Path, capsys):
+    """Verifies run_ddp_training logs weighted loss breakdown and capped epoch-end Val Strict Acc."""
+    run_ddp_training = train_vla_module.run_ddp_training
+
+    with patch.object(train_vla_module, "QwenGUIActorModel") as mock_model_cls:
+        # Force dry_run=True inside QwenGUIActorModel while letting run_ddp_training run validation
+        real_cls = QwenGUIActorModel
+        mock_model_cls.side_effect = lambda **kwargs: real_cls(**{**kwargs, "dry_run": True})
+
+        with patch.object(train_vla_module.torch.cuda, "is_available", return_value=False):
+            run_ddp_training(
+                epochs=1,
+                batch_size=2,
+                learning_rate=1e-3,
+                save_dir=str(tmp_path / "ckpts"),
+                dry_run=False,
+                max_samples=24,
+                dataset_source="synthetic",
+                max_val_samples=2,
+                no_early_abort=True,
+            )
+
+    captured = capsys.readouterr().out
+    assert "Dataset Partitioning (synthetic):" in captured
+    assert "Epoch-End Eval Capped at 2 samples" in captured
+    assert "Total Loss:" in captured
+    assert "Weighted: [Patch CE (w=5.0):" in captured
+    assert "[VAL] Epoch [1/1] Val Strict (0px) Acc:" in captured
+    assert "Val Patch Acc:" in captured
+    assert (tmp_path / "ckpts" / "gui_actor_step6_2_epoch_1.pt").exists()

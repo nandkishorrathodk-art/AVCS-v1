@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import copy
+import datetime
+import hashlib
 import io
 import json
 import logging
@@ -118,7 +120,12 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+            timeout=datetime.timedelta(minutes=30),
+        )
         return rank, world_size, local_rank, True
     return 0, 1, 0, False
 
@@ -629,17 +636,20 @@ class GroundingDataset(Dataset):
         target_size: Tuple[int, int] = (800, 1280),
         allow_synthetic_fallback: bool = True,
         stream_hf: bool = True,
-        hf_samples: int = 4000,
+        hf_samples: int = 20000,
         max_elements_per_image: int = 5,
+        dataset_source: str = "hf_showui",
+        cache_dir: Optional[str] = None,
     ) -> None:
         self.target_size = target_size
         self.allow_synthetic_fallback = allow_synthetic_fallback
         self.max_elements_per_image = max_elements_per_image
+        self.dataset_source = dataset_source
+        self.cache_dir = cache_dir or os.path.join(repo_root, "data", "cache")
         self.samples: List[Dict[str, Any]] = []
         self.leakage_filtered_count = 0
 
-        # Scan for existing dataset files in local or Kaggle environment
-        paths_to_check = dataset_paths or [
+        default_local_paths = [
             "/kaggle/input/os-atlas-desktop/train.jsonl",
             "/kaggle/input/showui-desktop-40k/train.jsonl",
             "/kaggle/input/avcs-desktop-grounding/train.jsonl",
@@ -647,44 +657,86 @@ class GroundingDataset(Dataset):
             "avcs/runtime/skills_vault/golden",
         ]
 
-        for p_str in paths_to_check:
-            p = Path(p_str)
-            if not p.is_absolute():
-                if not p.exists() and (Path(repo_root) / p).exists():
+        if dataset_paths is not None:
+            # Explicit dataset paths provided (e.g. unit tests or custom dataset directories)
+            for p_str in dataset_paths:
+                p = Path(p_str)
+                if not p.is_absolute():
+                    if not p.exists() and (Path(repo_root) / p).exists():
+                        p = Path(repo_root) / p
+                if not p.exists():
+                    if "golden" in p_str:
+                        logger.debug(f"Golden trajectory directory {p_str} does not exist; cleanly skipping.")
+                    continue
+
+                if p.is_dir() and "golden" in p_str:
+                    self._ingest_golden_directory(p)
+                elif p.is_file() and p.suffix == ".jsonl":
+                    self._ingest_jsonl(p, max_samples)
+        elif dataset_source == "synthetic":
+            self._generate_synthetic_samples(min(max_samples, 1000))
+        elif dataset_source == "local":
+            for p_str in default_local_paths:
+                p = Path(p_str)
+                if not p.is_absolute() and not p.exists() and (Path(repo_root) / p).exists():
                     p = Path(repo_root) / p
-            if not p.exists():
-                if "golden" in p_str:
-                    logger.debug(f"Golden trajectory directory {p_str} does not exist; cleanly skipping.")
-                continue
+                if not p.exists():
+                    continue
+                if p.is_dir() and "golden" in p_str:
+                    self._ingest_golden_directory(p)
+                elif p.is_file() and p.suffix == ".jsonl":
+                    self._ingest_jsonl(p, max_samples)
+        elif dataset_source in ("hf_showui", "mixed"):
+            if dataset_source == "mixed":
+                for p_str in default_local_paths:
+                    p = Path(p_str)
+                    if not p.is_absolute() and not p.exists() and (Path(repo_root) / p).exists():
+                        p = Path(repo_root) / p
+                    if not p.exists():
+                        continue
+                    if p.is_dir() and "golden" in p_str:
+                        self._ingest_golden_directory(p)
+                    elif p.is_file() and p.suffix == ".jsonl":
+                        self._ingest_jsonl(p, max_samples)
 
-            if p.is_dir() and "golden" in p_str:
-                self._ingest_golden_directory(p)
-            elif p.is_file() and p.suffix == ".jsonl":
-                self._ingest_jsonl(p, max_samples)
-
-        # Stream real desktop samples from Hugging Face if requested OR on Kaggle with unmounted external input
-        should_stream = stream_hf or (
-            dataset_paths is None
-            and os.path.exists("/kaggle")
-            and not any(Path(p).exists() for p in ["/kaggle/input/os-atlas-desktop/train.jsonl", "/kaggle/input/showui-desktop-40k/train.jsonl"])
-            and len(self.samples) < hf_samples
-        )
-        if should_stream and len(self.samples) < hf_samples:
-            self._ingest_from_hf(hf_samples - len(self.samples), max_elements_per_image=self.max_elements_per_image)
+            target_hf = hf_samples if dataset_source == "hf_showui" else max(0, hf_samples - len(self.samples))
+            if stream_hf and target_hf > 0:
+                is_dist = dist.is_available() and dist.is_initialized()
+                rank = dist.get_rank() if is_dist else 0
+                if is_dist:
+                    if rank == 0:
+                        self._ingest_from_hf(
+                            target_hf,
+                            max_elements_per_image=self.max_elements_per_image,
+                            cache_dir=self.cache_dir,
+                        )
+                    dist.barrier()
+                    if rank != 0:
+                        self._ingest_from_hf(
+                            target_hf,
+                            max_elements_per_image=self.max_elements_per_image,
+                            cache_dir=self.cache_dir,
+                        )
+                else:
+                    self._ingest_from_hf(
+                        target_hf,
+                        max_elements_per_image=self.max_elements_per_image,
+                        cache_dir=self.cache_dir,
+                    )
 
         # Fail-closed gate: if no samples were ingested
         if len(self.samples) == 0:
             if allow_synthetic_fallback:
-                logger.info("No on-disk JSONL datasets found; generating 1,000 synthetic desktop grounding samples...")
+                logger.info("No grounding datasets found; generating 1,000 synthetic desktop grounding samples...")
                 self._generate_synthetic_samples(1000)
             else:
                 raise RuntimeError(
-                    f"Fail-closed dataset gate: No valid grounding samples ingested from configured paths "
-                    f"({paths_to_check}). Production training aborted to prevent zero-sample training."
+                    f"Fail-closed dataset gate: No valid grounding samples ingested (dataset_source={dataset_source}, "
+                    f"paths={dataset_paths}). Production training aborted to prevent zero-sample training."
                 )
 
         logger.info(
-            f"GroundingDataset initialized: {len(self.samples)} valid samples ingested. "
+            f"GroundingDataset initialized ({dataset_source}): {len(self.samples)} valid samples ingested. "
             f"[LEAKAGE GATE] Verified {self.leakage_filtered_count} held-out showdown-clicks-dev records filtered out."
         )
 
@@ -870,24 +922,70 @@ class GroundingDataset(Dataset):
             except Exception:
                 continue
 
-    def _ingest_from_hf(self, max_samples: int, max_elements_per_image: int = 5) -> None:
+    def _ingest_from_hf(
+        self,
+        max_samples: int,
+        max_elements_per_image: int = 5,
+        cache_dir: Optional[str] = None,
+    ) -> None:
+        cache_path = None
+        if cache_dir:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                cache_path = os.path.join(
+                    cache_dir,
+                    f"cache_showui_desktop_{max_samples}_max{max_elements_per_image}.pt",
+                )
+                if os.path.exists(cache_path):
+                    logger.info(
+                        f"[HF-CACHE] Loading cached ShowUI-desktop samples from {cache_path}..."
+                    )
+                    cached_samples = torch.load(cache_path, weights_only=False)
+                    if isinstance(cached_samples, list) and len(cached_samples) > 0:
+                        self.samples.extend(cached_samples[:max_samples])
+                        logger.info(
+                            f"[HF-CACHE] Successfully loaded {len(self.samples)} real desktop samples from disk cache."
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"[HF-CACHE] Failed to read cache {cache_path}: {e}")
+
         try:
             from datasets import load_dataset
             logger.info(
                 f"[HF-INGEST] Streaming real desktop samples from showlab/ShowUI-desktop "
-                f"(up to {max_samples}, max {max_elements_per_image} per unique screenshot)..."
+                f"(target={max_samples}, max {max_elements_per_image} per unique screenshot, shuffled across shards)..."
             )
             ds = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
+            if hasattr(ds, "shuffle"):
+                ds = ds.shuffle(seed=42, buffer_size=2000)
+
             elements_per_img: Dict[str, int] = defaultdict(int)
+            ingested_hf: List[Dict[str, Any]] = []
+            unreadable_skipped = 0
 
             for item in ds:
-                if len(self.samples) >= max_samples:
+                if len(ingested_hf) >= max_samples:
                     break
                 img = item.get("image") or item.get("img")
                 if img is None:
+                    unreadable_skipped += 1
                     continue
-                w, h = img.size
-                img_key = str(item.get("image_id", item.get("id", f"{w}x{h}_{len(self.samples)}")))
+
+                # Fail-closed per-image validation & thumbnail hash for exact visual deduplication
+                try:
+                    w, h = img.size
+                    if w <= 0 or h <= 0:
+                        unreadable_skipped += 1
+                        continue
+                    rgb_img = img.convert("RGB")
+                    thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
+                    img_hash = hashlib.md5(thumb).hexdigest()[:16]
+                    img_key = str(item.get("image_id") or img_hash)
+                except Exception:
+                    unreadable_skipped += 1
+                    continue
+
                 if elements_per_img[img_key] >= max_elements_per_image:
                     continue
 
@@ -913,21 +1011,45 @@ class GroundingDataset(Dataset):
                     self.leakage_filtered_count += 1
                     continue
 
-                # Native canvas target size (800, 1280) - 16:10 standard desktop
-                pil_resized = img.convert("RGB").resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
-                arr = np.array(pil_resized, dtype=np.uint8).transpose(2, 0, 1)
+                # Compress resized canvas (1280x800) as JPEG bytes to keep 20k samples <= 1.6GB RAM
+                try:
+                    pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+                    buf = io.BytesIO()
+                    pil_resized.save(buf, format="JPEG", quality=85)
+                    jpeg_bytes = buf.getvalue()
+                except Exception:
+                    unreadable_skipped += 1
+                    continue
 
                 elements_per_img[img_key] += 1
-                self.samples.append({
+                ingested_hf.append({
                     "instruction": instr,
                     "action_idx": 0,
                     "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
                     "target_bbox": bbox_norm,
-                    "image_tensor": torch.from_numpy(arr),
+                    "image_bytes": jpeg_bytes,
                     "image_path": None,
                     "image_id": img_key,
                 })
-            logger.info(f"[HF-INGEST] Ingested {len(self.samples)} real desktop samples from showlab/ShowUI-desktop.")
+
+                if len(ingested_hf) % 2500 == 0:
+                    logger.info(
+                        f"[HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
+                        f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped)"
+                    )
+
+            self.samples.extend(ingested_hf)
+            logger.info(
+                f"[HF-INGEST] Ingested {len(ingested_hf)} real desktop samples across "
+                f"{len(elements_per_img)} unique screenshots (skipped {unreadable_skipped} unreadable)."
+            )
+
+            if cache_path and len(ingested_hf) > 0:
+                try:
+                    torch.save(ingested_hf, cache_path)
+                    logger.info(f"[HF-CACHE] Saved {len(ingested_hf)} samples to {cache_path}.")
+                except Exception as ce:
+                    logger.warning(f"[HF-CACHE] Failed to write cache {cache_path}: {ce}")
         except Exception as e:
             logger.warning(f"[HF-INGEST] Streaming from showlab/ShowUI-desktop failed ({e}).")
 
@@ -947,34 +1069,53 @@ class GroundingDataset(Dataset):
             })
 
     def split_train_val(self, val_ratio: float = 0.1, seed: int = 42) -> Tuple["GroundingDataset", "GroundingDataset"]:
-        """Splits the dataset into train and validation sets, partitioned strictly by unique image ID."""
+        """Splits dataset into train (~90%) and validation (~10%), partitioned strictly by unique screenshot ID.
+
+        Uses size-aware bin packing so oversized single-image groups cannot invert the train/val ratio.
+        """
         import random
         rng = random.Random(seed)
 
         # Group samples by unique image identifier
         groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for s in self.samples:
-            img_id = s.get("image_id") or s.get("image_path") or f"sample_{len(groups)}"
+        for idx, s in enumerate(self.samples):
+            img_id = s.get("image_id") or s.get("image_path") or f"sample_{idx}"
             groups[img_id].append(s)
-
-        all_keys = list(groups.keys())
-        rng.shuffle(all_keys)
-
-        num_val = max(1, int(len(all_keys) * val_ratio)) if len(all_keys) > 3 else 0
-        val_keys = set(all_keys[:num_val])
 
         train_samples: List[Dict[str, Any]] = []
         val_samples: List[Dict[str, Any]] = []
-        for k, items in groups.items():
-            if k in val_keys:
-                val_samples.extend(items)
-            else:
-                train_samples.extend(items)
 
-        # If val_samples is empty (small dataset), keep train_samples
+        if len(groups) <= 1:
+            all_items = self.samples
+            num_val = max(1, int(round(len(all_items) * val_ratio))) if len(all_items) > 2 else 0
+            val_samples = all_items[:num_val]
+            train_samples = all_items[num_val:]
+        else:
+            n_val_target = max(1, int(round(len(self.samples) * val_ratio)))
+            sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+            eligible: List[Tuple[str, List[Dict[str, Any]]]] = []
+
+            # Groups larger than the entire validation budget must go to train to prevent ratio inversion
+            for k, items in sorted_groups:
+                if len(items) > n_val_target:
+                    train_samples.extend(items)
+                else:
+                    eligible.append((k, items))
+
+            rng.shuffle(eligible)
+            val_count = 0
+            for _, items in eligible:
+                if (val_count + len(items) <= n_val_target) or (val_count == 0 and len(items) <= n_val_target):
+                    val_samples.extend(items)
+                    val_count += len(items)
+                else:
+                    train_samples.extend(items)
+
+        # Safety fallback if eligible was empty (e.g. only 2 giant screenshots)
         if not val_samples and len(train_samples) > 2:
-            val_samples = train_samples[:1]
-            train_samples = train_samples[1:]
+            num_val = max(1, int(round(len(train_samples) * val_ratio)))
+            val_samples = train_samples[:num_val]
+            train_samples = train_samples[num_val:]
 
         train_ds = copy.copy(self)
         train_ds.samples = train_samples
@@ -990,7 +1131,20 @@ class GroundingDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.samples[idx]
         img_tensor: Optional[torch.Tensor] = item.get("image_tensor")
+        img_bytes = item.get("image_bytes")
         img_p = item.get("image_path")
+
+        if img_tensor is None and img_bytes is not None:
+            try:
+                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB").resize(
+                    (self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR
+                )
+                arr = np.array(pil_img, dtype=np.uint8).transpose(2, 0, 1)
+                img_tensor = torch.from_numpy(arr)
+            except Exception as e:
+                logger.debug(f"Failed to decode JPEG bytes at sample {idx}: {e}")
+                img_tensor = None
+
         if img_tensor is None and img_p:
             cand_p = img_p
             if not os.path.exists(cand_p):
@@ -1526,10 +1680,13 @@ def run_ddp_training(
     use_token_pruning: bool = False,
     use_rolling_kv: bool = False,
     stream_hf: bool = True,
-    hf_samples: int = 4000,
+    hf_samples: int = 20000,
     max_elements_per_image: int = 5,
     no_early_abort: bool = False,
     dataset_paths: Optional[List[str]] = None,
+    dataset_source: str = "hf_showui",
+    max_val_samples: int = 200,
+    cache_dir: Optional[str] = None,
 ) -> None:
     rank, world_size, local_rank, is_distributed = setup_distributed()
 
@@ -1552,6 +1709,7 @@ def run_ddp_training(
     model.to(device)
 
     # Report parameter counts
+    stats: Dict[str, int] = {}
     if rank == 0:
         stats = model.get_parameter_summary()
         print("\n--- MODEL PARAMETER INVENTORY ---")
@@ -1574,12 +1732,20 @@ def run_ddp_training(
         stream_hf=stream_hf,
         hf_samples=hf_samples,
         max_elements_per_image=max_elements_per_image,
+        dataset_source=dataset_source,
+        cache_dir=cache_dir,
     )
     train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
+    val_eval_dataset = copy.copy(val_dataset)
+    if len(val_dataset) > max_val_samples:
+        val_eval_dataset.samples = val_dataset.samples[:max_val_samples]
+
     if rank == 0:
+        total_cnt = max(1, len(train_dataset) + len(val_dataset))
         print(
-            f"Dataset Partitioning: Train Samples = {len(train_dataset)}, "
-            f"Held-Out Val Samples = {len(val_dataset)} (Partitioned by unique screenshots)"
+            f"Dataset Partitioning ({dataset_source}): Train Samples = {len(train_dataset)} ({len(train_dataset)/total_cnt*100:.1f}%), "
+            f"Held-Out Val Samples = {len(val_dataset)} ({len(val_dataset)/total_cnt*100:.1f}%) "
+            f"[Epoch-End Eval Capped at {len(val_eval_dataset)} samples] (Partitioned by unique screenshots)"
         )
 
     sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
@@ -1592,21 +1758,23 @@ def run_ddp_training(
         drop_last=drop_last,
     )
 
+    val_sampler = DistributedSampler(val_eval_dataset, num_replicas=world_size, rank=rank, shuffle=False) if (is_distributed and len(val_eval_dataset) > 0) else None
     val_dataloader = DataLoader(
-        val_dataset,
+        val_eval_dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         drop_last=False,
-    ) if len(val_dataset) > 0 else None
+    ) if len(val_eval_dataset) > 0 else None
 
-    # 3. Optimizer & Multi-Task Loss Function with Patch Classification Cross-Entropy Loss
+    # 3. Optimizer & Rebalanced Multi-Task Loss (Patch CE dominant >= 60% of total loss)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-2)
     criterion = UnifiedMultiTaskLoss(
-        weight_action=1.0,
-        weight_coord_l1=15.0,
-        weight_coord_l2=35.0,
-        weight_patch_ce=3.0,
+        weight_action=0.5,
+        weight_coord_l1=10.0,
+        weight_coord_l2=10.0,
+        weight_patch_ce=5.0,
     )
 
     save_path = Path(save_dir)
@@ -1622,6 +1790,10 @@ def run_ddp_training(
         epoch_loss = 0.0
         epoch_patch_ce = 0.0
         epoch_coord_l1 = 0.0
+        epoch_w_patch_ce = 0.0
+        epoch_w_coord_l1 = 0.0
+        epoch_w_coord_l2 = 0.0
+        epoch_w_action = 0.0
         epoch_patch_acc = 0.0
         step_count = 0
         t0 = time.time()
@@ -1630,15 +1802,17 @@ def run_ddp_training(
             images = batch["image"].to(device)
             target_actions = batch["target_action"].to(device)
             target_coords = batch["target_coord"].to(device)
+            target_bboxes = batch["target_bbox"].to(device)
 
             optimizer.zero_grad()
             outputs = model(images, queries=batch.get("instruction"))
 
-            # Compute Unified Multi-Task Loss with FP32 upcast and patch cross-entropy
+            # Compute Unified Multi-Task Loss with multi-positive bbox supervision
             loss_dict = criterion(
                 model_out=outputs,
                 target_actions=target_actions,
                 target_coords=target_coords,
+                target_bboxes=target_bboxes,
             )
             loss = loss_dict["loss"]
             loss.backward()
@@ -1648,6 +1822,10 @@ def run_ddp_training(
             epoch_loss += loss.item()
             epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
             epoch_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
+            epoch_w_patch_ce += loss_dict.get("weighted_patch_ce", torch.tensor(0.0)).item()
+            epoch_w_coord_l1 += loss_dict.get("weighted_coord_l1", torch.tensor(0.0)).item()
+            epoch_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
+            epoch_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
             epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
             step_count += 1
 
@@ -1657,24 +1835,35 @@ def run_ddp_training(
         avg_loss = epoch_loss / max(1, step_count)
         avg_patch_ce = epoch_patch_ce / max(1, step_count)
         avg_coord_l1 = epoch_coord_l1 / max(1, step_count)
+        avg_w_patch_ce = epoch_w_patch_ce / max(1, step_count)
+        avg_w_coord_l1 = epoch_w_coord_l1 / max(1, step_count)
+        avg_w_coord_l2 = epoch_w_coord_l2 / max(1, step_count)
+        avg_w_action = epoch_w_action / max(1, step_count)
+        w_sum = avg_w_patch_ce + avg_w_coord_l1 + avg_w_coord_l2 + avg_w_action
+        patch_pct = (avg_w_patch_ce / max(avg_loss, 1e-6)) * 100.0
         avg_patch_acc = (epoch_patch_acc / max(1, step_count)) * 100.0
         elapsed = time.time() - t0
         if rank == 0:
             print(
-                f"Epoch [{epoch}/{epochs}] - Loss: {avg_loss:.4f} | "
-                f"Patch CE: {avg_patch_ce:.4f} | Coord L1: {avg_coord_l1:.4f} | "
+                f"Epoch [{epoch}/{epochs}] - Total Loss: {avg_loss:.4f} | "
+                f"Weighted: [Patch CE (w={criterion.weight_patch_ce:.1f}): {avg_w_patch_ce:.4f} ({patch_pct:.1f}%) + "
+                f"Coord L1 (w={criterion.weight_coord_l1:.1f}): {avg_w_coord_l1:.4f} + "
+                f"Coord L2 (w={criterion.weight_coord_l2:.1f}): {avg_w_coord_l2:.4f} + "
+                f"Action CE (w={criterion.weight_action:.1f}): {avg_w_action:.4f} = {w_sum:.4f}] | "
+                f"Raw: [Patch CE: {avg_patch_ce:.4f}, Coord L1: {avg_coord_l1:.4f}] | "
                 f"Train Patch Acc: {avg_patch_acc:.1f}% | Time: {elapsed:.2f}s | Steps: {step_count}"
             )
 
-        # Held-Out Validation Evaluation at Epoch End
+        # Distributed Held-Out Validation Evaluation at Epoch End (Capped at 200 samples; prevents NCCL timeout)
         val_strict_acc = 0.0
-        if rank == 0 and val_dataloader is not None and len(val_dataloader) > 0 and not dry_run:
+        if val_dataloader is not None and len(val_dataloader) > 0 and not dry_run:
             unwrapped = model.module if hasattr(model, "module") else model
             unwrapped.eval()
-            val_hits = 0
-            val_patch_hits = 0
-            val_total = 0
-            val_loss_acc = 0.0
+            local_hits = 0
+            local_patch_hits = 0
+            local_total = 0
+            local_loss_acc = 0.0
+            local_batches = 0
 
             with torch.no_grad():
                 for v_batch in val_dataloader:
@@ -1684,8 +1873,14 @@ def run_ddp_training(
                     v_bboxes = v_batch["target_bbox"].to(device)
 
                     v_out = unwrapped(v_imgs, queries=v_batch.get("instruction"))
-                    v_loss_dict = criterion(model_out=v_out, target_actions=v_actions, target_coords=v_coords)
-                    val_loss_acc += v_loss_dict["loss"].item()
+                    v_loss_dict = criterion(
+                        model_out=v_out,
+                        target_actions=v_actions,
+                        target_coords=v_coords,
+                        target_bboxes=v_bboxes,
+                    )
+                    local_loss_acc += v_loss_dict["loss"].item()
+                    local_batches += 1
 
                     pred_coords = v_out["subpixel_coords"]
                     b_cnt = pred_coords.shape[0]
@@ -1698,26 +1893,50 @@ def run_ddp_training(
                             v_bboxes[b_i, 2].item(),
                             v_bboxes[b_i, 3].item(),
                         )
-                        if (bx1 <= px <= bx2) and (by1 <= py <= by2):
-                            val_hits += 1
+                        x_min, x_max = min(bx1, bx2), max(bx1, bx2)
+                        y_min, y_max = min(by1, by2), max(by1, by2)
+                        if (x_min <= px <= x_max) and (y_min <= py <= y_max):
+                            local_hits += 1
 
-                    val_patch_hits += int((v_loss_dict.get("patch_top1_acc", 0.0) * b_cnt).round().item())
-                    val_total += b_cnt
+                    local_patch_hits += int((v_loss_dict.get("patch_top1_acc", 0.0) * b_cnt).round().item())
+                    local_total += b_cnt
+
+            if is_distributed:
+                stats_tensor = torch.tensor(
+                    [local_hits, local_patch_hits, local_total, local_loss_acc, local_batches],
+                    device=device,
+                    dtype=torch.float64,
+                )
+                dist.all_reduce(stats_tensor, op=dist.ReduceOp.SUM)
+                val_hits = int(stats_tensor[0].item())
+                val_patch_hits = int(stats_tensor[1].item())
+                val_total = int(stats_tensor[2].item())
+                val_loss_acc = stats_tensor[3].item()
+                val_batches_total = max(1, int(stats_tensor[4].item()))
+                dist.barrier()
+            else:
+                val_hits = local_hits
+                val_patch_hits = local_patch_hits
+                val_total = local_total
+                val_loss_acc = local_loss_acc
+                val_batches_total = max(1, local_batches)
 
             val_strict_acc = val_hits / max(1, val_total)
             val_patch_acc = (val_patch_hits / max(1, val_total)) * 100.0
-            avg_val_loss = val_loss_acc / max(1, len(val_dataloader))
-            print(
-                f"[VAL] Epoch [{epoch}/{epochs}] Held-Out Val Strict (0px) In-Bbox Acc: {val_strict_acc * 100:.2f}% "
-                f"({val_hits}/{val_total}) | Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}"
-            )
+            avg_val_loss = val_loss_acc / val_batches_total
+            if rank == 0:
+                print(
+                    f"[VAL] Epoch [{epoch}/{epochs}] Val Strict (0px) Acc: {val_strict_acc * 100:.2f}% "
+                    f"({val_hits}/{val_total}) | Val Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}"
+                )
             unwrapped.train()
 
-            # Early Abortion Gate: Abort early if Epoch 1 accuracy is < 10%
-            if epoch == 1 and val_strict_acc < 0.10 and not no_early_abort:
+            # Early Abortion Gate: Abort only if model exhibits zero convergence across patch & strict metrics
+            if epoch == 1 and val_strict_acc < 0.05 and val_patch_acc < 5.0 and not no_early_abort:
                 raise RuntimeError(
-                    f"[EARLY-ABORTION-GATE] Epoch 1 validation strict accuracy ({val_strict_acc * 100:.2f}%) is below 10.0% threshold! "
-                    "Attention head has not begun converging on ground-truth patches. Training aborted early to prevent compute waste."
+                    f"[EARLY-ABORTION-GATE] Epoch 1 validation strict accuracy ({val_strict_acc * 100:.2f}%) "
+                    f"and patch accuracy ({val_patch_acc:.1f}%) are both below 5.0% threshold! "
+                    "Training aborted early to prevent compute waste."
                 )
 
         if rank == 0:
@@ -1731,6 +1950,9 @@ def run_ddp_training(
                 "val_strict_acc": val_strict_acc,
             }, ckpt_file)
             print(f"Saved trainable adapter checkpoint to: {ckpt_file}")
+
+        if is_distributed:
+            dist.barrier()
 
         if dry_run:
             break
@@ -1761,11 +1983,20 @@ def main():
     parser.add_argument("--nproc", type=int, default=None, help="Number of processes for auto-torchrun")
     parser.add_argument("--no-auto-spawn", action="store_true", help="Disable auto-torchrun spawning")
     parser.add_argument("--fail-closed", action="store_true", help="Strictly enforce fail-closed dataset ingestion")
+    parser.add_argument(
+        "--dataset-source",
+        type=str,
+        default="hf_showui",
+        choices=["hf_showui", "local", "mixed", "synthetic"],
+        help="Dataset source: 'hf_showui' (streams/caches showlab/ShowUI-desktop, default), 'local', 'mixed', or 'synthetic'",
+    )
     parser.add_argument("--stream-hf", action="store_true", default=True, help="Stream real desktop samples from showlab/ShowUI-desktop (default: True)")
     parser.add_argument("--no-stream-hf", action="store_true", help="Disable Hugging Face streaming")
-    parser.add_argument("--hf-samples", type=int, default=4000, help="Number of real desktop samples to stream from Hugging Face")
+    parser.add_argument("--hf-samples", type=int, default=20000, help="Target real desktop samples from showlab/ShowUI-desktop (default: 20000)")
     parser.add_argument("--max-elements-per-image", type=int, default=5, help="Maximum elements per unique screenshot (default: 5)")
-    parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 < 10% early-abort gate")
+    parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
+    parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
     parser.add_argument("--dataset-paths", nargs="*", default=None, help="Explicit dataset JSONL / directory paths")
     parser.add_argument("--enable-token-pruning", action="store_true", help="Enable ShowUI token pruner (PAUSED by default)")
     parser.add_argument("--enable-rolling-kv", action="store_true", help="Enable rolling KV memory (PAUSED by default)")
@@ -1825,6 +2056,9 @@ def main():
         max_elements_per_image=args.max_elements_per_image,
         no_early_abort=args.no_early_abort,
         dataset_paths=args.dataset_paths,
+        dataset_source=args.dataset_source,
+        max_val_samples=args.max_val_samples,
+        cache_dir=args.cache_dir,
     )
 
 
