@@ -322,11 +322,30 @@ def run_evaluation(
         ).eval()
         if not hasattr(ms_model.config, "pointer_pad_token_id") or ms_model.config.pointer_pad_token_id is None:
             ms_model.config.pointer_pad_token_id = 151669
+        if not hasattr(ms_model, "rope_deltas"):
+            ms_model.rope_deltas = None
+
+        import functools
+
+        # In modern transformers, visual.forward returns BaseModelOutputWithPooling.
+        # modeling_qwen25vl.py line 173 expects self.visual() to return a Tensor with .shape[0].
+        if hasattr(ms_model, "visual") and hasattr(ms_model.visual, "forward"):
+            orig_visual_forward = ms_model.visual.forward
+            @functools.wraps(orig_visual_forward)
+            def safe_visual_forward(*args, **kwargs):
+                out = orig_visual_forward(*args, **kwargs)
+                if hasattr(out, "last_hidden_state") and isinstance(out.last_hidden_state, torch.Tensor):
+                    return out.last_hidden_state
+                elif isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], torch.Tensor):
+                    return out[0]
+                return out
+            ms_model.visual.forward = safe_visual_forward
+            if hasattr(ms_model, "model") and hasattr(ms_model.model, "visual"):
+                ms_model.model.visual.forward = safe_visual_forward
 
         # Bypass _validate_model_kwargs to allow all multimodal arguments (pixel_values, image_grid_thw, etc.)
         ms_model._validate_model_kwargs = lambda model_kwargs: None
 
-        import functools
         orig_generate = ms_model.generate
         @functools.wraps(orig_generate)
         def safe_generate(*args, **kwargs):
