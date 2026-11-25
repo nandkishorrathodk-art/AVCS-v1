@@ -936,14 +936,15 @@ class GroundingDataset(Dataset):
                 os.makedirs(cache_dir, exist_ok=True)
                 cache_path = os.path.join(
                     cache_dir,
-                    f"cache_showui_stage1_{max_samples}_max{max_elements_per_image}.pt",
+                    f"cache_stage1_v2_{max_samples}_max{max_elements_per_image}.pt",
                 )
                 if os.path.exists(cache_path):
                     logger.info(
-                        f"[HF-CACHE] Loading cached ShowUI Stage-1 samples from {cache_path}..."
+                        f"[HF-CACHE] Loading cached Stage-1 UI samples from {cache_path}..."
                     )
                     cached_samples = torch.load(cache_path, weights_only=False)
-                    if isinstance(cached_samples, list) and len(cached_samples) > 0:
+                    min_expected = min(max_samples, 1000) if max_samples >= 5000 else 1
+                    if isinstance(cached_samples, list) and len(cached_samples) >= min_expected:
                         self.samples.extend(cached_samples[:max_samples])
                         logger.info(
                             f"[HF-CACHE] Successfully loaded {len(self.samples)} real UI samples from disk cache."
@@ -956,13 +957,20 @@ class GroundingDataset(Dataset):
             import random
             from datasets import load_dataset
 
-            # Stream sequentially (avoiding cross-shard buffer_size=2000 HTTP stall before sample #0),
-            # then shuffle ingested samples in memory. Fall through to ShowUI-web after ShowUI-desktop
-            # (~7.5k total rows / ~500-1500 screens) so Stage-1 reliably hits 15k-20k diverse screens.
-            hf_repos = ("showlab/ShowUI-desktop", "showlab/ShowUI-web")
+            # showlab/ShowUI-desktop provides ~505 capped desktop samples (101 raw screens).
+            # agentsea/wave-ui provides 63,530 train rows with embedded PIL images across
+            # desktop (omniact Retina 2880x1800 / 3360x2100) and landscape web UIs.
+            hf_repos = ("showlab/ShowUI-desktop", "agentsea/wave-ui")
             elements_per_img: Dict[str, int] = defaultdict(int)
             ingested_hf: List[Dict[str, Any]] = []
             unreadable_skipped = 0
+            filtered_non_landscape = 0
+
+            generic_dom_tags = {
+                "statictext", "statictext, link", "statictext, link, listitem",
+                "statictext, pre", "statictext, descriptionlistterm",
+                "button", "link", "image", "generic", "",
+            }
 
             for repo_name in hf_repos:
                 if len(ingested_hf) >= max_samples:
@@ -982,6 +990,16 @@ class GroundingDataset(Dataset):
                 for item in ds:
                     if len(ingested_hf) >= max_samples:
                         break
+
+                    # Filter out mobile portrait screenshots and non-English labels when metadata exists
+                    platform = str(item.get("platform") or "").lower()
+                    if platform == "mobile":
+                        filtered_non_landscape += 1
+                        continue
+                    lang = str(item.get("language") or "english").lower()
+                    if lang not in ("english", "en", ""):
+                        continue
+
                     img = item.get("image") or item.get("img")
                     if img is None:
                         unreadable_skipped += 1
@@ -992,6 +1010,9 @@ class GroundingDataset(Dataset):
                         w, h = img.size
                         if w <= 0 or h <= 0:
                             unreadable_skipped += 1
+                            continue
+                        if h > w * 1.15:
+                            filtered_non_landscape += 1
                             continue
                         rgb_img = img.convert("RGB")
                         thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
@@ -1007,21 +1028,50 @@ class GroundingDataset(Dataset):
                     raw_pt = item.get("point") or item.get("target_coord")
                     raw_bbox = item.get("bbox") or item.get("target_bbox")
 
-                    if raw_pt and len(raw_pt) == 2:
-                        cx = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
-                        cy = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
+                    if raw_bbox and len(raw_bbox) == 4:
+                        vals = [float(v) for v in raw_bbox]
+                        is_pixel = max(abs(v) for v in vals) > 1.0
+                        b0 = max(0.0, min(1.0, vals[0] / max(w, 1) if is_pixel else vals[0]))
+                        b1 = max(0.0, min(1.0, vals[1] / max(h, 1) if is_pixel else vals[1]))
+                        b2 = max(0.0, min(1.0, vals[2] / max(w, 1) if is_pixel else vals[2]))
+                        b3 = max(0.0, min(1.0, vals[3] / max(h, 1) if is_pixel else vals[3]))
+                        x_min, x_max = min(b0, b2), max(b0, b2)
+                        y_min, y_max = min(b1, b3), max(b1, b3)
+                        if (x_max - x_min) <= 1e-4 or (y_max - y_min) <= 1e-4:
+                            continue
+                        cx, cy = (x_min + x_max) / 2.0, (y_min + y_max) / 2.0
+                        bbox_norm = [x_min, y_min, x_max, y_max]
+                    elif raw_pt and len(raw_pt) == 2:
+                        pvals = [float(v) for v in raw_pt]
+                        is_pixel = max(abs(v) for v in pvals) > 1.0
+                        cx = max(0.0, min(1.0, pvals[0] / max(w, 1) if is_pixel else pvals[0]))
+                        cy = max(0.0, min(1.0, pvals[1] / max(h, 1) if is_pixel else pvals[1]))
                         bbox_norm = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
-                    elif raw_bbox and len(raw_bbox) == 4:
-                        b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
-                        b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
-                        b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
-                        b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
-                        cx, cy = (b0 + b2) / 2.0, (b1 + b3) / 2.0
-                        bbox_norm = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
                     else:
                         continue
 
-                    instr = item.get("instruction") or item.get("query") or item.get("task") or "Click target control"
+                    # Clean instruction extraction: avoid generic DOM tags ('StaticText, link') in wave-ui
+                    raw_instr = str(item.get("instruction") or item.get("query") or item.get("task") or "").strip()
+                    raw_name = str(item.get("name") or "").strip()
+                    raw_purpose = str(item.get("purpose") or "").strip()
+                    raw_desc = str(item.get("description") or "").strip()
+
+                    is_raw_dom_tag = (
+                        raw_instr.lower() in generic_dom_tags
+                        or "-> click" in raw_instr.lower()
+                        or (raw_instr.startswith("[") and "]" in raw_instr)
+                    )
+                    if not is_raw_dom_tag and len(raw_instr) >= 3:
+                        instr = raw_instr
+                    elif raw_name:
+                        instr = raw_name if raw_name.lower().startswith("click") else f"Click {raw_name}"
+                    elif raw_purpose:
+                        instr = raw_purpose
+                    elif raw_desc:
+                        instr = raw_desc
+                    else:
+                        instr = "Click target control"
+
                     if self._is_held_out_leakage(instr):
                         self.leakage_filtered_count += 1
                         continue
@@ -1051,7 +1101,7 @@ class GroundingDataset(Dataset):
                     if len(ingested_hf) % 500 == 0:
                         print(
                             f"[HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
-                            f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped)",
+                            f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped, {filtered_non_landscape} non-landscape)",
                             flush=True,
                         )
 
@@ -1065,7 +1115,7 @@ class GroundingDataset(Dataset):
             self.samples.extend(ingested_hf)
             logger.info(
                 f"[HF-INGEST] Ingested {len(ingested_hf)} real UI samples across "
-                f"{len(elements_per_img)} unique screenshots (skipped {unreadable_skipped} unreadable)."
+                f"{len(elements_per_img)} unique screenshots (skipped {unreadable_skipped} unreadable, {filtered_non_landscape} non-landscape)."
             )
 
             if cache_path and len(ingested_hf) > 0:
@@ -1075,7 +1125,7 @@ class GroundingDataset(Dataset):
                 except Exception as ce:
                     logger.warning(f"[HF-CACHE] Failed to write cache {cache_path}: {ce}")
         except Exception as e:
-            logger.warning(f"[HF-INGEST] Streaming from ShowUI failed ({e}).")
+            logger.warning(f"[HF-INGEST] Streaming from ShowUI/WaveUI failed ({e}).")
 
     def _generate_synthetic_samples(self, n: int) -> None:
         for i in range(n):

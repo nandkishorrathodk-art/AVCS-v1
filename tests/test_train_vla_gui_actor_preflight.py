@@ -591,6 +591,16 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
         {"image": img_b, "bbox": [400, 400, 500, 450], "instruction": "Click B2"},
     ]
 
+    img_c = Image.new("RGB", (1280, 720), color=(50, 60, 70))
+    img_mobile = Image.new("RGB", (810, 1555), color=(80, 90, 100))
+
+    wave_rows = [
+        # Generic DOM tag -> replaced by clean 'name'; clamped bbox [0.0, -10.0, 128.0, 72.0]
+        {"image": img_c, "bbox": [0.0, -10.0, 128.0, 72.0], "instruction": "StaticText, link", "name": "about us button", "platform": "web", "language": "English"},
+        # Mobile portrait -> filtered out
+        {"image": img_mobile, "bbox": [10.0, 10.0, 100.0, 100.0], "instruction": "Tap", "name": "close button", "platform": "mobile", "language": "English"},
+    ]
+
     class FakeStreamDS(list):
         def shuffle(self, seed=42, buffer_size=2000):
             return self
@@ -602,6 +612,8 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
         call_count["n"] += 1
         if repo_name == "showlab/ShowUI-desktop":
             return FakeStreamDS(fake_rows)
+        if repo_name == "agentsea/wave-ui":
+            return FakeStreamDS(wave_rows)
         return FakeStreamDS([])
 
     fake_datasets_mod.load_dataset = fake_load_dataset
@@ -615,11 +627,14 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
             allow_synthetic_fallback=False,
         )
         calls_initial = call_count["n"]
-        assert calls_initial >= 1
-        # Expected: 2 from img_a + 2 from img_b = 4 samples
-        assert len(ds) == 4
+        assert calls_initial == 2
+        # Expected: 4 from ShowUI-desktop + 1 landscape web from wave-ui (mobile filtered) = 5 samples
+        assert len(ds) == 5
         assert ds.leakage_filtered_count == 1
         assert "image_bytes" in ds.samples[0]
+        assert any(s["instruction"] == "Click about us button" for s in ds.samples)
+        for s in ds.samples:
+            assert all(0.0 <= v <= 1.0 for v in s["target_bbox"])
 
         # Verify __getitem__ JPEG decode shape & range
         item = ds[0]
@@ -636,7 +651,7 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
             allow_synthetic_fallback=False,
         )
         assert call_count["n"] == calls_initial
-        assert len(ds_cached) == 4
+        assert len(ds_cached) == 5
 
 
 def test_run_ddp_training_loss_breakdown_and_val_logging(tmp_path: Path, capsys):
