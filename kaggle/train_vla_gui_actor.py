@@ -226,6 +226,7 @@ class QwenGUIActorModel(nn.Module):
         query_dim: int = 512,
         dry_run: bool = False,
         load_in_4bit: bool = False,
+        backbone_dtype: str = "fp16",
         use_token_pruning: bool = False,
         target_token_budget: int = 400,
         use_rolling_kv: bool = False,
@@ -236,6 +237,7 @@ class QwenGUIActorModel(nn.Module):
         self.backbone_hidden_dim = backbone_hidden_dim
         self.pointer_hidden_dim = pointer_hidden_dim
         self.query_dim = query_dim
+        self.backbone_dtype = backbone_dtype
         self.use_token_pruning = use_token_pruning
         self.target_token_budget = target_token_budget
         self.use_rolling_kv = use_rolling_kv
@@ -247,25 +249,29 @@ class QwenGUIActorModel(nn.Module):
         if not dry_run:
             try:
                 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-                logger.info(f"Loading pretrained vision-language backbone: {model_id} (pure FP16/NF4)...")
+                resolved_dtype = torch.bfloat16 if backbone_dtype == "bf16" else torch.float16
+                logger.info(
+                    f"Loading pretrained vision-language backbone: {model_id} "
+                    f"(dtype={'BF16' if resolved_dtype == torch.bfloat16 else 'FP16'}{'/NF4' if load_in_4bit else ''})..."
+                )
                 if load_in_4bit:
                     from transformers import BitsAndBytesConfig
                     bnb_cfg = BitsAndBytesConfig(
                         load_in_4bit=True,
                         bnb_4bit_quant_type="nf4",
-                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_compute_dtype=resolved_dtype,
                     )
                     self.backbone = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                         model_id,
                         quantization_config=bnb_cfg,
                         attn_implementation="sdpa",
-                        torch_dtype=torch.float16,
+                        torch_dtype=resolved_dtype,
                     )
                 else:
                     self.backbone = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                         model_id,
                         attn_implementation="sdpa",
-                        torch_dtype=torch.float16,
+                        torch_dtype=resolved_dtype,
                     )
                 self.processor = AutoProcessor.from_pretrained(model_id)
                 # Strictly freeze all backbone parameters
@@ -462,10 +468,18 @@ class QwenGUIActorModel(nn.Module):
         if "pixel_values" in inputs and isinstance(inputs["pixel_values"], torch.Tensor):
             inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
 
-        # 5. Single frozen forward pass through backbone
+        # 5. Single frozen forward pass through backbone (bypass unused 151k-vocab lm_head when possible)
         with torch.no_grad():
-            outputs = self.backbone(**inputs, output_hidden_states=True)
-            last_hidden = outputs.hidden_states[-1]
+            if hasattr(self.backbone, "model"):
+                try:
+                    outputs = self.backbone.model(**inputs, return_dict=True)
+                    last_hidden = outputs.last_hidden_state
+                except Exception:
+                    outputs = self.backbone(**inputs, output_hidden_states=True)
+                    last_hidden = outputs.hidden_states[-1]
+            else:
+                outputs = self.backbone(**inputs, output_hidden_states=True)
+                last_hidden = outputs.hidden_states[-1]
 
         # 6. Extract visual patch hidden states from <|image_pad|> token positions
         image_token_id = getattr(self.backbone.config, "image_token_id", None)
@@ -492,6 +506,15 @@ class QwenGUIActorModel(nn.Module):
             patch_feats = batch_patch_feats[0].unsqueeze(0)
         pooled_feats = torch.stack(batch_pooled_feats, dim=0)
 
+        # FP16 overflow shield: detect and sanitize NaN/Inf emitted by Qwen2.5-VL in FP16 on T4
+        backbone_overflow = bool(
+            not torch.isfinite(patch_feats).all().item()
+            or not torch.isfinite(pooled_feats).all().item()
+        )
+        if backbone_overflow:
+            patch_feats = torch.nan_to_num(patch_feats.float(), nan=0.0, posinf=64.0, neginf=-64.0)
+            pooled_feats = torch.nan_to_num(pooled_feats.float(), nan=0.0, posinf=64.0, neginf=-64.0)
+
         # 7. Derive exact patch grid size (gh, gw)
         if "image_grid_thw" in inputs and inputs["image_grid_thw"] is not None:
             grid_t = inputs["image_grid_thw"]
@@ -511,6 +534,7 @@ class QwenGUIActorModel(nn.Module):
             "patch_feats": patch_feats,
             "pooled_feats": pooled_feats,
             "grid_hw": (gh, gw),
+            "backbone_overflow": backbone_overflow,
         }
 
     def forward(
@@ -530,6 +554,7 @@ class QwenGUIActorModel(nn.Module):
         matching native screen aspect ratios.
         """
         # 1. Extract or use precomputed backbone features
+        backbone_overflow = False
         if patch_feats is None or pooled_feats is None:
             feats = self.extract_features(
                 images=images,
@@ -540,6 +565,7 @@ class QwenGUIActorModel(nn.Module):
             patch_feats = feats["patch_feats"]
             pooled_feats = feats["pooled_feats"]
             gh, gw = feats["grid_hw"]
+            backbone_overflow = bool(feats.get("backbone_overflow", False))
         else:
             if grid_hw is not None:
                 gh, gw = grid_hw
@@ -550,10 +576,14 @@ class QwenGUIActorModel(nn.Module):
         b = patch_feats.shape[0]
         device = patch_feats.device
 
-        # Align feature dtypes with adapter projections
+        # Align feature dtypes with adapter projections & ensure finite FP32 values
         adapter_dtype = next(self.patch_proj.parameters()).dtype
         patch_feats = patch_feats.to(device=device, dtype=adapter_dtype)
         pooled_feats = pooled_feats.to(device=device, dtype=adapter_dtype)
+        if not torch.isfinite(patch_feats).all() or not torch.isfinite(pooled_feats).all():
+            backbone_overflow = True
+            patch_feats = torch.nan_to_num(patch_feats, nan=0.0, posinf=64.0, neginf=-64.0)
+            pooled_feats = torch.nan_to_num(pooled_feats, nan=0.0, posinf=64.0, neginf=-64.0)
 
         # 2. Project features to pointer and query representations
         k_patches = patch_feats.shape[1]
@@ -613,6 +643,7 @@ class QwenGUIActorModel(nn.Module):
             "grid_hw": (gh, gw),
             "patch_coords": patch_coords,
             "memory_state": memory_state,
+            "backbone_overflow": backbone_overflow,
         }
 
 
@@ -1806,6 +1837,7 @@ def run_ddp_training(
     cache_dir: Optional[str] = None,
     log_interval: int = 10,
     max_train_samples: Optional[int] = None,
+    backbone_dtype: str = "fp16",
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -1848,10 +1880,12 @@ def run_ddp_training(
         dry_run=dry_run,
         pointer_hidden_dim=512,
         query_dim=512,
+        backbone_dtype=backbone_dtype,
         use_token_pruning=use_token_pruning,
         use_rolling_kv=use_rolling_kv,
     )
     model.to(device)
+    is_dry_backbone = dry_run or getattr(model, "dry_run", False)
 
     # Report parameter counts
     stats: Dict[str, int] = {}
@@ -1917,12 +1951,14 @@ def run_ddp_training(
         epoch_w_action = 0.0
         epoch_patch_acc = 0.0
         step_count = 0
+        valid_step_count = 0
+        nan_skip_count = 0
         t0 = time.time()
         data_t0 = time.time()
 
         for batch in dataloader:
             data_time = time.time() - data_t0
-            images = batch["image"].to(device) if dry_run else batch["image"]
+            images = batch["image"].to(device) if is_dry_backbone else batch["image"]
             target_actions = batch["target_action"].to(device)
             target_coords = batch["target_coord"].to(device)
             target_bboxes = batch["target_bbox"].to(device)
@@ -1937,19 +1973,54 @@ def run_ddp_training(
                 target_coords=target_coords,
                 target_bboxes=target_bboxes,
             )
+            step_overflow = bool(outputs.get("backbone_overflow", False))
             loss = loss_dict["loss"]
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
-            optimizer.step()
+            loss_finite = bool(torch.isfinite(loss).item())
+            step_ok_local = (not step_overflow) and loss_finite
 
-            epoch_loss += loss.item()
-            epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
-            epoch_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
-            epoch_w_patch_ce += loss_dict.get("weighted_patch_ce", torch.tensor(0.0)).item()
-            epoch_w_coord_l1 += loss_dict.get("weighted_coord_l1", torch.tensor(0.0)).item()
-            epoch_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
-            epoch_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
-            epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+            # Always execute backward so DDP collectives stay synchronized across all ranks
+            backward_loss = loss if step_ok_local else sum(p.sum() * 0.0 for p in trainable_params)
+            backward_loss.backward()
+
+            grad_finite = all(
+                torch.isfinite(p.grad).all().item()
+                for p in trainable_params
+                if p.grad is not None
+            )
+            step_valid = 1 if (step_ok_local and grad_finite) else 0
+            if is_distributed:
+                valid_t = torch.tensor([step_valid], device=device, dtype=torch.int32)
+                dist.all_reduce(valid_t, op=dist.ReduceOp.MIN)
+                step_valid = int(valid_t.item())
+
+            if step_valid == 1:
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
+                epoch_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
+                epoch_w_patch_ce += loss_dict.get("weighted_patch_ce", torch.tensor(0.0)).item()
+                epoch_w_coord_l1 += loss_dict.get("weighted_coord_l1", torch.tensor(0.0)).item()
+                epoch_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
+                epoch_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
+                epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+                valid_step_count += 1
+            else:
+                optimizer.zero_grad()
+                nan_skip_count += 1
+                if rank == 0:
+                    print(
+                        f"[NAN-GUARD] Skipped step {step_count + 1} "
+                        f"(backbone_overflow={step_overflow}, loss_finite={loss_finite}, grad_finite={grad_finite}).",
+                        flush=True,
+                    )
+                    if nan_skip_count == 5 and backbone_dtype == "fp16":
+                        print(
+                            "[NAN-GUARD] Frequent FP16 overflow detected on T4! Consider re-running with --backbone-dtype bf16.",
+                            flush=True,
+                        )
+
             step_count += 1
 
             if rank == 0 and log_interval > 0 and (step_count == 1 or step_count % log_interval == 0):
@@ -1957,12 +2028,13 @@ def run_ddp_training(
                 sec_per_step = elapsed_so_far / step_count
                 eta_min = ((total_steps_per_epoch - step_count) * sec_per_step) / 60.0
                 ts = time.strftime("%H:%M:%S")
+                denom = max(1, valid_step_count)
                 print(
                     f"[{ts}] [Epoch {epoch}/{epochs} | Step {step_count}/{total_steps_per_epoch}] "
-                    f"Loss: {epoch_loss / step_count:.4f} | "
-                    f"Patch CE: {epoch_patch_ce / step_count:.4f} (Acc: {(epoch_patch_acc / step_count) * 100:.1f}%) | "
-                    f"Coord L1: {epoch_coord_l1 / step_count:.4f} | "
-                    f"{sec_per_step:.2f}s/step (data={data_time:.2f}s) | ETA: {eta_min:.1f}m",
+                    f"Loss: {epoch_loss / denom:.4f} | "
+                    f"Patch CE: {epoch_patch_ce / denom:.4f} (Acc: {(epoch_patch_acc / denom) * 100:.1f}%) | "
+                    f"Coord L1: {epoch_coord_l1 / denom:.4f} | "
+                    f"NaN_skips: {nan_skip_count} | {sec_per_step:.2f}s/step (data={data_time:.2f}s) | ETA: {eta_min:.1f}m",
                     flush=True,
                 )
 
@@ -1970,16 +2042,17 @@ def run_ddp_training(
             if dry_run and step_count >= 5:
                 break
 
-        avg_loss = epoch_loss / max(1, step_count)
-        avg_patch_ce = epoch_patch_ce / max(1, step_count)
-        avg_coord_l1 = epoch_coord_l1 / max(1, step_count)
-        avg_w_patch_ce = epoch_w_patch_ce / max(1, step_count)
-        avg_w_coord_l1 = epoch_w_coord_l1 / max(1, step_count)
-        avg_w_coord_l2 = epoch_w_coord_l2 / max(1, step_count)
-        avg_w_action = epoch_w_action / max(1, step_count)
+        denom = max(1, valid_step_count)
+        avg_loss = epoch_loss / denom
+        avg_patch_ce = epoch_patch_ce / denom
+        avg_coord_l1 = epoch_coord_l1 / denom
+        avg_w_patch_ce = epoch_w_patch_ce / denom
+        avg_w_coord_l1 = epoch_w_coord_l1 / denom
+        avg_w_coord_l2 = epoch_w_coord_l2 / denom
+        avg_w_action = epoch_w_action / denom
         w_sum = avg_w_patch_ce + avg_w_coord_l1 + avg_w_coord_l2 + avg_w_action
         patch_pct = (avg_w_patch_ce / max(avg_loss, 1e-6)) * 100.0
-        avg_patch_acc = (epoch_patch_acc / max(1, step_count)) * 100.0
+        avg_patch_acc = (epoch_patch_acc / denom) * 100.0
         elapsed = time.time() - t0
         if rank == 0:
             print(
@@ -1989,7 +2062,7 @@ def run_ddp_training(
                 f"Coord L2 (w={criterion.weight_coord_l2:.1f}): {avg_w_coord_l2:.4f} + "
                 f"Action CE (w={criterion.weight_action:.1f}): {avg_w_action:.4f} = {w_sum:.4f}] | "
                 f"Raw: [Patch CE: {avg_patch_ce:.4f}, Coord L1: {avg_coord_l1:.4f}] | "
-                f"Train Patch Acc: {avg_patch_acc:.1f}% | Time: {elapsed:.2f}s | Steps: {step_count}",
+                f"Train Patch Acc: {avg_patch_acc:.1f}% | Valid Steps: {valid_step_count}/{step_count} (NaN skips: {nan_skip_count}) | Time: {elapsed:.2f}s",
                 flush=True,
             )
 
@@ -2006,7 +2079,7 @@ def run_ddp_training(
 
             with torch.no_grad():
                 for v_batch in val_dataloader:
-                    v_imgs = v_batch["image"]
+                    v_imgs = v_batch["image"].to(device) if is_dry_backbone else v_batch["image"]
                     v_coords = v_batch["target_coord"].to(device)
                     v_actions = v_batch["target_action"].to(device)
                     v_bboxes = v_batch["target_bbox"].to(device)
@@ -2137,6 +2210,7 @@ def main():
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
     parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap on training samples per epoch for step-by-step staging")
     parser.add_argument("--log-interval", type=int, default=10, help="Print training progress every N steps (default: 10)")
+    parser.add_argument("--backbone-dtype", type=str, default="fp16", choices=["fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision (fp16 or bf16)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
     parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
@@ -2221,6 +2295,7 @@ def main():
         cache_dir=args.cache_dir,
         log_interval=args.log_interval,
         max_train_samples=args.max_train_samples,
+        backbone_dtype=args.backbone_dtype,
     )
 
 

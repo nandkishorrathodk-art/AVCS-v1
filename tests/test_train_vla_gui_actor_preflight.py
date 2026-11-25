@@ -684,3 +684,19 @@ def test_run_ddp_training_loss_breakdown_and_val_logging(tmp_path: Path, capsys)
     assert "[VAL] Epoch [1/1] Val Strict (0px) Acc:" in captured
     assert "Val Patch Acc:" in captured
     assert (tmp_path / "ckpts" / "gui_actor_step6_2_epoch_1.pt").exists()
+
+
+def test_fp16_overflow_and_nan_guard_prevents_weight_poisoning():
+    """Verifies QwenGUIActorModel catches non-finite backbone features and flags backbone_overflow cleanly."""
+    model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=512, query_dim=512)
+    patch_feats = torch.randn(2, 16, 2048)
+    pooled_feats = torch.randn(2, 2048)
+    # Inject FP16 overflow Inf / NaN values
+    patch_feats[0, 3, 10] = float("inf")
+    pooled_feats[1, 5] = float("nan")
+
+    out = model(patch_feats=patch_feats, pooled_feats=pooled_feats, grid_hw=(4, 4))
+    assert out["backbone_overflow"] is True
+    assert torch.isfinite(out["attn_logits"]).all()
+    assert torch.isfinite(out["target_coords"]).all()
+    assert torch.isfinite(out["action_logits"]).all()
