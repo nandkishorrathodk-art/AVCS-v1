@@ -66,6 +66,8 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] [STEP-6.2-DDP] %(message)s",
     datefmt="%H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("train.gui_actor")
 
 
@@ -934,113 +936,135 @@ class GroundingDataset(Dataset):
                 os.makedirs(cache_dir, exist_ok=True)
                 cache_path = os.path.join(
                     cache_dir,
-                    f"cache_showui_desktop_{max_samples}_max{max_elements_per_image}.pt",
+                    f"cache_showui_stage1_{max_samples}_max{max_elements_per_image}.pt",
                 )
                 if os.path.exists(cache_path):
                     logger.info(
-                        f"[HF-CACHE] Loading cached ShowUI-desktop samples from {cache_path}..."
+                        f"[HF-CACHE] Loading cached ShowUI Stage-1 samples from {cache_path}..."
                     )
                     cached_samples = torch.load(cache_path, weights_only=False)
                     if isinstance(cached_samples, list) and len(cached_samples) > 0:
                         self.samples.extend(cached_samples[:max_samples])
                         logger.info(
-                            f"[HF-CACHE] Successfully loaded {len(self.samples)} real desktop samples from disk cache."
+                            f"[HF-CACHE] Successfully loaded {len(self.samples)} real UI samples from disk cache."
                         )
                         return
             except Exception as e:
                 logger.warning(f"[HF-CACHE] Failed to read cache {cache_path}: {e}")
 
         try:
+            import random
             from datasets import load_dataset
-            logger.info(
-                f"[HF-INGEST] Streaming real desktop samples from showlab/ShowUI-desktop "
-                f"(target={max_samples}, max {max_elements_per_image} per unique screenshot, shuffled across shards)..."
-            )
-            ds = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
-            if hasattr(ds, "shuffle"):
-                ds = ds.shuffle(seed=42, buffer_size=2000)
 
+            # Stream sequentially (avoiding cross-shard buffer_size=2000 HTTP stall before sample #0),
+            # then shuffle ingested samples in memory. Fall through to ShowUI-web after ShowUI-desktop
+            # (~7.5k total rows / ~500-1500 screens) so Stage-1 reliably hits 15k-20k diverse screens.
+            hf_repos = ("showlab/ShowUI-desktop", "showlab/ShowUI-web")
             elements_per_img: Dict[str, int] = defaultdict(int)
             ingested_hf: List[Dict[str, Any]] = []
             unreadable_skipped = 0
 
-            for item in ds:
+            for repo_name in hf_repos:
                 if len(ingested_hf) >= max_samples:
                     break
-                img = item.get("image") or item.get("img")
-                if img is None:
-                    unreadable_skipped += 1
+                print(
+                    f"[HF-INGEST] Streaming from {repo_name} "
+                    f"(collected={len(ingested_hf)}/{max_samples}, max {max_elements_per_image}/screenshot)...",
+                    flush=True,
+                )
+                try:
+                    ds = load_dataset(repo_name, split="train", streaming=True)
+                except Exception as repo_err:
+                    logger.warning(f"[HF-INGEST] Could not open {repo_name}: {repo_err}")
                     continue
 
-                # Fail-closed per-image validation & thumbnail hash for exact visual deduplication
-                try:
-                    w, h = img.size
-                    if w <= 0 or h <= 0:
+                repo_added = 0
+                for item in ds:
+                    if len(ingested_hf) >= max_samples:
+                        break
+                    img = item.get("image") or item.get("img")
+                    if img is None:
                         unreadable_skipped += 1
                         continue
-                    rgb_img = img.convert("RGB")
-                    thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
-                    img_hash = hashlib.md5(thumb).hexdigest()[:16]
-                    img_key = str(item.get("image_id") or img_hash)
-                except Exception:
-                    unreadable_skipped += 1
-                    continue
 
-                if elements_per_img[img_key] >= max_elements_per_image:
-                    continue
+                    # Fail-closed per-image validation & thumbnail hash for exact visual deduplication
+                    try:
+                        w, h = img.size
+                        if w <= 0 or h <= 0:
+                            unreadable_skipped += 1
+                            continue
+                        rgb_img = img.convert("RGB")
+                        thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
+                        img_hash = hashlib.md5(thumb).hexdigest()[:16]
+                        img_key = f"{repo_name}:{item.get('image_id') or img_hash}"
+                    except Exception:
+                        unreadable_skipped += 1
+                        continue
 
-                raw_pt = item.get("point") or item.get("target_coord")
-                raw_bbox = item.get("bbox") or item.get("target_bbox")
+                    if elements_per_img[img_key] >= max_elements_per_image:
+                        continue
 
-                if raw_pt and len(raw_pt) == 2:
-                    cx = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
-                    cy = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
-                    bbox_norm = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
-                elif raw_bbox and len(raw_bbox) == 4:
-                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
-                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
-                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
-                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
-                    cx, cy = (b0 + b2) / 2.0, (b1 + b3) / 2.0
-                    bbox_norm = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
-                else:
-                    continue
+                    raw_pt = item.get("point") or item.get("target_coord")
+                    raw_bbox = item.get("bbox") or item.get("target_bbox")
 
-                instr = item.get("instruction") or item.get("query") or item.get("task") or "Click target control"
-                if self._is_held_out_leakage(instr):
-                    self.leakage_filtered_count += 1
-                    continue
+                    if raw_pt and len(raw_pt) == 2:
+                        cx = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
+                        cy = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
+                        bbox_norm = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
+                    elif raw_bbox and len(raw_bbox) == 4:
+                        b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
+                        b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
+                        b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
+                        b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                        cx, cy = (b0 + b2) / 2.0, (b1 + b3) / 2.0
+                        bbox_norm = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
+                    else:
+                        continue
 
-                # Compress resized canvas (1280x800) as JPEG bytes to keep 20k samples <= 1.6GB RAM
-                try:
-                    pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
-                    buf = io.BytesIO()
-                    pil_resized.save(buf, format="JPEG", quality=85)
-                    jpeg_bytes = buf.getvalue()
-                except Exception:
-                    unreadable_skipped += 1
-                    continue
+                    instr = item.get("instruction") or item.get("query") or item.get("task") or "Click target control"
+                    if self._is_held_out_leakage(instr):
+                        self.leakage_filtered_count += 1
+                        continue
 
-                elements_per_img[img_key] += 1
-                ingested_hf.append({
-                    "instruction": instr,
-                    "action_idx": 0,
-                    "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
-                    "target_bbox": bbox_norm,
-                    "image_bytes": jpeg_bytes,
-                    "image_path": None,
-                    "image_id": img_key,
-                })
+                    # Compress resized canvas (1280x800) as JPEG bytes to keep 20k samples <= 1.6GB RAM
+                    try:
+                        pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+                        buf = io.BytesIO()
+                        pil_resized.save(buf, format="JPEG", quality=85)
+                        jpeg_bytes = buf.getvalue()
+                    except Exception:
+                        unreadable_skipped += 1
+                        continue
 
-                if len(ingested_hf) % 2500 == 0:
-                    logger.info(
-                        f"[HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
-                        f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped)"
-                    )
+                    elements_per_img[img_key] += 1
+                    ingested_hf.append({
+                        "instruction": instr,
+                        "action_idx": 0,
+                        "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
+                        "target_bbox": bbox_norm,
+                        "image_bytes": jpeg_bytes,
+                        "image_path": None,
+                        "image_id": img_key,
+                    })
+                    repo_added += 1
 
+                    if len(ingested_hf) % 500 == 0:
+                        print(
+                            f"[HF-INGEST] Progress: {len(ingested_hf)}/{max_samples} samples "
+                            f"({len(elements_per_img)} unique screenshots, {unreadable_skipped} skipped)",
+                            flush=True,
+                        )
+
+                print(
+                    f"[HF-INGEST] Finished {repo_name}: +{repo_added} samples "
+                    f"(total={len(ingested_hf)}, unique_screens={len(elements_per_img)})",
+                    flush=True,
+                )
+
+            random.Random(42).shuffle(ingested_hf)
             self.samples.extend(ingested_hf)
             logger.info(
-                f"[HF-INGEST] Ingested {len(ingested_hf)} real desktop samples across "
+                f"[HF-INGEST] Ingested {len(ingested_hf)} real UI samples across "
                 f"{len(elements_per_img)} unique screenshots (skipped {unreadable_skipped} unreadable)."
             )
 
@@ -1051,7 +1075,7 @@ class GroundingDataset(Dataset):
                 except Exception as ce:
                     logger.warning(f"[HF-CACHE] Failed to write cache {cache_path}: {ce}")
         except Exception as e:
-            logger.warning(f"[HF-INGEST] Streaming from showlab/ShowUI-desktop failed ({e}).")
+            logger.warning(f"[HF-INGEST] Streaming from ShowUI failed ({e}).")
 
     def _generate_synthetic_samples(self, n: int) -> None:
         for i in range(n):

@@ -598,9 +598,11 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
     fake_datasets_mod = types.ModuleType("datasets")
     call_count = {"n": 0}
 
-    def fake_load_dataset(*args, **kwargs):
+    def fake_load_dataset(repo_name, *args, **kwargs):
         call_count["n"] += 1
-        return FakeStreamDS(fake_rows)
+        if repo_name == "showlab/ShowUI-desktop":
+            return FakeStreamDS(fake_rows)
+        return FakeStreamDS([])
 
     fake_datasets_mod.load_dataset = fake_load_dataset
 
@@ -612,7 +614,8 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
             cache_dir=str(tmp_path),
             allow_synthetic_fallback=False,
         )
-        assert call_count["n"] == 1
+        calls_initial = call_count["n"]
+        assert calls_initial >= 1
         # Expected: 2 from img_a + 2 from img_b = 4 samples
         assert len(ds) == 4
         assert ds.leakage_filtered_count == 1
@@ -632,7 +635,7 @@ def test_dataset_source_hf_showui_streaming_and_caching(tmp_path: Path):
             cache_dir=str(tmp_path),
             allow_synthetic_fallback=False,
         )
-        assert call_count["n"] == 1
+        assert call_count["n"] == calls_initial
         assert len(ds_cached) == 4
 
 
