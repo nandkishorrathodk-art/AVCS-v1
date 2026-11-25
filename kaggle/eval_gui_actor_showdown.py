@@ -159,6 +159,13 @@ def run_evaluation(
             mock_trainer.rank0_print = rank0_print
             sys.modules["gui_actor.trainer"] = mock_trainer
 
+        # Ensure qwen_vl_utils is available on fresh containers
+        try:
+            import qwen_vl_utils  # noqa: F401
+        except ImportError:
+            print("[BENCHMARK] qwen_vl_utils not installed; installing qwen-vl-utils...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "qwen-vl-utils"])
+
         try:
             from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
             from gui_actor.inference import inference as ms_inference
