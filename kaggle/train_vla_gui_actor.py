@@ -71,6 +71,29 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("train.gui_actor")
 
 
+def _norm_point_pair(
+    pt: Sequence[Any], w: float, h: float, force_pixel: bool = False
+) -> Tuple[float, float]:
+    """Normalize a 2D point consistently (pixel vs [0, 1] decided across both axes)."""
+    x, y = float(pt[0]), float(pt[1])
+    is_pixel = force_pixel or max(abs(x), abs(y)) > 1.0
+    if is_pixel:
+        return x / max(w, 1.0), y / max(h, 1.0)
+    return x, y
+
+
+def _norm_bbox_quad(
+    bbox: Sequence[Any], w: float, h: float, force_pixel: bool = False
+) -> Tuple[float, float, float, float]:
+    """Normalize a [x1, y1, x2, y2] bbox consistently (pixel vs [0, 1] decided across all 4 values)."""
+    vals = [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
+    is_pixel = force_pixel or max(abs(v) for v in vals) > 1.0
+    if is_pixel:
+        rw, rh = max(w, 1.0), max(h, 1.0)
+        return vals[0] / rw, vals[1] / rh, vals[2] / rw, vals[3] / rh
+    return vals[0], vals[1], vals[2], vals[3]
+
+
 # --------------------------------------------------------------------------- #
 # 1. Auto-Torchrun Launcher & DDP Hardware Initialization
 # --------------------------------------------------------------------------- #
@@ -205,6 +228,50 @@ class MockQwenBackbone(nn.Module):
         }
 
 
+def _sanitize_fp16_value(obj: Any, max_abs: float = 60000.0) -> Any:
+    """Recursively clamps FP16 tensors to prevent Inf -> (Inf * 0 = NaN) inside RMSNorm."""
+    if isinstance(obj, torch.Tensor):
+        if obj.dtype == torch.float16:
+            return torch.nan_to_num(obj, nan=0.0, posinf=max_abs, neginf=-max_abs).clamp_(-max_abs, max_abs)
+        return obj
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_fp16_value(item, max_abs=max_abs) for item in obj)
+    if isinstance(obj, list):
+        return [_sanitize_fp16_value(item, max_abs=max_abs) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_fp16_value(v, max_abs=max_abs) for k, v in obj.items()}
+    return obj
+
+
+def _install_fp16_overflow_guards(backbone: nn.Module, max_abs: float = 60000.0) -> int:
+    """Attaches lightweight GPU clamp hooks on frozen Norm/MLP/Attention/Block layers for FP16 speed without NaNs."""
+    if getattr(backbone, "_fp16_guards_installed", False):
+        return 0
+
+    def _pre_hook(_mod: nn.Module, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        return (
+            _sanitize_fp16_value(args, max_abs=max_abs),
+            _sanitize_fp16_value(kwargs, max_abs=max_abs),
+        )
+
+    def _post_hook(_mod: nn.Module, _args: Tuple[Any, ...], output: Any) -> Any:
+        return _sanitize_fp16_value(output, max_abs=max_abs)
+
+    hook_count = 0
+    post_suffixes = ("MLP", "Attention", "DecoderLayer", "Block", "PatchMerger", "PatchEmbed")
+    for mod in backbone.modules():
+        cls_name = type(mod).__name__
+        if "Norm" in cls_name:
+            mod.register_forward_pre_hook(_pre_hook, with_kwargs=True)
+            hook_count += 1
+        elif cls_name.endswith(post_suffixes):
+            mod.register_forward_hook(_post_hook)
+            hook_count += 1
+
+    setattr(backbone, "_fp16_guards_installed", True)
+    return hook_count
+
+
 class QwenGUIActorModel(nn.Module):
     """Attaches GUIActorPatchPointer + ParallelActionHeads to frozen Qwen2.5-VL-3B-Instruct.
 
@@ -277,6 +344,12 @@ class QwenGUIActorModel(nn.Module):
                 # Strictly freeze all backbone parameters
                 for param in self.backbone.parameters():
                     param.requires_grad = False
+                if resolved_dtype == torch.float16:
+                    n_guards = _install_fp16_overflow_guards(self.backbone)
+                    logger.info(
+                        f"Installed {n_guards} FP16 overflow clamp hooks (+/-60000) across frozen backbone "
+                        "to keep Tensor Core speed without RMSNorm Inf*0=NaN."
+                    )
                 logger.info("Successfully frozen 100% of pretrained Qwen2.5-VL-3B backbone parameters.")
             except Exception as e:
                 logger.warning(f"Failed to load real Qwen2.5-VL backbone ({e}); falling back to mock backbone.")
@@ -926,8 +999,7 @@ class GroundingDataset(Dataset):
                             if coord and len(coord) == 2:
                                 ref_w = img_w if img_w > 0 else 1280.0
                                 ref_h = img_h if img_h > 0 else 800.0
-                                cx = float(coord[0]) / ref_w if float(coord[0]) > 1.0 else float(coord[0])
-                                cy = float(coord[1]) / ref_h if float(coord[1]) > 1.0 else float(coord[1])
+                                cx, cy = _norm_point_pair(coord, ref_w, ref_h)
                                 target_xy = [round(min(1.0, max(0.0, cx)), 6), round(min(1.0, max(0.0, cy)), 6)]
 
                     # Fallback to root-level coordinates if conversation turns didn't contain coordinates
@@ -935,14 +1007,10 @@ class GroundingDataset(Dataset):
                         ref_w = img_w if img_w > 0 else 1280.0
                         ref_h = img_h if img_h > 0 else 800.0
                         if root_coord and len(root_coord) == 2:
-                            cx = float(root_coord[0]) / ref_w if float(root_coord[0]) > 1.0 else float(root_coord[0])
-                            cy = float(root_coord[1]) / ref_h if float(root_coord[1]) > 1.0 else float(root_coord[1])
+                            cx, cy = _norm_point_pair(root_coord, ref_w, ref_h)
                             target_xy = [round(min(1.0, max(0.0, cx)), 6), round(min(1.0, max(0.0, cy)), 6)]
                         elif root_bbox and len(root_bbox) == 4:
-                            b0 = float(root_bbox[0]) / ref_w if float(root_bbox[0]) > 1.0 else float(root_bbox[0])
-                            b1 = float(root_bbox[1]) / ref_h if float(root_bbox[1]) > 1.0 else float(root_bbox[1])
-                            b2 = float(root_bbox[2]) / ref_w if float(root_bbox[2]) > 1.0 else float(root_bbox[2])
-                            b3 = float(root_bbox[3]) / ref_h if float(root_bbox[3]) > 1.0 else float(root_bbox[3])
+                            b0, b1, b2, b3 = _norm_bbox_quad(root_bbox, ref_w, ref_h)
                             target_xy = [round(min(1.0, max(0.0, (b0 + b2) / 2.0)), 6), round(min(1.0, max(0.0, (b1 + b3) / 2.0)), 6)]
 
                     self.samples.append({
@@ -982,8 +1050,7 @@ class GroundingDataset(Dataset):
                         coord = action.get("coordinate")
                         target_xy = [0.5, 0.5]
                         if coord and len(coord) == 2:
-                            norm_x = float(coord[0]) / 1280.0 if float(coord[0]) > 1.0 else float(coord[0])
-                            norm_y = float(coord[1]) / 800.0 if float(coord[1]) > 1.0 else float(coord[1])
+                            norm_x, norm_y = _norm_point_pair(coord, 1280.0, 800.0)
                             target_xy = [min(1.0, max(0.0, norm_x)), min(1.0, max(0.0, norm_y))]
                         self.samples.append({
                             "instruction": goal,
@@ -1376,16 +1443,14 @@ def pull_hf_preflight_samples(n_samples: int = 16) -> List[Dict[str, Any]]:
                 raw_bbox = item.get("bbox") or item.get("target_bbox")
                 raw_pt = item.get("point") or item.get("target_coord")
 
+                bbox_is_pixel = bool(
+                    raw_bbox and len(raw_bbox) == 4 and max(abs(float(v)) for v in raw_bbox) > 1.0
+                )
                 # Parse normalized click coordinates [cx, cy]
                 if raw_pt and len(raw_pt) == 2:
-                    px = float(raw_pt[0]) / max(w, 1) if float(raw_pt[0]) > 1.0 else float(raw_pt[0])
-                    py = float(raw_pt[1]) / max(h, 1) if float(raw_pt[1]) > 1.0 else float(raw_pt[1])
-                    cx, cy = px, py
+                    cx, cy = _norm_point_pair(raw_pt, w, h, force_pixel=bbox_is_pixel)
                 elif raw_bbox and len(raw_bbox) == 4:
-                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
-                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
-                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
-                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                    b0, b1, b2, b3 = _norm_bbox_quad(raw_bbox, w, h, force_pixel=bbox_is_pixel)
                     cx = (b0 + b2) / 2.0
                     cy = (b1 + b3) / 2.0
                 else:
@@ -1399,10 +1464,8 @@ def pull_hf_preflight_samples(n_samples: int = 16) -> List[Dict[str, Any]]:
 
                 # Parse normalized bounding box [x1, y1, x2, y2]
                 if raw_bbox and len(raw_bbox) == 4:
-                    b0 = float(raw_bbox[0]) / max(w, 1) if float(raw_bbox[0]) > 1.0 else float(raw_bbox[0])
-                    b1 = float(raw_bbox[1]) / max(h, 1) if float(raw_bbox[1]) > 1.0 else float(raw_bbox[1])
-                    b2 = float(raw_bbox[2]) / max(w, 1) if float(raw_bbox[2]) > 1.0 else float(raw_bbox[2])
-                    b3 = float(raw_bbox[3]) / max(h, 1) if float(raw_bbox[3]) > 1.0 else float(raw_bbox[3])
+                    pt_is_pixel = bool(raw_pt and len(raw_pt) == 2 and max(abs(float(v)) for v in raw_pt) > 1.0)
+                    b0, b1, b2, b3 = _norm_bbox_quad(raw_bbox, w, h, force_pixel=(bbox_is_pixel or pt_is_pixel))
                     norm_bbox = [min(b0, b2), min(b1, b3), max(b0, b2), max(b1, b3)]
                 else:
                     norm_bbox = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]

@@ -740,3 +740,50 @@ def test_ddp_zero_loss_fallback_no_double_ready_hook(tmp_path: Path):
                 opt.step()
     finally:
         dist.destroy_process_group()
+
+
+def test_fp16_overflow_guard_hooks_prevent_rmsnorm_nan():
+    """Verifies _install_fp16_overflow_guards prevents >65504 MLP overflow from turning into RMSNorm Inf*0=NaN."""
+    _install_fp16_overflow_guards = train_vla_module._install_fp16_overflow_guards
+
+    class ToyRMSNorm(torch.nn.Module):
+        def __init__(self, dim: int) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(dim, dtype=torch.float16))
+
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            in_dtype = hidden_states.dtype
+            x = hidden_states.to(torch.float32)
+            var = x.pow(2).mean(-1, keepdim=True)
+            normed = x * torch.rsqrt(var + 1e-6)
+            return self.weight * normed.to(in_dtype)
+
+    class ToyMLP(torch.nn.Module):
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            # Simulates SwiGLU spike exceeding float16 max (65,504 -> +inf)
+            return hidden_states * 1000.0
+
+    class ToyBlock(torch.nn.Module):
+        def __init__(self, dim: int = 8) -> None:
+            super().__init__()
+            self.mlp = ToyMLP()
+            self.post_norm = ToyRMSNorm(dim)
+
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            out = self.mlp(hidden_states)
+            return self.post_norm(hidden_states + out)
+
+    block_unguarded = ToyBlock().eval()
+    x = torch.full((1, 4, 8), 100.0, dtype=torch.float16)
+    with torch.no_grad():
+        raw_out = block_unguarded(x)
+    assert torch.isnan(raw_out).any(), "Expected unguarded FP16 +inf -> RMSNorm to produce NaN"
+
+    block_guarded = ToyBlock().eval()
+    n_hooks = _install_fp16_overflow_guards(block_guarded)
+    assert n_hooks == 3  # ToyBlock + ToyMLP + ToyRMSNorm
+    assert _install_fp16_overflow_guards(block_guarded) == 0  # Idempotent
+
+    with torch.no_grad():
+        safe_out = block_guarded(x)
+    assert torch.isfinite(safe_out).all(), f"Expected finite output with FP16 guards, got {safe_out}"
