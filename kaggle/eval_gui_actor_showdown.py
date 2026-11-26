@@ -93,6 +93,8 @@ def run_evaluation(
     native_size: bool = True,
     temperature: float = 0.05,
     model_name: str = "avcs",
+    backbone_dtype: str = "auto",
+    max_pixels: int = 560 * 896,
 ) -> Dict[str, Any]:
     print("=" * 80)
     print("  AVCS STEP 6.2: HELD-OUT BENCHMARK EVALUATION (showdown-clicks-dev)  ")
@@ -441,6 +443,8 @@ def run_evaluation(
             dry_run=not torch.cuda.is_available(),
             pointer_hidden_dim=512,
             query_dim=512,
+            backbone_dtype=backbone_dtype,
+            max_pixels=max_pixels,
         )
 
         ckpt_file = Path(checkpoint_path)
@@ -736,6 +740,8 @@ def main():
     parser.add_argument("--native-size", action="store_true", default=True, help="Evaluate at native screen resolution without downscaling (default: True)")
     parser.add_argument("--resize-canvas", action="store_true", help="Force downscaling to eval-size instead of native resolution")
     parser.add_argument("--temperature", type=float, default=0.05, help="Attention sharpening temperature (default: 0.05)")
+    parser.add_argument("--backbone-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision")
+    parser.add_argument("--max-pixels", type=int, default=560 * 896, help="Max visual pixels for Qwen2.5-VL processor (default: 501760; 0=uncapped)")
     args = parser.parse_args()
 
     use_native = False if args.resize_canvas else args.native_size
@@ -749,6 +755,8 @@ def main():
         native_size=use_native,
         temperature=args.temperature,
         model_name=args.model_name,
+        backbone_dtype=args.backbone_dtype,
+        max_pixels=args.max_pixels,
     )
 
 

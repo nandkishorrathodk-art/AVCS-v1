@@ -145,12 +145,19 @@ def setup_distributed() -> Tuple[int, int, int, bool]:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            backend=backend,
-            rank=rank,
-            world_size=world_size,
-            timeout=datetime.timedelta(minutes=30),
-        )
+        init_kwargs: Dict[str, Any] = {
+            "backend": backend,
+            "rank": rank,
+            "world_size": world_size,
+            "timeout": datetime.timedelta(minutes=30),
+        }
+        if torch.cuda.is_available():
+            init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+        try:
+            dist.init_process_group(**init_kwargs)
+        except TypeError:
+            init_kwargs.pop("device_id", None)
+            dist.init_process_group(**init_kwargs)
         return rank, world_size, local_rank, True
     return 0, 1, 0, False
 
@@ -362,11 +369,21 @@ class QwenGUIActorModel(nn.Module):
                         attn_implementation="sdpa",
                         torch_dtype=resolved_dtype,
                     )
-                proc_kwargs: Dict[str, Any] = {}
                 if self.max_pixels > 0:
-                    proc_kwargs["max_pixels"] = self.max_pixels
-                    proc_kwargs["min_pixels"] = min(256 * 28 * 28, self.max_pixels)
-                self.processor = AutoProcessor.from_pretrained(model_id, **proc_kwargs)
+                    min_px = min(256 * 28 * 28, self.max_pixels)
+                    try:
+                        self.processor = AutoProcessor.from_pretrained(
+                            model_id,
+                            size={"longest_edge": self.max_pixels, "shortest_edge": min_px},
+                        )
+                    except (TypeError, ValueError):
+                        self.processor = AutoProcessor.from_pretrained(
+                            model_id,
+                            max_pixels=self.max_pixels,
+                            min_pixels=min_px,
+                        )
+                else:
+                    self.processor = AutoProcessor.from_pretrained(model_id)
                 # Strictly freeze all backbone parameters and lock eval mode
                 self.backbone.eval()
                 for param in self.backbone.parameters():
@@ -575,17 +592,17 @@ class QwenGUIActorModel(nn.Module):
         if "pixel_values" in inputs and isinstance(inputs["pixel_values"], torch.Tensor):
             inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
 
-        # 5. Single frozen forward pass through backbone (bypass unused 151k-vocab lm_head when possible)
+        # 5. Single frozen forward pass through backbone (bypass unused 151k-vocab lm_head & KV cache)
         with torch.no_grad():
             if hasattr(self.backbone, "model"):
                 try:
-                    outputs = self.backbone.model(**inputs, return_dict=True)
+                    outputs = self.backbone.model(**inputs, use_cache=False, return_dict=True)
                     last_hidden = outputs.last_hidden_state
                 except Exception:
-                    outputs = self.backbone(**inputs, output_hidden_states=True)
+                    outputs = self.backbone(**inputs, use_cache=False, output_hidden_states=True)
                     last_hidden = outputs.hidden_states[-1]
             else:
-                outputs = self.backbone(**inputs, output_hidden_states=True)
+                outputs = self.backbone(**inputs, use_cache=False, output_hidden_states=True)
                 last_hidden = outputs.hidden_states[-1]
 
         # 6. Extract visual patch hidden states from <|image_pad|> token positions
@@ -2006,12 +2023,16 @@ def run_ddp_training(
 
     sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
     drop_last = len(train_dataset) >= batch_size
+    loader_workers = 2 if (device.type == "cuda" and not is_dry_backbone and len(train_dataset) >= 16) else 0
     dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=(sampler is None),
         sampler=sampler,
         drop_last=drop_last,
+        num_workers=loader_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(loader_workers > 0),
     )
 
     val_sampler = DistributedSampler(val_eval_dataset, num_replicas=world_size, rank=rank, shuffle=False) if (is_distributed and len(val_eval_dataset) > 0) else None
@@ -2021,6 +2042,9 @@ def run_ddp_training(
         shuffle=False,
         sampler=val_sampler,
         drop_last=False,
+        num_workers=loader_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(loader_workers > 0),
     ) if len(val_eval_dataset) > 0 else None
 
     # 3. Optimizer, Warmup+Cosine LR Scheduler & Rebalanced Multi-Task Loss (Patch CE >= 60%)
