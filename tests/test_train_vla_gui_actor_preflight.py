@@ -787,3 +787,50 @@ def test_fp16_overflow_guard_hooks_prevent_rmsnorm_nan():
     with torch.no_grad():
         safe_out = block_guarded(x)
     assert torch.isfinite(safe_out).all(), f"Expected finite output with FP16 guards, got {safe_out}"
+
+
+def test_resolve_backbone_dtype_and_down_proj_fp16_guard():
+    """Verifies _resolve_backbone_dtype(auto) on Turing vs Ampere and down_proj pre-hook Inf*0=NaN guard."""
+    _resolve_backbone_dtype = train_vla_module._resolve_backbone_dtype
+    _install_fp16_overflow_guards = train_vla_module._install_fp16_overflow_guards
+
+    assert _resolve_backbone_dtype("fp16") == torch.float16
+    assert _resolve_backbone_dtype("bf16") == torch.bfloat16
+
+    with patch("torch.cuda.is_available", return_value=True), patch(
+        "torch.cuda.get_device_capability", return_value=(7, 5)
+    ):
+        assert _resolve_backbone_dtype("auto") == torch.float16
+
+    with patch("torch.cuda.is_available", return_value=True), patch(
+        "torch.cuda.get_device_capability", return_value=(8, 0)
+    ):
+        assert _resolve_backbone_dtype("auto") == torch.bfloat16
+
+    class ToyQwenMLP(torch.nn.Module):
+        def __init__(self, dim: int = 8) -> None:
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            self.up_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            self.down_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            with torch.no_grad():
+                torch.nn.init.eye_(self.gate_proj.weight)
+                torch.nn.init.eye_(self.up_proj.weight)
+                # Zero column/row in down_proj triggers Inf * 0.0 -> NaN when unguarded
+                self.down_proj.weight.zero_()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+    x = torch.full((1, 2, 8), 300.0, dtype=torch.float16)
+    unguarded = ToyQwenMLP().eval()
+    with torch.no_grad():
+        raw = unguarded(x)
+    assert torch.isnan(raw).any(), "Expected silu(300)*300 -> Inf * 0 = NaN inside down_proj when unguarded"
+
+    guarded = ToyQwenMLP().eval()
+    n_hooks = _install_fp16_overflow_guards(guarded)
+    assert n_hooks == 2  # ToyQwenMLP (post) + down_proj (pre)
+    with torch.no_grad():
+        safe = guarded(x)
+    assert torch.isfinite(safe).all(), f"Expected finite output from guarded down_proj, got {safe}"

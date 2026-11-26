@@ -243,8 +243,27 @@ def _sanitize_fp16_value(obj: Any, max_abs: float = 60000.0) -> Any:
     return obj
 
 
-def _install_fp16_overflow_guards(backbone: nn.Module, max_abs: float = 60000.0) -> int:
-    """Attaches lightweight GPU clamp hooks on frozen Norm/MLP/Attention/Block layers for FP16 speed without NaNs."""
+def _resolve_backbone_dtype(backbone_dtype: str) -> torch.dtype:
+    """Resolve Qwen2.5-VL backbone precision.
+
+    On CUDA Ampere+ (SM >= 8.0), BF16 has native Tensor Cores and wide exponent range.
+    On CUDA Turing/Volta (SM < 8.0, e.g. Kaggle Tesla T4 SM 7.5), hardware BF16 Tensor
+    Cores do not exist so BF16 falls back to ~15x slower kernels; FP16 uses native
+    Tensor Cores cleanly when paired with `_install_fp16_overflow_guards`.
+    """
+    choice = (backbone_dtype or "auto").strip().lower()
+    if choice == "bf16":
+        return torch.bfloat16
+    if choice == "fp16":
+        return torch.float16
+    if torch.cuda.is_available():
+        major, _ = torch.cuda.get_device_capability(0)
+        return torch.bfloat16 if major >= 8 else torch.float16
+    return torch.float16
+
+
+def _install_fp16_overflow_guards(backbone: nn.Module, max_abs: float = 32768.0) -> int:
+    """Attaches lightweight GPU clamp hooks on frozen Norm/MLP/Attention/down_proj layers for FP16 speed without NaNs."""
     if getattr(backbone, "_fp16_guards_installed", False):
         return 0
 
@@ -259,9 +278,9 @@ def _install_fp16_overflow_guards(backbone: nn.Module, max_abs: float = 60000.0)
 
     hook_count = 0
     post_suffixes = ("MLP", "Attention", "DecoderLayer", "Block", "PatchMerger", "PatchEmbed")
-    for mod in backbone.modules():
+    for mod_name, mod in backbone.named_modules():
         cls_name = type(mod).__name__
-        if "Norm" in cls_name:
+        if "Norm" in cls_name or mod_name.endswith(("down_proj", "o_proj")):
             mod.register_forward_pre_hook(_pre_hook, with_kwargs=True)
             hook_count += 1
         elif cls_name.endswith(post_suffixes):
@@ -293,7 +312,8 @@ class QwenGUIActorModel(nn.Module):
         query_dim: int = 512,
         dry_run: bool = False,
         load_in_4bit: bool = False,
-        backbone_dtype: str = "bf16",
+        backbone_dtype: str = "auto",
+        max_pixels: int = 560 * 896,
         use_token_pruning: bool = False,
         target_token_budget: int = 400,
         use_rolling_kv: bool = False,
@@ -305,6 +325,7 @@ class QwenGUIActorModel(nn.Module):
         self.pointer_hidden_dim = pointer_hidden_dim
         self.query_dim = query_dim
         self.backbone_dtype = backbone_dtype
+        self.max_pixels = int(max_pixels)
         self.use_token_pruning = use_token_pruning
         self.target_token_budget = target_token_budget
         self.use_rolling_kv = use_rolling_kv
@@ -316,10 +337,11 @@ class QwenGUIActorModel(nn.Module):
         if not dry_run:
             try:
                 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-                resolved_dtype = torch.bfloat16 if backbone_dtype == "bf16" else torch.float16
+                resolved_dtype = _resolve_backbone_dtype(backbone_dtype)
                 logger.info(
                     f"Loading pretrained vision-language backbone: {model_id} "
-                    f"(dtype={'BF16' if resolved_dtype == torch.bfloat16 else 'FP16'}{'/NF4' if load_in_4bit else ''})..."
+                    f"(dtype={'BF16' if resolved_dtype == torch.bfloat16 else 'FP16'}{'/NF4' if load_in_4bit else ''}, "
+                    f"max_pixels={self.max_pixels})..."
                 )
                 if load_in_4bit:
                     from transformers import BitsAndBytesConfig
@@ -340,15 +362,20 @@ class QwenGUIActorModel(nn.Module):
                         attn_implementation="sdpa",
                         torch_dtype=resolved_dtype,
                     )
-                self.processor = AutoProcessor.from_pretrained(model_id)
-                # Strictly freeze all backbone parameters
+                proc_kwargs: Dict[str, Any] = {}
+                if self.max_pixels > 0:
+                    proc_kwargs["max_pixels"] = self.max_pixels
+                    proc_kwargs["min_pixels"] = min(256 * 28 * 28, self.max_pixels)
+                self.processor = AutoProcessor.from_pretrained(model_id, **proc_kwargs)
+                # Strictly freeze all backbone parameters and lock eval mode
+                self.backbone.eval()
                 for param in self.backbone.parameters():
                     param.requires_grad = False
                 if resolved_dtype == torch.float16:
                     n_guards = _install_fp16_overflow_guards(self.backbone)
                     logger.info(
-                        f"Installed {n_guards} FP16 overflow clamp hooks (+/-60000) across frozen backbone "
-                        "to keep Tensor Core speed without RMSNorm Inf*0=NaN."
+                        f"Installed {n_guards} FP16 overflow clamp hooks (+/-32768) across frozen backbone "
+                        "for Tensor Core speed without RMSNorm Inf*0=NaN."
                     )
                 logger.info("Successfully frozen 100% of pretrained Qwen2.5-VL-3B backbone parameters.")
             except Exception as e:
@@ -392,6 +419,13 @@ class QwenGUIActorModel(nn.Module):
             if use_rolling_kv
             else None
         )
+
+    def train(self, mode: bool = True) -> "QwenGUIActorModel":
+        """Keep frozen VLM backbone permanently in eval() while toggling trainable adapter heads."""
+        super().train(mode)
+        if self.backbone is not None and not isinstance(self.backbone, MockQwenBackbone):
+            self.backbone.eval()
+        return self
 
     def get_parameter_summary(self) -> Dict[str, int]:
         """Calculates total vs trainable parameter counts."""
@@ -497,14 +531,14 @@ class QwenGUIActorModel(nn.Module):
             if len(batch_queries) < b:
                 batch_queries += ["Click the target UI element"] * (b - len(batch_queries))
 
-        # 2. Build multimodal chat messages with vision and text tokens
+        # 2. Build multimodal chat messages with explicit UI grounding instruction
         messages = [
             [
                 {
                     "role": "user",
                     "content": [
                         {"type": "image", "image": img},
-                        {"type": "text", "text": q},
+                        {"type": "text", "text": f"Locate and click the UI element matching: {q}"},
                     ],
                 }
             ]
@@ -576,7 +610,10 @@ class QwenGUIActorModel(nn.Module):
         if len(batch_patch_feats) == 1 or all(p.shape[0] == batch_patch_feats[0].shape[0] for p in batch_patch_feats):
             patch_feats = torch.stack(batch_patch_feats, dim=0)
         else:
-            patch_feats = batch_patch_feats[0].unsqueeze(0)
+            raise ValueError(
+                f"Inconsistent visual patch counts in batch: {[p.shape[0] for p in batch_patch_feats]}; "
+                "all images in a batch must produce the same patch grid."
+            )
         pooled_feats = torch.stack(batch_pooled_feats, dim=0)
 
         # FP16 overflow shield: detect and sanitize NaN/Inf emitted by Qwen2.5-VL in FP16 on T4
@@ -1883,7 +1920,7 @@ class RLVisualMotorTrainer:
 def run_ddp_training(
     epochs: int = 5,
     batch_size: int = 8,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 1e-3,
     save_dir: str = "runs/checkpoints",
     dry_run: bool = False,
     max_samples: int = 40000,
@@ -1900,7 +1937,8 @@ def run_ddp_training(
     cache_dir: Optional[str] = None,
     log_interval: int = 10,
     max_train_samples: Optional[int] = None,
-    backbone_dtype: str = "bf16",
+    backbone_dtype: str = "auto",
+    max_pixels: int = 560 * 896,
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -1944,6 +1982,7 @@ def run_ddp_training(
         pointer_hidden_dim=512,
         query_dim=512,
         backbone_dtype=backbone_dtype,
+        max_pixels=max_pixels,
         use_token_pruning=use_token_pruning,
         use_rolling_kv=use_rolling_kv,
     )
@@ -1984,9 +2023,22 @@ def run_ddp_training(
         drop_last=False,
     ) if len(val_eval_dataset) > 0 else None
 
-    # 3. Optimizer & Rebalanced Multi-Task Loss (Patch CE dominant >= 60% of total loss)
+    # 3. Optimizer, Warmup+Cosine LR Scheduler & Rebalanced Multi-Task Loss (Patch CE >= 60%)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-3)
+    total_optim_steps = max(1, epochs * max(1, len(dataloader)))
+    warmup_steps = max(1, min(20, total_optim_steps // 10))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: (
+            float(step + 1) / float(warmup_steps)
+            if step < warmup_steps
+            else max(
+                0.05,
+                0.5 * (1.0 + math.cos(math.pi * float(step - warmup_steps) / float(max(1, total_optim_steps - warmup_steps)))),
+            )
+        ),
+    )
     criterion = UnifiedMultiTaskLoss(
         weight_action=0.5,
         weight_coord_l1=10.0,
@@ -2068,6 +2120,7 @@ def run_ddp_training(
             if step_valid == 1:
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
 
                 epoch_loss += loss.item()
                 epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
@@ -2258,7 +2311,7 @@ def main():
     parser = argparse.ArgumentParser(description="Kaggle Dual-T4 DDP Training for GUI-Actor on Frozen Qwen2.5-VL")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Per-GPU batch size")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument("--save-dir", type=str, default="runs/checkpoints", help="Checkpoint save directory")
     parser.add_argument("--dry-run", action="store_true", help="Execute 5 mock steps on CPU for verification")
     parser.add_argument("--max-samples", type=int, default=40000, help="Maximum grounding samples to ingest")
@@ -2282,7 +2335,8 @@ def main():
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
     parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap on training samples per epoch for step-by-step staging")
     parser.add_argument("--log-interval", type=int, default=10, help="Print training progress every N steps (default: 10)")
-    parser.add_argument("--backbone-dtype", type=str, default="bf16", choices=["fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision (bf16 default prevents FP16 overflow on T4; fp16 optional)")
+    parser.add_argument("--backbone-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision ('auto' picks fp16 Tensor Cores on T4 SM<8.0 and bf16 on Ampere+)")
+    parser.add_argument("--max-pixels", type=int, default=560 * 896, help="Max visual pixels for Qwen2.5-VL processor (default: 501760 = 560x896 ~640 patches; 0=uncapped)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
     parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
@@ -2368,6 +2422,7 @@ def main():
         log_interval=args.log_interval,
         max_train_samples=args.max_train_samples,
         backbone_dtype=args.backbone_dtype,
+        max_pixels=args.max_pixels,
     )
 
 
