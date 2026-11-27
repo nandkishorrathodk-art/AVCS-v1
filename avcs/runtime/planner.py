@@ -215,6 +215,32 @@ class CognitivePlanner:
             logger.debug(f"Planner rate-limit: {elapsed:.2f}s elapsed (budget: {self.min_interval_s:.2f}s).")
         self.last_plan_time = time.monotonic()
 
+    def _is_local_client_allowed(self) -> bool:
+        """Returns True only when self.client is a local VLA/loopback or in-process client."""
+        if self.client is None:
+            return False
+        from avcs.runtime.client import is_local_endpoint
+
+        for attr in ("endpoint", "base_url", "server_url"):
+            val = getattr(self.client, attr, None)
+            if isinstance(val, str) and val.strip():
+                if not is_local_endpoint(val):
+                    logger.warning(
+                        f"CognitivePlanner blocked non-local endpoint {val!r}; "
+                        "falling back to local deterministic decomposition."
+                    )
+                    return False
+
+        if type(self.client).__name__ == "CustomLLMClient":
+            ep = getattr(self.client, "endpoint", "")
+            if not isinstance(ep, str) or not is_local_endpoint(ep):
+                logger.warning(
+                    f"CognitivePlanner blocked non-local/unconfigured CustomLLMClient ({ep!r}); "
+                    "falling back to local deterministic decomposition."
+                )
+                return False
+        return True
+
     def decompose(self, goal: str) -> List[SubGoal]:
         """Decomposes a user goal into an ordered sequence of atomic sub-goals.
 
@@ -226,8 +252,8 @@ class CognitivePlanner:
             return []
         goal = _sanitize_coordinates(goal)
 
-        # 1. Attempt LLM-assisted decomposition if client is provided and online
-        if self.client is not None:
+        # 1. Attempt local-only VLA/LLM decomposition if local client is provided
+        if self._is_local_client_allowed():
             try:
                 llm_subgoals = self._decompose_with_llm(goal)
                 if llm_subgoals:
@@ -253,8 +279,8 @@ class CognitivePlanner:
             f"Reason: {failure_reason}"
         )
 
-        # 1. Attempt LLM-assisted dynamic replanning if client is provided
-        if self.client is not None:
+        # 1. Attempt local-only VLA/LLM replanning if local client is provided
+        if self._is_local_client_allowed():
             try:
                 llm_replan = self._replan_with_llm(
                     goal=goal,
@@ -338,8 +364,8 @@ class CognitivePlanner:
             clean = _sanitize_coordinates(raw_clean)
             lower = clean.lower()
 
-            # Pattern A: Start menu opening
-            if re.search(r'\b(?:start\s*menu|start)\b', clean, re.IGNORECASE):
+            # Pattern A: Start menu opening (avoid hijacking "Start <App>" like "Start Chrome")
+            if re.search(r'\bstart\s*menu\b', clean, re.IGNORECASE) or lower.strip() in ("start", "open start"):
                 if re.search(r'(?:open|start|launch|press|show)', clean, re.IGNORECASE) or lower in ("start", "start menu"):
                     subgoals.append(SubGoal(
                         index=idx,
@@ -350,8 +376,8 @@ class CognitivePlanner:
                     continue
 
             # Pattern B0: Close / Exit application or window (must precede launch pattern)
-            close_verbs = ["close", "exit", "quit", "terminate", "kill", "shut down", "dismiss"]
-            if any(cv in lower for cv in close_verbs):
+            close_verbs = ("close", "exit", "quit", "terminate", "kill", "shut down", "dismiss")
+            if any(re.search(r'\b' + re.escape(cv) + r'\b', lower) for cv in close_verbs):
                 matched_app = None
                 for app_key, (app_name, _) in app_catalog.items():
                     if re.search(r'(?:\b|^)' + re.escape(app_key) + r'(?:\b|$)', lower):
@@ -590,7 +616,9 @@ class CognitivePlanner:
     # -------------------------------------------------------------------------
 
     def _decompose_with_llm(self, goal: str) -> List[SubGoal]:
-        """Calls frontier LLM via CustomLLMClient to produce coordinate-free sub-goals."""
+        """Calls local VLA/LLM client to produce coordinate-free sub-goals."""
+        if not self._is_local_client_allowed():
+            return []
         system_prompt = (
             "You are Layer 1 Cognitive Intelligence for AVCS Autonomous Desktop OS. "
             "Decompose user goals into an ordered sequence of atomic sub-goals.\n"
@@ -609,15 +637,9 @@ class CognitivePlanner:
         # Parse JSON
         text = response.strip()
         # Strip code blocks
-        if "```" in text:
-            parts = text.split("```")
-            for p in parts:
-                if p.startswith("json"):
-                    text = p[4:].strip()
-                    break
-                elif p.strip().startswith("["):
-                    text = p.strip()
-                    break
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if fence_match:
+            text = fence_match.group(1).strip()
 
         data = json.loads(text)
         subgoals: List[SubGoal] = []
@@ -684,7 +706,14 @@ class CognitivePlanner:
 
             perturbation_dx = (stuck_reps % 3 - 1) * 15  # -15, 0, +15 px
             perturbation_dy = (stuck_reps % 2) * 10       # 0, 10 px
-            perturb_note = f" with spatial offset ({perturbation_dx:+d}, {perturbation_dy:+d})" if (perturbation_dx or perturbation_dy) else ""
+            perturb_dir = []
+            if perturbation_dy > 0:
+                perturb_dir.append("downward")
+            if perturbation_dx < 0:
+                perturb_dir.append("left")
+            elif perturbation_dx > 0:
+                perturb_dir.append("right")
+            perturb_note = f" with slight {'-'.join(perturb_dir)} spatial offset" if perturb_dir else ""
 
             replanned.append(SubGoal(
                 index=idx,
@@ -775,7 +804,9 @@ class CognitivePlanner:
         failure_reason: str,
         diagnostic: Optional[ReflectionDiagnostic] = None,
     ) -> List[SubGoal]:
-        """Queries frontier LLM for alternative strategic routes given failure diagnostics."""
+        """Queries local VLA/LLM client for alternative strategic routes given failure diagnostics."""
+        if not self._is_local_client_allowed():
+            return []
         system_prompt = (
             "You are Layer 1 Cognitive Planner for AVCS Autonomous Desktop OS.\n"
             "A sub-goal failed during desktop execution. Synthesize an alternative strategic route.\n"
@@ -798,15 +829,9 @@ class CognitivePlanner:
         )
 
         text = response.strip()
-        if "```" in text:
-            parts = text.split("```")
-            for p in parts:
-                if p.startswith("json"):
-                    text = p[4:].strip()
-                    break
-                elif p.strip().startswith("["):
-                    text = p.strip()
-                    break
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if fence_match:
+            text = fence_match.group(1).strip()
 
         data = json.loads(text)
         replanned: List[SubGoal] = []

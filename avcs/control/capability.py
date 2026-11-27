@@ -29,9 +29,10 @@ Fail-closed by construction:
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
@@ -280,6 +281,21 @@ class CapabilityKernel:
                     margin=float(evidence.peak_probability) - self.min_peak_probability,
                 )
 
+        # Validate that the candidate coordinate is finite and in [0, 1]
+        if evidence.candidate_point_norm is not None:
+            cx, cy = evidence.candidate_point_norm
+            if (not math.isfinite(cx) or not math.isfinite(cy)
+                    or cx < 0.0 or cx > 1.0 or cy < 0.0 or cy > 1.0):
+                return CapabilityDecision(
+                    allowed=False,
+                    reason=f"candidate coordinate ({cx}, {cy}) is out of bounds or non-finite",
+                    op=clean_op,
+                    query=query,
+                    confidence=float(evidence.peak_probability) if math.isfinite(evidence.peak_probability) else 0.0,
+                    floor=self.min_peak_probability,
+                    margin=0.0,
+                )
+
         if evidence.candidate_point_norm is None:
             return CapabilityDecision(
                 allowed=False,
@@ -292,6 +308,18 @@ class CapabilityKernel:
             )
 
         peak = float(evidence.peak_probability)
+        # NaN bypass: `NaN < threshold` is False, so NaN would skip this gate.
+        # Guard explicitly with math.isnan and math.isfinite; NaN/Inf is refused.
+        if math.isnan(peak) or not math.isfinite(peak):
+            return CapabilityDecision(
+                allowed=False,
+                reason=f"grounding peak is non-finite ({peak!r}), refusing",
+                op=clean_op,
+                query=query,
+                confidence=0.0,
+                floor=self.min_peak_probability,
+                margin=-self.min_peak_probability,
+            )
         if peak < self.min_peak_probability:
             return CapabilityDecision(
                 allowed=False,
@@ -312,7 +340,8 @@ class CapabilityKernel:
             # item at a guessed point. Both ends are checked in the same decision
             # point so a drag can never be half-authorized.
             point2 = (arguments or {}).get("point2")
-            peak2 = float((arguments or {}).get("peak2") or 0.0)
+            raw_peak2 = (arguments or {}).get("peak2")
+            peak2 = float(raw_peak2) if raw_peak2 is not None else 0.0
             if not point2 or len(point2) != 2:
                 return CapabilityDecision(
                     allowed=False,
@@ -320,6 +349,14 @@ class CapabilityKernel:
                     op=clean_op, query=query,
                     confidence=peak, floor=self.min_peak_probability,
                     margin=peak - self.min_peak_probability,
+                )
+            if math.isnan(peak2) or not math.isfinite(peak2):
+                return CapabilityDecision(
+                    allowed=False,
+                    reason=f"drag destination peak is non-finite ({peak2!r}), refusing",
+                    op=clean_op, query=query,
+                    confidence=0.0, floor=self.min_peak_probability,
+                    margin=-self.min_peak_probability,
                 )
             if peak2 < self.min_peak_probability:
                 return CapabilityDecision(
@@ -386,7 +423,12 @@ class CapabilityKernel:
             # `realpath` collapses `..` and follows symlinks *before* the prefix
             # check, so neither traversal nor a symlink out of the root can pass.
             for root in self.path_roots:
-                if real == root or real.startswith(root + os.sep):
+                # On Windows, os.path.realpath may differ in case; normcase both
+                # sides so the prefix check is case-insensitive on case-folding
+                # filesystems.
+                real_nc = os.path.normcase(real)
+                root_nc = os.path.normcase(root)
+                if real_nc == root_nc or real_nc.startswith(root_nc + os.sep):
                     return None
             return self._arg_refused(
                 op, f"path '{real}' escapes the allowed roots {list(self.path_roots)}", arguments
@@ -413,9 +455,16 @@ class CapabilityKernel:
         frame: Optional[np.ndarray] = None,
     ) -> CapabilityDecision:
         """Convenience wrapper around a `GroundingPrediction`-shaped object."""
+        raw_peak = getattr(prediction, "peak_probability", 0.0)
+        try:
+            peak_val = float(raw_peak or 0.0)
+        except (ValueError, TypeError):
+            peak_val = 0.0
+        if not math.isfinite(peak_val):
+            peak_val = 0.0
         evidence = GroundingEvidence(
             candidate_point_norm=getattr(prediction, "candidate_point_norm", None),
-            peak_probability=float(getattr(prediction, "peak_probability", 0.0) or 0.0),
+            peak_probability=peak_val,
             target_present_probability=float(
                 getattr(prediction, "target_present_probability", 1.0) or 1.0
             ),

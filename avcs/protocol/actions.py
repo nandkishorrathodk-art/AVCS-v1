@@ -532,6 +532,23 @@ class Action:
             d["metadata"] = dict(self.metadata)
         return d
 
+    def to_json(self, indent: Optional[int] = None) -> str:
+        """Deterministically serializes the Action to canonical JSON."""
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":") if indent is None else None, indent=indent, allow_nan=False)
+
+    @classmethod
+    def from_json(
+        cls,
+        payload: str,
+        canvas_w: int = 1280,
+        canvas_h: int = 800,
+    ) -> "Action":
+        """Deserializes an Action from a JSON string."""
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected JSON object for Action, got {type(data).__name__}")
+        return cls.from_dict(data, canvas_w=canvas_w, canvas_h=canvas_h)
+
     @staticmethod
     def _parse_coordinate_pair(
         val_x: Any,
@@ -654,7 +671,13 @@ class Action:
                         fn_args = {}
             if isinstance(fn_args, dict):
                 flat_data = dict(fn_args)
-                flat_data["action"] = fn_name
+                if (
+                    fn_name
+                    and str(fn_name).strip().lower() not in ("computer", "agent", "tool", "computer_use", "gui_action")
+                    and not flat_data.get("action")
+                    and not flat_data.get("kind")
+                ):
+                    flat_data["action"] = fn_name
 
         for nested_key in ("parameters", "arguments", "args", "params", "input"):
             nested_val = flat_data.get(nested_key)
@@ -737,9 +760,17 @@ class Action:
             cc_val = int(raw_cc) if raw_cc is not None else 0
         except (ValueError, TypeError):
             cc_val = 0
-        dbl_click = bool(data.get("double_click", False)) or cc_val == 2
-        trp_click = bool(data.get("triple_click", False)) or cc_val == 3
-        clear_first_flag = bool(data.get("clear_first", False))
+        def _str_to_bool(val: Any) -> bool:
+            """Strict bool parser: 'false', '0', 'no', '' → False."""
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() not in ("false", "0", "no", "")
+            return bool(val)
+
+        dbl_click = _str_to_bool(data.get("double_click", False)) or cc_val == 2
+        trp_click = _str_to_bool(data.get("triple_click", False)) or cc_val == 3
+        clear_first_flag = _str_to_bool(data.get("clear_first", False))
 
         if kind in (ActionKind.LEFT_CLICK, ActionKind.WAIT) and raw_kind in ("click", "mouse_click", "left_click", "button_click"):
             if trp_click:
@@ -898,9 +929,11 @@ class Action:
             if isinstance(raw_dur, str):
                 raw_dur = re.sub(r"[^\d\.]", "", raw_dur)
             duration_val = float(raw_dur) if raw_dur else 0.0
+            if not math.isfinite(duration_val) or duration_val < 0.0:
+                duration_val = 0.0
         except (ValueError, TypeError):
             duration_val = 0.0
-        press_enter_val = bool(data.get("press_enter", data.get("enter", False)))
+        press_enter_val = _str_to_bool(data.get("press_enter", data.get("enter", False)))
         reason_str = str(data.get("reason", "")).strip()
 
         # Semantic fallback extraction from reason when model puts intent into reason
@@ -987,9 +1020,9 @@ class Action:
         conf_val = 0.0
         try:
             if "confidence" in data and data["confidence"] is not None:
-                conf_val = max(0.0, min(1.0, float(data["confidence"])))
-                if math.isnan(conf_val) or math.isinf(conf_val):
-                    conf_val = 0.0
+                raw_conf = float(data["confidence"])
+                if math.isfinite(raw_conf):
+                    conf_val = max(0.0, min(1.0, raw_conf))
         except (ValueError, TypeError):
             conf_val = 0.0
 
@@ -1260,10 +1293,11 @@ class ActionAdapter:
         # 1. String payload: could be Grammar token, JSON string, or reasoning text
         if isinstance(payload, str):
             s = payload.strip()
-            # Fast check for Grammar token
-            grammar_action = cls.parse_grammar_token(s)
-            if grammar_action is not None:
-                return grammar_action
+            # Fast check for Grammar token (skip if JSON payload so embedded ACT: in reason doesn't clobber JSON)
+            if not s.startswith(("{", "[")):
+                grammar_action = cls.parse_grammar_token(s)
+                if grammar_action is not None:
+                    return grammar_action
 
             # Strip reasoning tags and markdown codeblocks if present
             s_clean = re.sub(r'<(?:think|thought|reasoning|extra_thought)>[\s\S]*?</(?:think|thought|reasoning|extra_thought)>', '', s, flags=re.IGNORECASE).strip()
@@ -1369,7 +1403,13 @@ class ActionAdapter:
                             fn_args = {}
                 if isinstance(fn_args, dict):
                     raw = dict(fn_args)
-                    raw["action"] = fn_name
+                    if (
+                        fn_name
+                        and str(fn_name).strip().lower() not in ("computer", "agent", "tool", "computer_use", "gui_action")
+                        and not raw.get("action")
+                        and not raw.get("kind")
+                    ):
+                        raw["action"] = fn_name
             if "function_call" in raw and isinstance(raw["function_call"], dict):
                 fn = raw["function_call"]
                 fn_name = fn.get("name")
@@ -1388,7 +1428,13 @@ class ActionAdapter:
                             fn_args = {}
                 if isinstance(fn_args, dict):
                     raw = dict(fn_args)
-                    raw["action"] = fn_name
+                    if (
+                        fn_name
+                        and str(fn_name).strip().lower() not in ("computer", "agent", "tool", "computer_use", "gui_action")
+                        and not raw.get("action")
+                        and not raw.get("kind")
+                    ):
+                        raw["action"] = fn_name
 
             # Anthropic Computer Tool wrapper: {"name": "computer", "input": {...}}
             if raw.get("name") in ("computer", "agent", "tool") and isinstance(raw.get("input"), dict):

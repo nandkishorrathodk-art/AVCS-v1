@@ -244,19 +244,21 @@ def _load_complete_state_dict(
 
 
 def _extract_grounder_metadata(state: dict[str, Any]) -> dict[str, Any]:
-    """Extract grounder metadata prioritizing top-level schema keys over legacy cortical metadata."""
+    """Extract grounder metadata prioritizing top-level schema keys over legacy cortical metadata.
+
+    Never fabricates schema, provenance, or sample-count defaults when those
+    fields are absent, so untrained/partial checkpoints fail the `is_trained`
+    gate rather than silently masquerading as trained checkpoints.
+    """
     if "schema_version" in state or "model_type" in state:
-        meta = {
-            "schema_version": state.get("schema_version", 2),
-            "model_type": state.get("model_type", "avcs_goal_conditioned_grounder"),
-            "dataset_provenance": state.get(
-                "dataset_provenance", "recorded_ui_click_and_absence_demonstrations"
-            ),
-            "training_samples": state.get("training_samples", 160),
-            "validation_samples": state.get("validation_samples", 40),
-            "target_presence_threshold": state.get("target_presence_threshold", 0.4),
-        }
+        meta: dict[str, Any] = {}
         for k in (
+            "schema_version",
+            "model_type",
+            "dataset_provenance",
+            "training_samples",
+            "validation_samples",
+            "target_presence_threshold",
             "held_out_test_samples",
             "negative_samples",
             "split_seed",
@@ -280,14 +282,7 @@ def _extract_grounder_metadata(state: dict[str, Any]) -> dict[str, Any]:
         ):
             return sub
 
-    return {
-        "schema_version": 2,
-        "model_type": "avcs_goal_conditioned_grounder",
-        "dataset_provenance": "recorded_ui_click_and_absence_demonstrations",
-        "training_samples": 160,
-        "validation_samples": 40,
-        "target_presence_threshold": state.get("target_presence_threshold", 0.4),
-    }
+    return {}
 
 
 def load_avcs_weights(
@@ -374,9 +369,10 @@ def load_avcs_weights(
                     }
                 if isinstance(grounder_dict, dict) and grounder_dict:
                     loaded = _load_complete_state_dict(target_module, grounder_dict, strict=False)
-                    meta = _extract_grounder_metadata(state)
-                    if hasattr(target_module, "_mark_loaded_checkpoint"):
-                        target_module._mark_loaded_checkpoint(meta)
+                    if loaded:
+                        meta = _extract_grounder_metadata(state)
+                        if hasattr(target_module, "_mark_loaded_checkpoint"):
+                            target_module._mark_loaded_checkpoint(meta)
                     if hasattr(cortex, "weights_loaded"):
                         cortex.weights_loaded = loaded
                     return loaded
@@ -443,10 +439,13 @@ def load_avcs_weights(
                             k[9:]: v for k, v in state.items() if k.startswith("grounder.")
                         }
                     if isinstance(grounder_dict, dict) and grounder_dict:
-                        _load_complete_state_dict(cortex.grounder, grounder_dict, strict=False)
-                        meta = _extract_grounder_metadata(state)
-                        if hasattr(cortex.grounder, "_mark_loaded_checkpoint"):
-                            cortex.grounder._mark_loaded_checkpoint(meta)
+                        grounder_loaded = _load_complete_state_dict(
+                            cortex.grounder, grounder_dict, strict=False
+                        )
+                        if grounder_loaded:
+                            meta = _extract_grounder_metadata(state)
+                            if hasattr(cortex.grounder, "_mark_loaded_checkpoint"):
+                                cortex.grounder._mark_loaded_checkpoint(meta)
                         cortex.grounder.eval()
                 except Exception as exc:
                     print(f"[AVCS] Notice: Grounder loading skipped: {exc}")

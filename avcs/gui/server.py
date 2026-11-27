@@ -32,7 +32,7 @@ import io
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 from fastapi import FastAPI, Request
@@ -48,6 +48,28 @@ from avcs.voice.stt import NullEngine as NullSttEngine, default_stt_engine
 from avcs.voice.tts import BrowserEngine, EspeakNgEngine, Speaker, VoiceProfile
 
 FRAME_POLL_S = 0.25
+
+
+def resolve_gui_grants(
+    grants: Optional[Union[str, Iterable[str]]] = None,
+    *,
+    eyes: str = "scene",
+) -> List[str]:
+    """Expand GUI capability grants while keeping ``grants=None`` fail-closed.
+
+    Defaults to ``[]`` (or ``["click"]`` for ``eyes="lexicon"``). Passing
+    ``"all"`` (e.g. ``--grant all`` or ``grants=["all"]``) unlocks all
+    ``MUTATING_OPS``.
+    """
+    if grants is None:
+        return [] if eyes != "lexicon" else ["click"]
+    if isinstance(grants, str):
+        cleaned = [grants.strip().lower()] if grants.strip() else []
+    else:
+        cleaned = [str(g).strip().lower() for g in grants if str(g).strip()]
+    if "all" in cleaned:
+        return sorted(MUTATING_OPS)
+    return cleaned
 
 
 @dataclass
@@ -97,6 +119,16 @@ class ScreenModel:
                 self.perception = LexiconPerception(
                     source=source, checkpoint=checkpoint, floor=0.0
                 )
+        elif eyes == "vla":
+            from avcs.voice.perception import LocalVLAPerception
+
+            if source in ("demo", "desktop", "synthetic-desktop"):
+                from avcs.gui.demo_source import DemoSceneSource
+
+                self._demo = DemoSceneSource(category=category)
+                self.perception = LocalVLAPerception(frame_source=self._demo)
+            else:
+                self.perception = LocalVLAPerception(source=source)
         else:
             frame_source = None
             if source in ("demo", "desktop", "synthetic-desktop"):
@@ -238,7 +270,7 @@ class GuiApp:
         self,
         source: str = "demo",
         category: str = "desktop",
-        grants: Optional[List[str]] = None,
+        grants: Optional[Union[str, Iterable[str]]] = None,
         checkpoint: Optional[str] = None,
         live: bool = False,
         min_peak: float = 0.45,
@@ -252,6 +284,7 @@ class GuiApp:
         allowed_apps: Optional[List[str]] = None,
         proactive: bool = False,
         servo: bool = False,
+        granted_ops: Optional[Union[str, Iterable[str]]] = None,
     ) -> None:
         self.eyes = eyes
         self.screen = ScreenModel(
@@ -261,8 +294,8 @@ class GuiApp:
         # and hears. A grant only exists if the caller asked for one AND the eyes
         # can actually ground a point (the lexicon reader). Granting `click` to
         # scene eyes would be a capability with no evidence behind it.
-        default_grants: List[str] = [] if eyes != "lexicon" else ["click"]
-        self.grants = list(grants if grants is not None else default_grants)
+        effective_grants = grants if grants is not None else granted_ops
+        self.grants = resolve_gui_grants(effective_grants, eyes=eyes)
         # `path_roots` / `allowed_apps` are the containment for the file and
         # launch ops. They default to off (None), so a caller that grants
         # `read_file` without naming a root still cannot read anything.
@@ -572,7 +605,7 @@ class GuiApp:
 def build_app(
     source: str = "demo",
     category: str = "desktop",
-    grants: Optional[List[str]] = None,
+    grants: Optional[Union[str, Iterable[str]]] = None,
     checkpoint: Optional[str] = None,
     live: bool = False,
     mouth: str = "browser",
@@ -585,13 +618,14 @@ def build_app(
     allowed_apps: Optional[List[str]] = None,
     proactive: bool = False,
     servo: bool = False,
+    granted_ops: Optional[Union[str, Iterable[str]]] = None,
 ) -> FastAPI:
     gui = GuiApp(
         source=source, category=category, grants=grants, checkpoint=checkpoint,
         live=live, mouth=mouth, ears=ears, eyes=eyes, brain=brain,
         memory_path=memory_path, trajectory_path=trajectory_path,
         path_roots=path_roots, allowed_apps=allowed_apps, proactive=proactive,
-        servo=servo,
+        servo=servo, granted_ops=granted_ops,
     )
     app = FastAPI(title="AVCS assistant")
     app.state.gui = gui

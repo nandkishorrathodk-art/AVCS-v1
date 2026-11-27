@@ -1233,15 +1233,10 @@ class WindowsComputer:
             except Exception:
                 active_class = None
 
-            is_confirmed = (
-                user_confirmed
-                or getattr(action, "user_confirmed", False)
-                or (isinstance(action.metadata, dict) and action.metadata.get("user_confirmed", False))
-            )
             safety_res = self.firewall.evaluate(
                 action=action,
                 active_window_class=active_class,
-                user_confirmed=is_confirmed,
+                user_confirmed=bool(user_confirmed),
             )
             if not safety_res.allowed:
                 raise PermissionError(f"Action blocked by ExecutionSafetyFirewall: {safety_res.reason} (Risk: {safety_res.risk_level.value})")
@@ -1291,28 +1286,28 @@ class WindowsComputer:
                 nx, ny = self._canonical_to_native(*action.coordinate)
                 self._activate_window_at(nx, ny)
                 self._move_minimum_jerk(nx, ny)
-                time.sleep(0.10)  # 100ms hover dwell for WinUI 3 / XAML hit-testing
+                time.sleep(0.015)  # compact hover dwell preserving <350ms control loop budget
             else:
                 nx, ny = self.get_cursor_pos()
 
             if action.kind == ActionKind.LEFT_CLICK:
                 self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
-                time.sleep(0.065)  # 65ms hold duration
+                time.sleep(0.020)
                 self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
             elif action.kind == ActionKind.MIDDLE_CLICK:
                 self._send_mouse_event(MOUSEEVENTF_MIDDLEDOWN, x=nx, y=ny)
-                time.sleep(0.065)
+                time.sleep(0.020)
                 self._send_mouse_event(MOUSEEVENTF_MIDDLEUP, x=nx, y=ny)
             elif action.kind == ActionKind.RIGHT_CLICK:
                 self._send_mouse_event(MOUSEEVENTF_RIGHTDOWN, x=nx, y=ny)
-                time.sleep(0.065)
+                time.sleep(0.020)
                 self._send_mouse_event(MOUSEEVENTF_RIGHTUP, x=nx, y=ny)
             elif action.kind == ActionKind.DOUBLE_CLICK:
                 for _ in range(2):
                     self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)
-                    time.sleep(0.065)
+                    time.sleep(0.020)
                     self._send_mouse_event(MOUSEEVENTF_LEFTUP, x=nx, y=ny)
-                    time.sleep(0.095)  # 95ms biological double click pause
+                    time.sleep(0.045)
             elif action.kind == ActionKind.TRIPLE_CLICK:
                 for _ in range(3):
                     self._send_mouse_event(MOUSEEVENTF_LEFTDOWN, x=nx, y=ny)

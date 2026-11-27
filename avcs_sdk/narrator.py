@@ -96,9 +96,6 @@ class LiveCommentary:
             return self.to_json()
         speech = self.human_speech or self.narrative
         lines = [f"[AVCS Live Eye]: \"{speech}\""]
-        if self.active_window:
-            safe_win = re.sub(r"[^\x20-\x7E]", "", self.active_window).strip()
-            lines.append(f"[Active Window]: '{safe_win}'")
         if self.last_action_feedback and self.last_action_feedback != speech:
             lines.append(f"[Action Feedback]: {self.last_action_feedback}")
         if self.visible_elements:
@@ -195,7 +192,7 @@ class LiveNarrator:
     def narrate(
         self,
         eye_frame: EyeFrame,
-        active_window: str,
+        active_window: str = "",
         foveal_elements: Optional[List[FovealElement]] = None,
         ripple_verified: Optional[bool] = None,
         prior_action: Optional[str] = None,
@@ -259,21 +256,18 @@ class LiveNarrator:
             feedback_str = "Screen rendering dynamic content, holding for completion."
 
         # ---------------------------------------------------------------------
-        # Event 1: Initial Sight (Window Switch or First Observation)
+        # Event 1: Initial Sight (First Pure-Pixel Observation)
         # ---------------------------------------------------------------------
-        elif self.is_first_frame or (active_window and active_window != self.last_window_title):
+        elif self.is_first_frame:
             event_type = "initial_sight"
             needs_attention = True
             target_name = self._clean_target_name(target_hint if target_hint is not None else primary_kind)
 
             # [DEPRECATED legacy conversational f-string]
-            safe_window = re.sub(r"[^\x20-\x7E]", "", active_window).strip() if active_window else ""
-            window_display = f"'{safe_window}'" if safe_window else "Active window"
             article = "an" if target_name and target_name[0].lower() in "aeiou" else "a"
-            human_speech = f"{window_display} observed. Gaze focused on {region} where {article} {target_name} is visible."
-            feedback_str = f"Foreground focus: {safe_window or 'Active window'}"
+            human_speech = f"Desktop screen observed. Gaze focused on {region} where {article} {target_name} is visible."
+            feedback_str = "Pure-pixel initial observation complete."
 
-            self.last_window_title = active_window
             self.is_first_frame = False
 
         # ---------------------------------------------------------------------
@@ -369,7 +363,7 @@ class LiveNarrator:
 
         return LiveCommentary(
             narrative=human_speech if self.mode == "conversational" else (feedback_str or human_speech),
-            active_window=active_window,
+            active_window="",
             is_stable=eye_frame.is_stable,
             has_popup=eye_frame.has_popup,
             needs_llm_attention=needs_attention,

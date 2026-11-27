@@ -450,7 +450,11 @@ def run_evaluation(
         ckpt_file = Path(checkpoint_path)
         if ckpt_file.exists():
             print(f"Loading adapter weights from checkpoint: {ckpt_file}...")
-            ckpt = torch.load(ckpt_file, map_location="cpu")
+            ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+            lora_cfg = ckpt.get("lora_config")
+            if isinstance(lora_cfg, dict) and lora_cfg.get("lora_layers", 0) > 0 and not getattr(model, "dry_run", False):
+                wrapped_lora = model.enable_lora(**lora_cfg)
+                print(f"Restored LoRA structure from checkpoint ({wrapped_lora} projections wrapped).")
             state_dict = ckpt.get("model_state_dict", ckpt)
             missing, unexpected = model.load_state_dict(state_dict, strict=False)
             print(f"Checkpoint loaded: {len(state_dict)} tensors restored (missing={len(missing)}, unexpected={len(unexpected)}).")

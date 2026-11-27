@@ -724,11 +724,13 @@ class GUIActorPatchPointer(nn.Module):
         query_dim: int = 384,
         patch_dim: int = 128,
         hidden_dim: int = 128,
+        temperature: float = 0.08,
     ) -> None:
         super().__init__()
         self.query_dim = query_dim
         self.patch_dim = patch_dim
         self.hidden_dim = hidden_dim
+        self.temperature = float(temperature)
 
         self.ptr_query = nn.Parameter(torch.randn(1, 1, query_dim) * 0.02)
         self.q_proj = nn.Linear(query_dim, hidden_dim)
@@ -773,19 +775,20 @@ class GUIActorPatchPointer(nn.Module):
 
         scale = 1.0 / math.sqrt(self.hidden_dim)
         attn_logits = torch.bmm(q, k_feat.transpose(1, 2)) * scale
-        attn_weights = F.softmax(attn_logits, dim=-1)
+        attn_weights = F.softmax(attn_logits / max(self.temperature, 1e-4), dim=-1)
 
         ctx = torch.bmm(attn_weights, v_feat).squeeze(1)
         centroid = torch.bmm(attn_weights, patch_coords).squeeze(1)
 
         best_idx = attn_weights.squeeze(1).argmax(dim=-1)
         best_coords = patch_coords[torch.arange(b, device=device), best_idx]
+        v_best = v_feat[torch.arange(b, device=device), best_idx]
 
-        offset_input = torch.cat([ctx, q.squeeze(1)], dim=-1)
+        offset_input = torch.cat([0.5 * (ctx + v_best), q.squeeze(1)], dim=-1)
         delta = 0.5 * self.offset_mlp(offset_input)
 
         stride_tensor = patch_coords.new_tensor(patch_stride).view(1, 2)
-        coords = (centroid + delta * stride_tensor).clamp(0.0, 1.0)
+        coords = centroid.clamp(0.0, 1.0)
         subpixel_coords = (best_coords + delta * stride_tensor).clamp(0.0, 1.0)
 
         return GUIPointerOutput(
@@ -1203,31 +1206,35 @@ class CUDAGraphRunner:
         cursor_xy: Optional[torch.Tensor] = None,
         goals: Optional[Sequence[str]] = None,
     ) -> PureRGBVLAOutput:
-        """Replays captured graph or evaluates static tensors without reallocation."""
+        """Replays captured graph or evaluates eager policy if shapes/goals differ."""
+        shape_mismatch = False
         if image is not None:
             if image.dim() == 3:
                 image = image.unsqueeze(0)
             if image.shape == self.static_image.shape and image.dtype == self.static_image.dtype:
                 self.static_image.copy_(image)
             else:
-                self.static_image = image.to(self.static_image.device)
+                shape_mismatch = True
         if cursor_xy is not None:
             if cursor_xy.dim() == 1:
                 cursor_xy = cursor_xy.unsqueeze(0)
             if cursor_xy.shape == self.static_cursor.shape and cursor_xy.dtype == self.static_cursor.dtype:
                 self.static_cursor.copy_(cursor_xy)
             else:
-                self.static_cursor = cursor_xy.to(self.static_cursor.device)
+                shape_mismatch = True
         actual_goals = goals if goals is not None else self.static_goals
+        goals_changed = tuple(actual_goals) != tuple(self.static_goals)
 
-        if self.is_cuda_graph and self.graph is not None:
+        if self.is_cuda_graph and self.graph is not None and not shape_mismatch and not goals_changed:
             self.graph.replay()
             return self.last_output
         else:
+            eval_img = image.to(self.static_image.device) if (image is not None and shape_mismatch) else self.static_image
+            eval_cur = cursor_xy.to(self.static_cursor.device) if (cursor_xy is not None and shape_mismatch) else self.static_cursor
             out = self.policy(
-                self.static_image,
+                image=eval_img,
                 goals=actual_goals,
-                cursor_xy=self.static_cursor,
+                cursor_xy=eval_cur,
             )
             self.last_output = out
             return out
@@ -2425,12 +2432,18 @@ class UnifiedMultiTaskLoss(nn.Module):
         target_bboxes: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         # Support structured output (PureRGBVLAOutput or dict) and raw tensor calling signatures
+        subpixel_xy = None
         if isinstance(model_out, (PureRGBVLAOutput, dict)):
             pred_act_logits = model_out["action_logits"] if isinstance(model_out, dict) else model_out.action_logits
             pred_xy = (
                 model_out.get("target_coords", model_out.get("coords", pred_coords))
                 if isinstance(model_out, dict)
                 else model_out.target_coords
+            )
+            subpixel_xy = (
+                model_out.get("subpixel_coords")
+                if isinstance(model_out, dict)
+                else getattr(model_out, "subpixel_coords", None)
             )
             actual_target_act = target_actions
             actual_target_xy = target_coords
@@ -2463,8 +2476,21 @@ class UnifiedMultiTaskLoss(nn.Module):
         loss_act = F.cross_entropy(pred_act_logits, actual_target_act)
 
         # 2. GUI-Actor Pointer coordinate loss (L1 + L2)
-        loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
-        loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
+        # Supervise both soft centroid and hard argmax+offset (subpixel_coords) when
+        # present so offset_mlp learns true sub-patch centering around best_coords
+        # instead of compensating for soft-centroid softmax blur.
+        if subpixel_xy is not None:
+            loss_coord_l1 = (
+                0.35 * F.l1_loss(pred_xy, actual_target_xy)
+                + 0.65 * F.l1_loss(subpixel_xy, actual_target_xy)
+            )
+            loss_coord_l2 = (
+                0.35 * F.mse_loss(pred_xy, actual_target_xy)
+                + 0.65 * F.mse_loss(subpixel_xy, actual_target_xy)
+            )
+        else:
+            loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
+            loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
         weighted_coord_l1 = self.weight_coord_l1 * loss_coord_l1
         weighted_coord_l2 = self.weight_coord_l2 * loss_coord_l2
         loss_coord = weighted_coord_l1 + weighted_coord_l2
@@ -2501,27 +2527,23 @@ class UnifiedMultiTaskLoss(nn.Module):
 
             # Multi-positive bounding box supervision if target_bboxes is supplied
             if target_bboxes is not None and patch_coords_exp is not None and patch_coords_exp.shape[1] == k_patches:
-                target_probs = torch.zeros_like(attn_logits_2d)
-                for b_i in range(b_sz):
-                    bx1 = target_bboxes[b_i, 0].item()
-                    by1 = target_bboxes[b_i, 1].item()
-                    bx2 = target_bboxes[b_i, 2].item()
-                    by2 = target_bboxes[b_i, 3].item()
-                    x_min, x_max = min(bx1, bx2), max(bx1, bx2)
-                    y_min, y_max = min(by1, by2), max(by1, by2)
+                x_min = torch.minimum(target_bboxes[:, 0], target_bboxes[:, 2]).unsqueeze(1)
+                x_max = torch.maximum(target_bboxes[:, 0], target_bboxes[:, 2]).unsqueeze(1)
+                y_min = torch.minimum(target_bboxes[:, 1], target_bboxes[:, 3]).unsqueeze(1)
+                y_max = torch.maximum(target_bboxes[:, 1], target_bboxes[:, 3]).unsqueeze(1)
 
-                    px = patch_coords_exp[b_i, :, 0]
-                    py = patch_coords_exp[b_i, :, 1]
-                    in_bbox = (px >= x_min) & (px <= x_max) & (py >= y_min) & (py <= y_max)
-                    num_pos = in_bbox.sum()
-                    if num_pos > 0:
-                        target_probs[b_i, in_bbox] = 1.0 / num_pos.float()
-                    else:
-                        # Fallback to single nearest patch centroid
-                        target_exp = actual_target_xy[b_i].unsqueeze(0)
-                        dists = torch.sum((patch_coords_exp[b_i] - target_exp) ** 2, dim=-1)
-                        nearest_idx = torch.argmin(dists)
-                        target_probs[b_i, nearest_idx] = 1.0
+                px = patch_coords_exp[:, :, 0]
+                py = patch_coords_exp[:, :, 1]
+                in_bbox = (px >= x_min) & (px <= x_max) & (py >= y_min) & (py <= y_max)
+                num_pos = in_bbox.sum(dim=1, keepdim=True)
+
+                dists = torch.sum((patch_coords_exp - actual_target_xy.unsqueeze(1)) ** 2, dim=-1)
+                nearest_idx = torch.argmin(dists, dim=1, keepdim=True)
+                nearest_one_hot = torch.zeros_like(attn_logits_2d).scatter_(1, nearest_idx, 1.0)
+
+                safe_num_pos = torch.clamp(num_pos, min=1).to(dtype=attn_logits_2d.dtype)
+                bbox_probs = in_bbox.to(dtype=attn_logits_2d.dtype) / safe_num_pos
+                target_probs = torch.where(num_pos > 0, bbox_probs, nearest_one_hot)
 
                 loss_patch_ce = F.cross_entropy(attn_logits_2d, target_probs)
                 pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)

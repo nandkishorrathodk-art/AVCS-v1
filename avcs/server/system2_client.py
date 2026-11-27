@@ -1,7 +1,6 @@
 """Text-only transport for local System 1 observations to a System 2 service."""
 from __future__ import annotations
 
-import ipaddress
 import math
 import re
 from typing import Any, Dict, Mapping, Optional
@@ -78,8 +77,27 @@ def _observation_dict(observation: Any) -> Dict[str, Any]:
     return result
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _validate_loopback_endpoint(endpoint_url: str) -> str:
+    endpoint = (endpoint_url or "").strip().rstrip("/")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("endpoint_url must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("endpoint_url must not contain embedded credentials")
+    hostname = parsed.hostname.lower()
+    if hostname not in _LOOPBACK_HOSTS:
+        raise ValueError(
+            f"External non-loopback endpoints are disabled in 100% local VLA mode; "
+            f"only loopback hosts (127.0.0.1, localhost, ::1) are permitted, got {hostname!r}"
+        )
+    return endpoint
+
+
 class TextOnlySystem2Client:
-    """Send a minimized text observation to a remote System 2 endpoint.
+    """Send a minimized text observation to a local loopback System 2 endpoint.
 
     This client has no screen-capture, image-encoding, or embedding interface.
     It sends only an allowlisted JSON schema and accepts a text goal response.
@@ -92,19 +110,7 @@ class TextOnlySystem2Client:
         timeout: float = 10.0,
         allow_insecure_http: bool = False,
     ) -> None:
-        self.endpoint = endpoint_url.rstrip("/")
-        parsed = urlsplit(self.endpoint)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("endpoint_url must be an absolute HTTP(S) URL")
-        if parsed.username or parsed.password:
-            raise ValueError("endpoint_url must not contain embedded credentials")
-        hostname = parsed.hostname.lower()
-        try:
-            is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-        if parsed.scheme == "http" and not is_loopback and not allow_insecure_http:
-            raise ValueError("Remote System 2 endpoints must use HTTPS")
+        self.endpoint = _validate_loopback_endpoint(endpoint_url)
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -126,8 +132,9 @@ class TextOnlySystem2Client:
                 "System 2 sharing requires explicit user consent from the calling application"
             )
         payload = self.prepare_payload(task, observation)
+        endpoint = _validate_loopback_endpoint(self.endpoint)
         response = requests.post(
-            f"{self.endpoint}/v1/system2/goal",
+            f"{endpoint}/v1/system2/goal",
             json=payload,
             headers=self.headers,
             timeout=self.timeout,
@@ -148,3 +155,6 @@ class TextOnlySystem2Client:
             "task": _redact_text(task.strip()[:4000]),
             "observation": _observation_dict(observation),
         }
+
+
+System2Client = TextOnlySystem2Client

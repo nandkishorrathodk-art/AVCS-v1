@@ -13,12 +13,15 @@ real-time production engine supporting:
 """
 from __future__ import annotations
 
+import inspect
 import io
 import logging
 import math
 import os
 import sys
+import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -66,7 +69,9 @@ class FastVLAInferenceEngine:
         self.max_history_steps = max_history_steps
         self.canonical_resolution = canonical_resolution
 
-        self.session_memories: Dict[str, RollingMemoryState] = {}
+        self.session_memories: OrderedDict[str, RollingMemoryState] = OrderedDict()
+        self._memory_lock = threading.Lock()
+        self._max_sessions = 64
         self._cuda_graph_active = False
         self._cuda_graph: Optional[Any] = None
         self._static_input: Optional[torch.Tensor] = None
@@ -102,6 +107,11 @@ class FastVLAInferenceEngine:
             if enable_rolling_kv
             else None
         )
+        if self.device.type == "cuda" and self.precision in ("fp16", "half"):
+            if self.pruner is not None:
+                self.pruner = self.pruner.half()
+            if self.memory is not None:
+                self.memory = self.memory.half()
 
         logger.info(
             f"FastVLAInferenceEngine initialized on {self.device} (precision={self.precision}, "
@@ -145,13 +155,14 @@ class FastVLAInferenceEngine:
                     b = images.shape[0]
                     k_patches = 256
                     gw, gh = 16, 16
-                    dummy_patch = torch.randn(b, k_patches, 2048, device=images.device)
-                    dummy_pooled = torch.randn(b, 2048, device=images.device)
+                    dt = images.dtype
+                    dummy_patch = torch.randn(b, k_patches, 2048, device=images.device, dtype=dt)
+                    dummy_pooled = torch.randn(b, 2048, device=images.device, dtype=dt)
                     p_patches = self.patch_proj(dummy_patch)
                     p_query = self.query_proj(dummy_pooled)
 
-                    xs = (torch.arange(gw, device=images.device, dtype=torch.float32) + 0.5) / gw
-                    ys = (torch.arange(gh, device=images.device, dtype=torch.float32) + 0.5) / gh
+                    xs = (torch.arange(gw, device=images.device, dtype=dt) + 0.5) / gw
+                    ys = (torch.arange(gh, device=images.device, dtype=dt) + 0.5) / gh
                     my, mx = torch.meshgrid(ys, xs, indexing="ij")
                     patch_coords = torch.stack([mx.flatten(), my.flatten()], dim=-1)
 
@@ -229,37 +240,77 @@ class FastVLAInferenceEngine:
         gw = max(2, self.canonical_resolution[1] // 28)
         grid_thw = torch.tensor([[1, gh * 2, gw * 2]], dtype=torch.long, device=self.device)
 
-        # 3. Session memory lookup for rolling KV
+        # 3. Session memory lookup for rolling KV (thread-safe & bounded)
         mem_state = None
         if self.enable_rolling_kv and session_id:
-            if session_id not in self.session_memories:
-                self.session_memories[session_id] = RollingMemoryState(max_history_steps=self.max_history_steps)
-            mem_state = self.session_memories[session_id]
+            with self._memory_lock:
+                if session_id not in self.session_memories:
+                    if len(self.session_memories) >= self._max_sessions:
+                        self.session_memories.popitem(last=False)
+                    self.session_memories[session_id] = RollingMemoryState(
+                        max_history_steps=self.max_history_steps
+                    )
+                else:
+                    self.session_memories.move_to_end(session_id)
+                mem_state = self.session_memories[session_id]
 
-        # 4. Model forward execution
+        # 4. Model forward execution (pass instruction when supported by model signature)
+        forward_kwargs: Dict[str, Any] = {
+            "image_grid_thw": grid_thw,
+            "grid_hw": (gh, gw),
+            "memory_state": mem_state,
+        }
+        try:
+            sig = inspect.signature(self.model.forward)
+            params = sig.parameters
+            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            if "goals" in params or has_var_kw:
+                forward_kwargs["goals"] = [instruction]
+            elif "queries" in params:
+                forward_kwargs["queries"] = [instruction]
+            elif "instruction" in params:
+                forward_kwargs["instruction"] = instruction
+        except (TypeError, ValueError):
+            pass
+
         with torch.no_grad():
             try:
-                out = self.model(
-                    tensor,
-                    image_grid_thw=grid_thw,
-                    grid_hw=(gh, gw),
-                    memory_state=mem_state,
-                )
+                out = self.model(tensor, **forward_kwargs)
             except TypeError:
-                out = self.model(tensor)
+                try:
+                    out = self.model(tensor, [instruction])
+                except TypeError:
+                    out = self.model(tensor)
 
-        # 5. Extract predicted discrete action and continuous coordinates
-        if "action_names" in out and len(out["action_names"]) > 0:
-            act_name = out["action_names"][0]
-        elif "action_logits" in out:
-            act_idx = int(out["action_logits"].argmax(dim=-1)[0].item())
+        # 5. Extract predicted discrete action and continuous coordinates (dict or dataclass)
+        if isinstance(out, dict):
+            action_names = out.get("action_names") or out.get("action_types")
+            action_logits = out.get("action_logits")
+            target_coords = out.get("subpixel_coords")
+            if target_coords is None:
+                target_coords = out.get("target_coords")
+            single_action_type = out.get("action_type")
+        else:
+            action_names = getattr(out, "action_types", None) or getattr(out, "action_names", None)
+            action_logits = getattr(out, "action_logits", None)
+            target_coords = getattr(out, "subpixel_coords", None)
+            if target_coords is None:
+                target_coords = getattr(out, "target_coords", None)
+            single_action_type = getattr(out, "action_type", None)
+
+        if action_names and len(action_names) > 0:
+            act_name = action_names[0]
+        elif single_action_type:
+            act_name = single_action_type
+        elif action_logits is not None:
+            act_idx = int(action_logits.argmax(dim=-1)[0].item())
             act_name = ACTION_VOCAB_10[act_idx] if act_idx < len(ACTION_VOCAB_10) else "left_click"
         else:
             act_name = "left_click"
 
         # Coordinates normalized [0, 1] mapped to canvas pixels
-        if "target_coords" in out and out["target_coords"] is not None:
-            norm_xy = out["target_coords"][0].cpu().numpy().tolist()
+        if target_coords is not None:
+            norm_xy = target_coords[0].detach().cpu().numpy().tolist()
             pixel_x = int(round(np.clip(norm_xy[0], 0.0, 1.0) * canvas_w))
             pixel_y = int(round(np.clip(norm_xy[1], 0.0, 1.0) * canvas_h))
             coord = [pixel_x, pixel_y]

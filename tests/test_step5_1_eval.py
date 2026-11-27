@@ -77,7 +77,9 @@ def test_evaluate_prediction_50px_miss():
 
 
 def test_load_downloaded_showdown_samples():
-    samples = load_showdown_samples(r"C:\Users\nandk\AVCS-v1\data\showdown-clicks-dev\data.csv")
+    from pathlib import Path
+    csv_path = Path(__file__).resolve().parent.parent / "data" / "showdown-clicks-dev" / "data.csv"
+    samples = load_showdown_samples(str(csv_path))
     assert len(samples) == 557
     assert samples[0].id == "9bfd79b4abe532b0"
     assert samples[0].width == 1470

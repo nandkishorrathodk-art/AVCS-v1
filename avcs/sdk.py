@@ -112,7 +112,7 @@ class HumanEyeClient:
         self.eye = HumanEye(source=self.source, device=self.device)
         self.events = VisualEventStreamer()
         self.motor_driver = get_default_driver(force_virtual=self.force_virtual_motor)
-        self.servoing = NeuromuscularServoingController(driver=self.motor_driver)
+        self.servoing = NeuromuscularServoingController(driver=self.motor_driver, eye=self.eye)
         self.verifier = VisualRippleVerifier(eye=self.eye, driver=self.motor_driver)
 
         # 5. Trained Neural Grounder

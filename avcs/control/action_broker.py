@@ -176,7 +176,13 @@ class ActionSafetyController:
                 return False, f"Action '{request.action_id}' is HIGH_RISK and lacks authorization grant."
 
         # Validate Window Focus if specified
-        if request.target_window_title and current_state.scene_tree:
+        if request.target_window_title:
+            if current_state.scene_tree is None:
+                # No scene tree available — fail closed, cannot confirm focus.
+                return False, (
+                    f"Focus verification blocked: scene_tree is unavailable, "
+                    f"cannot confirm expected window '{request.target_window_title}'."
+                )
             current_win = current_state.scene_tree.window_title or ""
             if request.target_window_title.lower() not in current_win.lower():
                 return False, f"Focus mismatch: expected window '{request.target_window_title}', but active is '{current_win}'."

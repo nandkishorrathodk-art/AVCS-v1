@@ -14,13 +14,11 @@ Metrics:
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
 import io
 import json
 import logging
 import math
-import os
 import re
 import sys
 import time
@@ -241,11 +239,21 @@ def load_showdown_samples(csv_path: str) -> List[ShowdownSample]:
     return samples
 
 
-def fetch_sample_image(sample: ShowdownSample, cache_dir: Path) -> Image.Image:
-    """Fetches sample image from local cache or downloads from Hugging Face."""
+def fetch_sample_image(
+    sample: ShowdownSample,
+    cache_dir: Path,
+    allow_remote_dataset: bool = False,
+) -> Image.Image:
+    """Fetches sample image from local disk first; optional HuggingFace HTTP download requires opt-in."""
     local_path = cache_dir / sample.image_rel_path
     if local_path.exists():
         return Image.open(local_path).convert("RGB")
+
+    if not allow_remote_dataset:
+        raise FileNotFoundError(
+            f"Local sample image not found at {local_path}; remote HuggingFace download is disabled "
+            "(pass --allow-remote-dataset to opt in)."
+        )
 
     local_path.parent.mkdir(parents=True, exist_ok=True)
     url = f"{HF_DATASET_RAW_BASE}/{sample.image_rel_path}"
@@ -294,13 +302,15 @@ def run_evaluation(
     cache_dir: Path,
     diagnostic_tolerance_px: float = 15.0,
     max_samples: Optional[int] = None,
+    model_name: str = "Qwen/Qwen2.5-VL-3B-Instruct",
+    allow_remote_dataset: bool = False,
 ) -> Dict[str, Any]:
     """Runs zero-shot benchmark loop across samples."""
     if max_samples and max_samples > 0:
         samples = samples[:max_samples]
 
     total = len(samples)
-    logger.info(f"Starting Qwen2.5-VL-3B Zero-Shot Evaluation on {total} held-out samples...")
+    logger.info(f"Starting {model_name} Zero-Shot Evaluation on {total} held-out samples...")
 
     results: List[EvalResult] = []
     latencies: List[float] = []
@@ -309,7 +319,11 @@ def run_evaluation(
 
     for idx, sample in enumerate(samples, start=1):
         try:
-            img = fetch_sample_image(sample, cache_dir)
+            img = fetch_sample_image(
+                sample,
+                cache_dir,
+                allow_remote_dataset=allow_remote_dataset,
+            )
         except Exception as e:
             logger.error(f"Failed to fetch image for sample {sample.id}: {e}")
             continue
@@ -364,18 +378,27 @@ def run_evaluation(
                 f"Latency: {avg_lat:.1f}ms"
             )
 
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from avcs.eval.showdown import bootstrap_confidence_interval
+
     acc_strict = (hits_strict / total) * 100.0 if total > 0 else 0.0
     w_low_strict, w_high_strict = wilson_interval(hits_strict, total)
+    b_low_strict, b_high_strict = bootstrap_confidence_interval([r.hit_strict for r in results], n_resamples=1000, seed=42)
 
     acc_15px = (hits_15px / total) * 100.0 if total > 0 else 0.0
     w_low_15px, w_high_15px = wilson_interval(hits_15px, total)
+    b_low_15px, b_high_15px = bootstrap_confidence_interval([r.hit_at_15px for r in results], n_resamples=1000, seed=42)
 
     sorted_lat = sorted(latencies)
     p50 = sorted_lat[int(len(sorted_lat) * 0.50)] if sorted_lat else 0.0
     p90 = sorted_lat[int(len(sorted_lat) * 0.90)] if sorted_lat else 0.0
+    p95 = sorted_lat[min(len(sorted_lat) - 1, int(len(sorted_lat) * 0.95))] if sorted_lat else 0.0
+    p99 = sorted_lat[min(len(sorted_lat) - 1, int(len(sorted_lat) * 0.99))] if sorted_lat else 0.0
 
     report = {
-        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "model": model_name,
         "benchmark": "generalagents/showdown-clicks-dev",
         "evaluation_type": "zero_shot_baseline",
         "total_samples": total,
@@ -384,14 +407,18 @@ def run_evaluation(
         "primary_hits": hits_strict,
         "primary_accuracy_percent": round(acc_strict, 2),
         "primary_wilson_95_ci": [w_low_strict, w_high_strict],
+        "primary_bootstrap_95_ci": [round(b_low_strict * 100.0, 2), round(b_high_strict * 100.0, 2)],
         # SECONDARY DIAGNOSTIC METRIC: 15px
         "secondary_metric": "diagnostic_15px_edge_distance",
         "secondary_hits_15px": hits_15px,
         "secondary_accuracy_15px_percent": round(acc_15px, 2),
         "secondary_wilson_95_ci_15px": [w_low_15px, w_high_15px],
+        "secondary_bootstrap_95_ci_15px": [round(b_low_15px * 100.0, 2), round(b_high_15px * 100.0, 2)],
         # LATENCY TELEMETRY
         "latency_p50_ms": round(p50, 1),
         "latency_p90_ms": round(p90, 1),
+        "latency_p95_ms": round(p95, 1),
+        "latency_p99_ms": round(p99, 1),
         "latency_mean_ms": round(sum(latencies) / len(latencies) if latencies else 0.0, 1),
         "results": [asdict(r) for r in results],
     }
@@ -406,8 +433,15 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="Maximum number of samples to evaluate (0 for all)")
     parser.add_argument("--tolerance-px", type=float, default=15.0, help="Diagnostic tolerance distance in pixels")
     parser.add_argument("--server-url", type=str, default="", help="Optional AVCS VLA server endpoint URL")
+    parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct", help="Baseline VLM identifier (e.g. Qwen/Qwen2.5-VL-3B-Instruct, Qwen/Qwen3-VL-4B-Instruct, microsoft/GUI-Actor-3B-Qwen2.5-VL)")
+    parser.add_argument("--phase1-leaderboard", type=str, default="", help="Optional path to merge baseline metrics into phase1_gate1_leaderboard.json")
     parser.add_argument("--output", type=str, default="showdown_qwen_eval_results.json", help="Path to write JSON evaluation report")
+    parser.add_argument("--allow-remote-dataset", action="store_true", help="Allow downloading missing dataset images from HuggingFace if absent on local disk.")
     args = parser.parse_args()
+
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
     csv_path = Path(args.csv_path)
     if not csv_path.exists():
@@ -435,12 +469,20 @@ def main() -> None:
 
         inference_fn = server_inference
     else:
-        # Standalone mock / baseline inference for test validation
-        def mock_inference(image: Image.Image, instruction: str, w: int, h: int) -> str:
-            resized_h, resized_w = smart_resize(h, w)
-            return f'{{"action": "left_click", "coordinate": [{resized_w // 2}, {resized_h // 2}]}}'
+        from avcs.runtime.vla_engine import FastVLAInferenceEngine
+        engine = FastVLAInferenceEngine()
 
-        inference_fn = mock_inference
+        def local_vla_inference(image: Image.Image, instruction: str, w: int, h: int) -> str:
+            resized_h, resized_w = smart_resize(h, w)
+            res = engine.act(
+                image=image,
+                instruction=instruction,
+                canvas_w=resized_w,
+                canvas_h=resized_h,
+            )
+            return str(res.get("raw_response", ""))
+
+        inference_fn = local_vla_inference
 
     max_samples = args.limit if args.limit > 0 else None
     report = run_evaluation(
@@ -449,10 +491,22 @@ def main() -> None:
         cache_dir=cache_dir,
         diagnostic_tolerance_px=args.tolerance_px,
         max_samples=max_samples,
+        model_name=args.model_id,
+        allow_remote_dataset=args.allow_remote_dataset,
     )
 
     out_file = Path(args.output)
     out_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if args.phase1_leaderboard:
+        lb_path = Path(args.phase1_leaderboard)
+        if lb_path.exists():
+            lb_data = json.loads(lb_path.read_text(encoding="utf-8"))
+            measured = lb_data.setdefault("measured_local", {})
+            zs = measured.setdefault("zero_shot_baselines", {})
+            summary = {k: v for k, v in report.items() if k != "results"}
+            zs[args.model_id] = summary
+            lb_path.write_text(json.dumps(lb_data, indent=2), encoding="utf-8")
+            logger.info(f"Merged baseline {args.model_id} into {lb_path}")
     logger.info(f"Report written to {out_file.resolve()}")
     logger.info(
         f"Primary (Strict 0px): {report['primary_accuracy_percent']}% | "

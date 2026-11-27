@@ -25,15 +25,33 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
+import os
 import re
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from avcs.reasoning.contracts import ActionIntent, ActionOp, System2Decision
 from avcs.voice.tts import split_sentences as _split_sentences
 from avcs.reasoning.provider import ReasoningProvider as _ReasoningProvider
 
 _BASE_STREAM_STEP = _ReasoningProvider.stream_step
+_logger = logging.getLogger("avcs.voice.brain")
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_loopback_endpoint(url: Optional[str]) -> bool:
+    """Return True only when ``url`` is an HTTP(S) URL targeting a loopback host."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in ("http", "https") and host in _LOOPBACK_HOSTS
 
 
 class TurnKind(str, Enum):
@@ -375,7 +393,28 @@ class ConversationBrain:
         if provider is None:
             from avcs.reasoning.provider import LLMReasoningProvider
 
-            provider = LLMReasoningProvider()
+            env_endpoint = (os.environ.get("AVCS_LLM_ENDPOINT") or "").strip()
+            env_model = (os.environ.get("AVCS_LLM_MODEL") or "").strip() or None
+            env_key = (os.environ.get("AVCS_LLM_API_KEY") or "").strip()
+            if env_endpoint and is_loopback_endpoint(env_endpoint):
+                provider = LLMReasoningProvider(
+                    endpoint=env_endpoint,
+                    api_key=env_key,
+                    model=env_model,
+                )
+            else:
+                if env_endpoint and not is_loopback_endpoint(env_endpoint):
+                    _logger.warning(
+                        "Quarantined non-loopback endpoint %r; enforcing loopback-only offline fallback.",
+                        env_endpoint,
+                    )
+                # Quarantine external cloud APIs: force loopback + empty key so
+                # credentials.py never phones external refresh URLs or cloud APIs.
+                provider = LLMReasoningProvider(
+                    endpoint="http://localhost:11434/v1",
+                    api_key="",
+                    model=env_model,
+                )
         self.provider = provider
         self.task = task
         self.history_limit = int(history_limit)
@@ -611,6 +650,9 @@ class ConversationBrain:
         """
         provider = self.provider
         if provider is None:
+            return True
+        endpoint = getattr(provider, "endpoint", None)
+        if isinstance(endpoint, str) and endpoint.strip() and not is_loopback_endpoint(endpoint):
             return True
         key = getattr(provider, "api_key", None)
         if key is None:
@@ -913,16 +955,42 @@ class ConversationBrain:
 # --------------------------------------------------------------------------- #
 _ACTION_WORDS = {
     "click": ("click", "press", "tap", "dabao", "daba", "kholo", "open"),
+    "double_click": (
+        "double click", "double-click", "double_click", "double tap",
+        "do baar click", "do baar dabao", "2 baar click",
+    ),
+    "right_click": (
+        "right click", "right-click", "right_click", "secondary click",
+        "context click", "right dabao", "dahina click",
+    ),
+    "drag": ("drag", "kheencho", "khinch", "move karo"),
     "type": ("type", "write", "enter", "likho", "likh", "bharo"),
     "save": ("save",),
     "search": ("search", "dhundo", "find"),
-    "scroll": ("scroll", "neeche", "upar"),
+    "scroll": ("scroll", "neeche", "niche", "upar"),
     "read_file": ("padho", "padh", "read", "dikhao file", "file dikhao"),
     "list_dir": ("list", "listdir", "list_dir", "files dikhao", "folder dikhao"),
     "launch_app": ("launch", "kholo app", "chalu karo", "start karo", "open app"),
-    "right_click": ("right click", "right-click", "secondary click"),
-    "drag": ("drag", "kheencho", "khinch", "move karo"),
+    "observe_target": ("observe", "dekho", "look at", "inspect", "check screen"),
 }
+
+_TYPE_EXPLICIT_WORDS = ("type", "write", "likho", "likh", "bharo")
+
+_FINISH_PHRASES = frozenset({
+    "finish", "done", "ho gaya", "complete", "completed", "khatam",
+    "task done", "kaam ho gaya",
+})
+_STOP_PHRASES = frozenset({"stop", "band karo", "abort", "ruk jao", "cancel"})
+_WAIT_PHRASES = frozenset({"wait", "ruko", "intezar karo", "hold on", "pause"})
+
+
+def _has_phrase(low: str, phrases: tuple[str, ...]) -> bool:
+    """True when any phrase appears at word/token boundaries in ``low``."""
+    return any(
+        re.search(r"(?<![a-z0-9_])" + re.escape(p) + r"(?![a-z0-9_])", low)
+        for p in phrases
+    )
+
 
 # Ops that need a named operand in `parameters`, and the key it belongs under.
 _OPERAND_OPS = {
@@ -932,12 +1000,13 @@ _OPERAND_OPS = {
 }
 
 # Words that name the action itself, so they are stripped from the target. Kept
-# deliberately tiny: only "right"/"secondary" qualify, because "right click" puts
-# the action word *inside* the target span ("save button right click"). The verb
-# itself ("click", "drag", "scroll") must stay, or the object-verb split loses the
-# token that marks where the target ends.
+# deliberately tiny: only action-modifier tokens qualify, because phrases like
+# "right click" put the modifier inside the target span ("save button right click").
+# The verb itself ("click", "drag", "scroll") stays so object-verb splitting works.
 _OP_PHRASE_WORDS = {
-    "right_click": ("right", "secondary"),
+    "right_click": ("right", "secondary", "context", "dahina"),
+    "double_click": ("double", "do", "baar", "2"),
+    "observe_target": ("observe", "look", "at", "inspect", "dekho"),
 }
 
 
@@ -986,6 +1055,39 @@ class RuleBrain:
                 source="rule_fallback",
             )
 
+        clean_cmd = re.sub(r"[.!?]+$", "", low).strip()
+        if clean_cmd in _FINISH_PHRASES:
+            return AssistantTurn(
+                kind=TurnKind.FINISH,
+                speech="Ho gaya sir.",
+                thought="User indicated task completion.",
+                source="rule_fallback",
+            )
+        if clean_cmd in _STOP_PHRASES:
+            return AssistantTurn(
+                kind=TurnKind.STOP,
+                speech="Theek hai sir, ruk gaya.",
+                thought="User requested stop.",
+                source="rule_fallback",
+            )
+        if clean_cmd in _WAIT_PHRASES or (
+            re.match(r"^wait\b(?:\s+(?:for|a|karo|please)\b)?", clean_cmd)
+            and "button" not in clean_cmd
+        ):
+            intent = ActionIntent.create(
+                step_index=self.step_index,
+                op=ActionOp.WAIT,
+                expected_outcome="screen settles",
+                rationale="Offline wait match.",
+            )
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech="Theek hai sir, thoda ruko.",
+                intent=intent,
+                thought="Keyword match produced a wait.",
+                source="rule_fallback",
+            )
+
         # Operand ops come before target extraction: "read_file" needs a path,
         # not an on-screen target, so the target-not-found branch would wrongly
         # refuse an actionable request. The operand is the thing the user named.
@@ -994,29 +1096,153 @@ class RuleBrain:
             return self._operand_turn(text, low, operand_op)
 
         op = ActionOp.CLICK
-        if any(w in low for w in _ACTION_WORDS["right_click"]):
+        if _has_phrase(low, _ACTION_WORDS["double_click"]):
+            op = ActionOp.DOUBLE_CLICK
+        elif _has_phrase(low, _ACTION_WORDS["right_click"]):
             op = ActionOp.RIGHT_CLICK
-        elif any(w in low for w in _ACTION_WORDS["drag"]):
+        elif _has_phrase(low, _ACTION_WORDS["drag"]):
             op = ActionOp.DRAG
-        elif any(w in low for w in _ACTION_WORDS["type"]):
-            op = ActionOp.TYPE_TEXT
-        elif any(w in low for w in _ACTION_WORDS["scroll"]):
+        elif _has_phrase(low, _ACTION_WORDS["observe_target"]):
+            op = ActionOp.OBSERVE_TARGET
+        elif _has_phrase(low, _ACTION_WORDS["scroll"]):
             op = ActionOp.SCROLL
+        elif _has_phrase(low, _TYPE_EXPLICIT_WORDS) or (
+            _has_phrase(low, ("enter",)) and not self._looks_like_keypress(low)
+        ):
+            op = ActionOp.TYPE_TEXT
         elif self._looks_like_keypress(low):
             op = ActionOp.PRESS_KEY
+
+        if op == ActionOp.DRAG:
+            src, dst = self._extract_drag_endpoints(text)
+            if src is None:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech="Which item should I drag, sir?",
+                    thought="Drag requested without source target.",
+                    source="rule_fallback",
+                )
+            if dst is None:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech=f"Where should I drag {src}, sir?",
+                    thought="Drag requested without destination target.",
+                    source="rule_fallback",
+                )
+            if observation.get("target_present") is False:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech=f"I can't see {src} on screen right now, sir. Should I wait or look elsewhere?",
+                    thought="Drag source reported absent by perception.",
+                    source="rule_fallback",
+                )
+            intent = ActionIntent.create(
+                step_index=self.step_index,
+                op=ActionOp.DRAG,
+                target_description=src,
+                parameters={"destination": dst, "target2": dst},
+                expected_outcome=f"{src} moved to {dst}",
+                rationale="Offline keyword match.",
+            )
+            self._acted = True
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech=f"Okay sir, dragging {src} to {dst}.",
+                intent=intent,
+                thought="Keyword match produced a drag action.",
+                source="rule_fallback",
+            )
+
+        if op == ActionOp.TYPE_TEXT:
+            text_input, target_hint = self._extract_type_payload(text)
+            if not text_input:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech="What text should I type, sir?",
+                    thought="Type requested without text payload.",
+                    source="rule_fallback",
+                )
+            target = target_hint or self._extract_target(text) or "focused field"
+            intent = ActionIntent.create(
+                step_index=self.step_index,
+                op=ActionOp.TYPE_TEXT,
+                target_description=target,
+                text_input=text_input,
+                expected_outcome=f"typed {text_input}",
+                rationale="Offline keyword match.",
+            )
+            self._acted = True
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech=f"Okay sir, typing {text_input}.",
+                intent=intent,
+                thought="Keyword match produced a type_text action.",
+                source="rule_fallback",
+            )
+
+        if op == ActionOp.PRESS_KEY:
+            _, key_name = self._extract_payload(text, ActionOp.PRESS_KEY)
+            if not key_name:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech="Which key should I press, sir?",
+                    thought="Key press requested without key name.",
+                    source="rule_fallback",
+                )
+            target = self._extract_target(text) or key_name
+            intent = ActionIntent.create(
+                step_index=self.step_index,
+                op=ActionOp.PRESS_KEY,
+                target_description=target,
+                key_name=key_name,
+                expected_outcome=f"pressed {key_name}",
+                rationale="Offline keyword match.",
+            )
+            self._acted = True
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech=f"Okay sir, pressing {key_name}.",
+                intent=intent,
+                thought="Keyword match produced a press_key action.",
+                source="rule_fallback",
+            )
+
+        if op == ActionOp.SCROLL:
+            scroll_delta = self._extract_scroll_delta(low)
+            target = self._extract_target(text) or "screen"
+            intent = ActionIntent.create(
+                step_index=self.step_index,
+                op=ActionOp.SCROLL,
+                target_description=target,
+                scroll_delta=scroll_delta,
+                expected_outcome="screen scrolled",
+                rationale="Offline keyword match.",
+            )
+            self._acted = True
+            direction = "up" if scroll_delta > 0 else "down"
+            return AssistantTurn(
+                kind=TurnKind.ACT,
+                speech=f"Okay sir, scrolling {direction}.",
+                intent=intent,
+                thought="Keyword match produced a scroll action.",
+                source="rule_fallback",
+            )
 
         # The op's own words are not part of the target: "save button par right
         # click karo" names the control "save button", and keeping "right" in the
         # target makes the gate look for a control called "save button right",
         # which is on no screen. Strip them before extraction, not after.
-        target = self._extract_target(text, strip=_OP_PHRASE_WORDS.get(op, ()))
+        target = self._extract_target(text, strip=_OP_PHRASE_WORDS.get(op.value, ()))
         if target is None:
-            return AssistantTurn(
-                kind=TurnKind.ASK,
-                speech=f"Understood sir. Which item should I act on for '{text}'?",
-                thought="Task named but no target could be extracted.",
-                source="rule_fallback",
-            )
+            if op == ActionOp.OBSERVE_TARGET:
+                target = "screen"
+            else:
+                return AssistantTurn(
+                    kind=TurnKind.ASK,
+                    speech=f"Understood sir. Which item should I act on for '{text}'?",
+                    thought="Task named but no target could be extracted.",
+                    source="rule_fallback",
+                )
 
         if observation.get("target_present") is False:
             return AssistantTurn(
@@ -1062,8 +1288,10 @@ class RuleBrain:
     })
 
     _KEY_NAMES = frozenset({
-        "enter", "return", "tab", "esc", "escape", "space", "backspace",
-        "delete", "up", "down", "left", "right", "home", "end",
+        "enter", "return", "tab", "esc", "escape", "space", "spacebar",
+        "backspace", "delete", "up", "down", "left", "right", "home", "end",
+        "pageup", "pagedown", "insert",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
     })
 
     @classmethod
@@ -1076,7 +1304,7 @@ class RuleBrain:
         """
         # Most specific first.
         for op in ("list_dir", "read_file", "launch_app"):
-            if any(w in low for w in _ACTION_WORDS[op]):
+            if _has_phrase(low, _ACTION_WORDS[op]):
                 return op
         return None
 
@@ -1137,34 +1365,141 @@ class RuleBrain:
     @classmethod
     def _looks_like_keypress(cls, low: str) -> bool:
         """True when the utterance names a bare key or a chord ("ctrl+s")."""
-        if re.search(r"(ctrl|shift|alt)\s*\+", low):
+        if re.search(r"(ctrl|control|shift|alt|win|super|meta)\s*\+\s*[a-z0-9]+", low):
             return True
         tokens = re.findall(r"[a-z0-9]+", low)
+        if any(t in {"click", "tap", "double"} for t in tokens):
+            return False
+        # "enter hello into the box" is typing, whereas "press enter" / "enter dabao" is a key.
+        if "enter" in tokens and not any(t in {"press", "hit", "key", "dabao", "daba"} for t in tokens):
+            if re.search(r"\benter\b\s+(?!key\b|dabao\b|daba\b|press\b|karo\b|kar\b|kro\b)[a-z0-9'\"]+", low):
+                return False
         return any(t in cls._KEY_NAMES for t in tokens)
+
+    @classmethod
+    def _extract_scroll_delta(cls, low: str) -> int:
+        tokens = set(re.findall(r"[a-z0-9]+", low))
+        if tokens & {"up", "upar"}:
+            return 3
+        return -3
+
+    @classmethod
+    def _extract_drag_endpoints(cls, text: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract (source, destination) from English or Hinglish drag commands."""
+        # Hinglish: "<src> ko/se <dst> mein/par/tak drag/kheencho karo"
+        m_hi = re.search(
+            r"^(.+?)\s+\b(?:ko|se)\b\s+(.+?)\s+\b(?:mein|me|par|pe|tak|to|into|onto)\b\s+(?:drag|kheencho|khinch|move)\b",
+            text.strip(),
+            re.I,
+        )
+        if m_hi:
+            src = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", m_hi.group(1)))
+            dst = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", m_hi.group(2)))
+            return src, dst
+
+        # English: "drag <src> to/into/onto <dst>"
+        m_en = re.search(
+            r"\b(?:drag|kheencho|khinch|move)\b\s+(.+?)\s+\b(?:to|into|onto|in|mein|me|par|tak)\b\s+(.+)",
+            text.strip(),
+            re.I,
+        )
+        if m_en:
+            src = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", m_en.group(1)))
+            dst_tokens = re.findall(r"[A-Za-z0-9_-]+", m_en.group(2))
+            while len(dst_tokens) > 1 and dst_tokens[-1].lower() in cls._AUX_TAIL:
+                dst_tokens.pop()
+            dst = cls._clean_span(dst_tokens)
+            return src, dst
+
+        return cls._extract_target(text), None
+
+    @classmethod
+    def _extract_type_payload(cls, text: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract (text_input, optional_target_field) for English & Hinglish typing."""
+        quoted = re.search(r"['\"]([^'\"]{1,120})['\"]", text)
+        if quoted:
+            payload = quoted.group(1).strip()
+            after_prep = re.search(
+                r"\b(?:into|in|to|on|mein|me|par)\b\s+(.+)",
+                text[quoted.end():],
+                re.I,
+            )
+            target = None
+            if after_prep:
+                target = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", after_prep.group(1)))
+            else:
+                before_prep = re.search(
+                    r"^(.+?)\s+\b(?:into|in|to|on|mein|me|par)\b",
+                    text[:quoted.start()],
+                    re.I,
+                )
+                if before_prep:
+                    target = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", before_prep.group(1)))
+            return payload, target
+
+        # Hinglish with target: "<target> mein/me/par <text> likho/bharo/type karo"
+        m_hi_target = re.match(
+            r"^(.+?)\s+\b(?:mein|me|into|in|par|on)\b\s+(.+?)\s+\b(?:likho|likh|type|write|enter|bharo)\b(?:\s+(?:karo|kar|kro|do|dena|de))?\s*$",
+            text.strip(),
+            re.I,
+        )
+        if m_hi_target:
+            target = cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", m_hi_target.group(1)))
+            payload = m_hi_target.group(2).strip(" .!?,\"'")
+            if payload:
+                return payload, target
+
+        # English verb-first: "type <text> [into <target>]"
+        m = re.search(r"\b(?:type|write|enter|likho|likh|bharo)\b\s+(.+)", text, re.I)
+        if m:
+            raw_after = m.group(1).strip()
+            # Ignore trailing Hinglish auxiliary if nothing preceded it ("type karo")
+            if raw_after.lower() not in cls._AUX_TAIL:
+                parts = re.split(r"\b(?:into|in|to|on|me|mein)\b", raw_after, maxsplit=1, flags=re.I)
+                tail = parts[0].strip(" .!?,\"'")
+                if tail and tail.lower() not in cls._AUX_TAIL:
+                    target = (
+                        cls._clean_span(re.findall(r"[A-Za-z0-9_-]+", parts[1]))
+                        if len(parts) > 1
+                        else None
+                    )
+                    return tail, target
+
+        # Hinglish object-verb without target: "<text> likho/bharo/type karo"
+        m_hi = re.match(
+            r"^(.+?)\s+\b(?:likho|likh|type|write|bharo)\b(?:\s+(?:karo|kar|kro|do|dena|de))?\s*$",
+            text.strip(),
+            re.I,
+        )
+        if m_hi:
+            payload = m_hi.group(1).strip(" .!?,\"'")
+            if payload:
+                return payload, None
+
+        return None, None
 
     @classmethod
     def _extract_payload(cls, text: str, op) -> tuple[Optional[str], Optional[str]]:
         """Pull the text to type, or the key to press, out of the utterance."""
         if op == ActionOp.TYPE_TEXT:
-            quoted = re.search(r"['\"]([^'\"]{1,120})['\"]", text)
-            if quoted:
-                return quoted.group(1).strip(), None
-            # "type hello into the box" -> the word after the type verb, up to a
-            # preposition that starts the target clause.
-            m = re.search(r"\b(?:type|write|enter|likho|likh|bharo)\b\s+(.+)", text, re.I)
-            if m:
-                tail = re.split(r"\b(?:into|in|to|on|me|mein)\b", m.group(1), maxsplit=1, flags=re.I)[0]
-                tail = tail.strip(" .!?,\"'")
-                if tail:
-                    return tail, None
-            return None, None
+            payload, _ = cls._extract_type_payload(text)
+            return payload, None
         if op == ActionOp.PRESS_KEY:
-            chord = re.search(r"(ctrl|shift|alt)\s*\+\s*([a-z0-9]+)", text, re.I)
+            chord = re.search(
+                r"((?:(?:ctrl|control|shift|alt|win|super|meta)\s*\+\s*)+[a-z0-9]+)",
+                text,
+                re.I,
+            )
             if chord:
-                return None, f"{chord.group(1).lower()}+{chord.group(2).lower()}"
+                parts = [p.strip().lower() for p in chord.group(1).split("+") if p.strip()]
+                norm = "+".join("ctrl" if p == "control" else p for p in parts)
+                return None, norm
             for tok in re.findall(r"[a-z0-9]+", text, re.I):
-                if tok.lower() in cls._KEY_NAMES:
-                    return None, tok.lower()
+                low_tok = tok.lower()
+                if low_tok == "spacebar":
+                    return None, "space"
+                if low_tok in cls._KEY_NAMES:
+                    return None, low_tok
             return None, None
         return None, None
 

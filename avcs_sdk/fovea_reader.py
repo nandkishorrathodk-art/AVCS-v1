@@ -58,8 +58,8 @@ class FoveaReader:
         self._backend = backend
 
     def attach_ocr(self, backend: Any) -> None:
-        """Explicitly attach an OCR backend."""
-        self._backend = backend
+        """Disabled under AVCS Pure-RGB pixel invariant."""
+        raise RuntimeError("External OCR is disabled under AVCS Pure-RGB pixel invariant.")
 
     def crop_element(
         self,
@@ -98,37 +98,8 @@ class FoveaReader:
         return contrast, edge_density
 
     def read_text(self, crop: np.ndarray) -> Optional[str]:
-        """Extracts text from a cropped UI patch if an actual OCR or local VLM backend is attached.
-
-        Returns None (fail-closed honesty) unless an actual OCR or local VLM backend is explicitly attached.
-        """
-        if crop is None or crop.size == 0 or self._backend is None:
-            return None
-
-        try:
-            if hasattr(self._backend, "read_text") and callable(self._backend.read_text):
-                res = self._backend.read_text(crop)
-            elif hasattr(self._backend, "ocr") and callable(self._backend.ocr):
-                res = self._backend.ocr(crop)
-            elif hasattr(self._backend, "recognize_text") and callable(self._backend.recognize_text):
-                res = self._backend.recognize_text(crop)
-            elif callable(self._backend):
-                res = self._backend(crop)
-            else:
-                return None
-
-            if isinstance(res, str):
-                cleaned = res.strip()
-                return cleaned if cleaned else None
-            elif isinstance(res, dict):
-                for key in ("<OCR>", "<OCR_WITH_REGION>", "text"):
-                    if key in res and isinstance(res[key], str):
-                        cleaned = res[key].strip()
-                        if cleaned:
-                            return cleaned
-            return None
-        except Exception:
-            return None
+        """Disabled under AVCS Pure-RGB pixel invariant."""
+        raise RuntimeError("External OCR is disabled under AVCS Pure-RGB pixel invariant.")
 
     def inspect(
         self,
@@ -136,7 +107,7 @@ class FoveaReader:
         hotspots: List[Tuple[float, float, str, float]],
         max_inspect: int = 8,
     ) -> List[FovealElement]:
-        """Runs foveal inspection on candidate hotspots."""
+        """Runs pure-pixel foveal inspection on candidate hotspots."""
         if full_frame is None or not hotspots:
             return []
 
@@ -148,10 +119,9 @@ class FoveaReader:
 
             crop, bbox = self.crop_element(full_frame, x, y)
             contrast, edge_density = self.measure_texture(crop)
-            text = self.read_text(crop)
             elements.append(
                 FovealElement(
-                    text=text,
+                    text=None,
                     category=kind,
                     center_norm=(x, y),
                     bbox_pixels=bbox,

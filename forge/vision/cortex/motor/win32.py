@@ -157,7 +157,8 @@ class INPUT(ctypes.Structure):
 class Win32CursorDriver:
     """Hardware cursor driver for Microsoft Windows with SendInput & DPI awareness."""
 
-    def __init__(self, failsafe: bool = True) -> None:
+    def __init__(self, failsafe: bool = True, pure_rgb_only: bool = True) -> None:
+        self.pure_rgb_only = bool(pure_rgb_only)
         self.user32 = ctypes.windll.user32
         self._attach_input_desktop()
         self._init_dpi_awareness()
@@ -266,7 +267,9 @@ class Win32CursorDriver:
         return (nx, ny)
 
     def get_foreground_window(self) -> Optional[str]:
-        """Returns the title of the active foreground window, or None."""
+        """Returns the title of the active foreground window, or None (gated behind pure_rgb_only=False)."""
+        if getattr(self, "pure_rgb_only", True):
+            return None
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         if not hwnd:
             return None
@@ -512,18 +515,19 @@ class Win32CursorDriver:
             raise FocusLostError("Active window or focus lost prior to typing.")
 
         if clear_first:
-            # Terminal Protection Guard
+            # Terminal Protection Guard (Win32 title scraping gated behind pure_rgb_only=False)
             is_terminal = False
-            try:
-                hwnd = self.user32.GetForegroundWindow()
-                if hwnd:
-                    length = self.user32.GetWindowTextLengthW(hwnd)
-                    buf = ctypes.create_unicode_buffer(length + 1)
-                    self.user32.GetWindowTextW(hwnd, buf, length + 1)
-                    title = buf.value.lower()
-                    is_terminal = any(term in title for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
-            except Exception:
-                pass
+            if not getattr(self, "pure_rgb_only", True):
+                try:
+                    hwnd = self.user32.GetForegroundWindow()
+                    if hwnd:
+                        length = self.user32.GetWindowTextLengthW(hwnd)
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        self.user32.GetWindowTextW(hwnd, buf, length + 1)
+                        title = buf.value.lower()
+                        is_terminal = any(term in title for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
+                except Exception:
+                    pass
 
             if is_terminal:
                 self.press_hotkey("ctrl", "u")

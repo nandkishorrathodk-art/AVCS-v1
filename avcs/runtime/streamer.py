@@ -34,7 +34,13 @@ class PreActionRingBuffer:
         self._sync_errors_ns: collections.deque[int] = collections.deque(maxlen=10_000)
 
     def push(self, obs: Observation) -> None:
-        """Appends a new captured observation into the ring buffer."""
+        """Appends a new captured observation into the ring buffer (stripping raw uncompressed arrays to prevent RAM bloat)."""
+        if getattr(obs, "raw_numpy", None) is not None:
+            from dataclasses import replace
+            try:
+                obs = replace(obs, raw_numpy=None)
+            except TypeError:
+                pass
         with self._lock:
             self._buffer.append(obs)
 
@@ -171,12 +177,16 @@ class ScreenStreamer:
         if self.is_running:
             return
 
+        with self._lock:
+            self._latest_obs = None
+            self._frame_count = 0
+            self._fps_measured = 0.0
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="ScreenStreamerWorker")
         self._thread.start()
         # Wait up to startup_timeout (default 1.5s) for the first frame to populate
-        t_start = time.time()
-        while self.get_latest_observation() is None and (time.time() - t_start) < startup_timeout:
+        t_start = time.monotonic()
+        while self.get_latest_observation() is None and (time.monotonic() - t_start) < startup_timeout:
             time.sleep(0.005)
         logger.info(f"ScreenStreamer live: continuous capture at {self.target_fps:.0f} FPS ({self.image_format})")
 
@@ -225,11 +235,11 @@ class ScreenStreamer:
     def _worker_loop(self) -> None:
         """Continuous background capture loop."""
         last_time = 0.0
-        fps_timer = time.time()
+        fps_timer = time.monotonic()
         frames_in_second = 0
 
         while not self._stop_event.is_set():
-            now = time.time()
+            now = time.monotonic()
             elapsed = now - last_time
 
             if elapsed >= self._interval:
@@ -238,19 +248,21 @@ class ScreenStreamer:
                     obs = self.computer.observe(format=self.image_format)
                     with self._lock:
                         self._latest_obs = obs
+                        self._frame_count += 1
                     self.ring_buffer.push(obs)
-                    self._frame_count += 1
                     frames_in_second += 1
                 except Exception as e:
                     logger.debug(f"Streaming frame grab error: {e}")
 
                 if now - fps_timer >= 1.0:
-                    self._fps_measured = frames_in_second / (now - fps_timer)
+                    fps_val = frames_in_second / (now - fps_timer)
+                    with self._lock:
+                        self._fps_measured = fps_val
                     frames_in_second = 0
                     fps_timer = now
 
             # Yield CPU briefly to maintain target FPS without 100% core spin
-            sleep_time = self._interval - (time.time() - last_time)
+            sleep_time = self._interval - (time.monotonic() - last_time)
             if sleep_time > 0.002:
                 time.sleep(sleep_time)
             else:

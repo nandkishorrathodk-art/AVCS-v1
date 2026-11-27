@@ -407,7 +407,8 @@ class TestServerPrefillAndCLI(unittest.TestCase):
                 "--limit", "1",
                 "--output", tmp_path,
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, cwd="C:\\Users\\nandk\\AVCS-v1")
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            res = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
             self.assertEqual(res.returncode, 0, f"CLI runner failed: {res.stderr}")
             self.assertIn("Primary (Strict 0px)", res.stderr + res.stdout)
             self.assertTrue(os.path.exists(tmp_path))

@@ -1,11 +1,11 @@
-"""Ace-Control-Medium Cognitive Agent.
+"""AVCS Single-Brain Local VLA Desktop Agent.
 
-Orchestrates the visual perception to direct action token generation pipeline:
-1. Fast Brain: Local GoalConditionedGrounder for sub-15ms direct spatial actuation.
-2. Gated Actuation: Directly delegates when grounder peak_probability >= min_peak_probability (0.75).
-3. Slow Brain: Fallback to Cloud LLM for complex reasoning, typing, and recovery.
-4. Shadow Mode: Runs local grounder in shadow, compares coordinates against Cloud LLM, and logs agreement.
-5. Canvas Invariant: Enforces canonical 1280x800 coordinate boundaries and zero center heuristics.
+Orchestrates the 100% self-contained, pure-RGB visual perception to action pipeline:
+1. Local VLA Engine: Single-pass Qwen2.5-VL-3B + GUI-Actor + ParallelActionHeads.
+2. Fail-Closed Capability Gate: Enforces explicit grants and calibrated peak_probability >= 0.75.
+3. Strict Local Fail-Closed Policy: Zero external cloud LLM fallback; low-confidence or
+   error states return safe WAIT/STOP locally.
+4. Canvas Invariant: Enforces canonical 1280x800 coordinate boundaries and zero center heuristics.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 from avcs.protocol.actions import Action, ActionKind
-from avcs.runtime.client import CustomLLMClient
+from avcs.runtime.client import CustomLLMClient, is_local_endpoint
 from avcs.os_io.computer import Observation
 
 logger = logging.getLogger("avcs.ace.agent")
@@ -150,7 +150,7 @@ class AceAgent:
 
     def __init__(
         self,
-        client: Optional[CustomLLMClient] = None,
+        client: Optional[Any] = None,
         grounder: Optional[Any] = None,
         enable_grounder: bool = False,
         shadow_mode: bool = False,
@@ -160,7 +160,7 @@ class AceAgent:
         vla_client: Optional[Any] = None,
         vla_server_url: Optional[str] = None,
     ) -> None:
-        self.client = client or CustomLLMClient()
+        self.client = client
         self.grounder = grounder
         self.enable_grounder = enable_grounder or (grounder is not None)
         self.shadow_mode = shadow_mode
@@ -555,6 +555,9 @@ class AceAgent:
                 vla_lat = (time.perf_counter() - t0) * 1000.0
 
                 action_name = str(vla_res.get("action", "left_click")).lower().strip()
+                if vla_res.get("error"):
+                    raise RuntimeError(f"VLA server returned error: {vla_res['error']}")
+
                 coord = vla_res.get("coordinate")
                 target_coord = (int(coord[0]), int(coord[1])) if (isinstance(coord, (list, tuple)) and len(coord) == 2) else None
 
@@ -568,8 +571,17 @@ class AceAgent:
 
                 if is_blacklisted:
                     logger.warning(
-                        f"[FAST BRAIN VLA FALLBACK] Target coordinate {target_coord} is blacklisted due to prior deadlock. "
-                        "Falling back to Cloud LLM."
+                        f"[FAIL-CLOSED VLA] Target coordinate {target_coord} is blacklisted due to prior deadlock. "
+                        "Returning fail-closed WAIT (cloud fallback disabled)."
+                    )
+                    return (
+                        Action(
+                            kind=ActionKind.WAIT,
+                            duration=0.5,
+                            reason=f"VLA target coordinate {target_coord} blacklisted; fail-closed WAIT.",
+                            metadata={"fast_brain": True, "fail_closed": True, "blacklisted": True},
+                        ),
+                        vla_lat,
                     )
                 else:
                     act_kind_map = {
@@ -577,17 +589,48 @@ class AceAgent:
                         "right_click": ActionKind.RIGHT_CLICK,
                         "double_click": ActionKind.DOUBLE_CLICK,
                         "triple_click": ActionKind.TRIPLE_CLICK,
+                        "middle_click": ActionKind.MIDDLE_CLICK,
                         "mouse_move": ActionKind.MOUSE_MOVE,
+                        "scroll": ActionKind.SCROLL,
+                        "drag": ActionKind.LEFT_CLICK_DRAG,
+                        "drag_start": ActionKind.LEFT_CLICK_DRAG,
+                        "left_click_drag": ActionKind.LEFT_CLICK_DRAG,
                         "wait": ActionKind.WAIT,
                         "stop": ActionKind.STOP,
                         "key": ActionKind.KEY,
+                        "hotkey": ActionKind.KEY,
                         "type": ActionKind.TYPE,
                         "type_text": ActionKind.TYPE,
                     }
                     act_kind = act_kind_map.get(action_name, ActionKind.LEFT_CLICK)
+
+                    raw_keys = vla_res.get("keys")
+                    if raw_keys is None and vla_res.get("key") is not None:
+                        raw_keys = [str(vla_res["key"])]
+                    raw_text = vla_res.get("text")
+                    raw_scroll = vla_res.get("scroll_delta")
+                    start_c = vla_res.get("start_coordinate")
+                    end_c = vla_res.get("end_coordinate")
+                    start_tuple = (int(start_c[0]), int(start_c[1])) if isinstance(start_c, (list, tuple)) and len(start_c) == 2 else target_coord
+                    end_tuple = (int(end_c[0]), int(end_c[1])) if isinstance(end_c, (list, tuple)) and len(end_c) == 2 else None
+
+                    missing_payload = (
+                        (act_kind == ActionKind.KEY and not raw_keys)
+                        or (act_kind == ActionKind.TYPE and raw_text is None)
+                        or (act_kind == ActionKind.SCROLL and raw_scroll is None)
+                        or (act_kind == ActionKind.LEFT_CLICK_DRAG and (start_tuple is None or end_tuple is None))
+                    )
+                    if missing_payload:
+                        raise ValueError(f"VLA Fast Brain emitted '{action_name}' without required payload")
+
                     vla_act = Action(
                         kind=act_kind,
                         coordinate=target_coord,
+                        start_coordinate=start_tuple if act_kind == ActionKind.LEFT_CLICK_DRAG else None,
+                        end_coordinate=end_tuple if act_kind == ActionKind.LEFT_CLICK_DRAG else None,
+                        text=str(raw_text) if raw_text is not None else None,
+                        keys=[str(k) for k in raw_keys] if isinstance(raw_keys, (list, tuple)) else None,
+                        scroll_delta=(int(raw_scroll[0]), int(raw_scroll[1])) if isinstance(raw_scroll, (list, tuple)) and len(raw_scroll) == 2 else None,
                         confidence=1.0,
                         reason=f"WebSocket VLA Fast Brain '{action_name}' {target_coord} ({vla_res.get('roundtrip_ms', vla_lat):.1f}ms)",
                         metadata={
@@ -600,14 +643,29 @@ class AceAgent:
                     validated = self.validate_action(vla_act)
                     if validated.kind != ActionKind.WAIT or act_kind == ActionKind.WAIT:
                         logger.info(
-                            f"[FAST BRAIN DIRECT ACTUATION] WebSocket VLA predicted {validated.kind.value} {validated.coordinate} "
-                            f"in {vla_lat:.1f}ms (bypassing Cloud LLM)."
+                            f"[LOCAL VLA DIRECT ACTUATION] WebSocket VLA predicted {validated.kind.value} {validated.coordinate} "
+                            f"in {vla_lat:.1f}ms."
                         )
-                        return validated, vla_lat
+                    else:
+                        logger.warning(
+                            f"[FAIL-CLOSED VLA] WebSocket VLA action '{act_kind.value}' failed validation constraints; "
+                            "returning fail-closed WAIT."
+                        )
+                    return validated, vla_lat
             except Exception as e:
-                logger.warning(f"[FAST BRAIN FALLBACK] WebSocket VLA failed ({e}). Falling back to Cloud LLM.")
+                fail_lat = (time.perf_counter() - t0) * 1000.0
+                logger.warning(f"[FAIL-CLOSED VLA] Local VLA failed ({e}). Returning fail-closed WAIT (cloud fallback disabled).")
+                return (
+                    Action(
+                        kind=ActionKind.WAIT,
+                        duration=0.5,
+                        reason=f"Local VLA failed ({e}); fail-closed WAIT.",
+                        metadata={"fast_brain": True, "fail_closed": True, "error": str(e)},
+                    ),
+                    fail_lat,
+                )
 
-        # Local Grounder fallback only if explicitly enabled
+        # Local Grounder gated execution (strictly fail-closed, zero cloud fallback)
         elif self.enable_grounder and not self.shadow_mode:
             grounder_act, grounder_lat = self.predict_with_grounder(
                 observation, goal, step_index=step_index
@@ -630,38 +688,98 @@ class AceAgent:
 
             if is_blacklisted:
                 logger.warning(
-                    f"[FAST BRAIN FALLBACK] Grounder target coordinate {grounder_act.coordinate} is blacklisted due to prior deadlock. "
-                    "Falling back to Cloud LLM for complex recovery."
+                    f"[FAIL-CLOSED GROUNDER] Target coordinate {grounder_act.coordinate} is blacklisted due to prior deadlock. "
+                    "Returning fail-closed WAIT (cloud fallback disabled)."
                 )
-            elif grounder_act is not None and grounder_conf >= self.min_peak_probability:
+                return (
+                    Action(
+                        kind=ActionKind.WAIT,
+                        duration=0.5,
+                        reason=f"Grounder target coordinate {grounder_act.coordinate} blacklisted; fail-closed WAIT.",
+                        metadata={"fast_brain": True, "fail_closed": True, "blacklisted": True},
+                    ),
+                    grounder_lat,
+                )
+            elif grounder_act is not None and math.isfinite(grounder_conf) and grounder_conf >= self.min_peak_probability:
                 validated = self.validate_action(grounder_act)
-                # If validation degraded the action to WAIT (e.g. invalid coordinates), fall back to Cloud LLM
                 if validated.kind == ActionKind.WAIT and grounder_act.kind != ActionKind.WAIT:
                     logger.warning(
-                        "[FAST BRAIN FALLBACK] Grounder action failed validation constraints. "
-                        "Falling back to Cloud LLM."
+                        "[FAIL-CLOSED GROUNDER] Grounder action failed validation constraints. Returning fail-closed WAIT."
                     )
                 else:
                     logger.info(
-                        f"[FAST BRAIN DIRECT ACTUATION] Grounder peak_probability={grounder_conf:.3f} >= {self.min_peak_probability}. "
-                        f"Delegating direct action {validated.kind.value} {validated.coordinate} in {grounder_lat:.1f}ms (bypassing Cloud LLM)."
+                        f"[LOCAL GROUNDER ACTUATION] Grounder peak_probability={grounder_conf:.3f} >= {self.min_peak_probability}. "
+                        f"Delegating direct action {validated.kind.value} {validated.coordinate} in {grounder_lat:.1f}ms."
                     )
-                    return validated, grounder_lat
+                return validated, grounder_lat
             else:
                 logger.info(
-                    f"[FAST BRAIN FALLBACK] Grounder peak_probability={grounder_conf:.3f} < {self.min_peak_probability}. "
-                    "Falling back to Cloud LLM."
+                    f"[FAIL-CLOSED GROUNDER] peak_probability={grounder_conf:.3f} < {self.min_peak_probability}. "
+                    "Returning fail-closed WAIT (cloud fallback disabled)."
+                )
+                return (
+                    Action(
+                        kind=ActionKind.WAIT,
+                        duration=0.5,
+                        reason=(
+                            f"Local grounder peak_probability={grounder_conf:.3f} below floor "
+                            f"{self.min_peak_probability:.2f}; fail-closed WAIT."
+                        ),
+                        confidence=grounder_conf if math.isfinite(grounder_conf) else 0.0,
+                        metadata={
+                            "fast_brain": True,
+                            "fail_closed": True,
+                            "low_confidence": True,
+                            "peak_probability": grounder_conf if math.isfinite(grounder_conf) else 0.0,
+                        },
+                    ),
+                    grounder_lat,
                 )
 
-        # 2. Cloud LLM Inference (Slow Brain)
-        action, latency_ms = self.client.predict_action(
-            image_bytes=observation.image_bytes,
-            goal=goal,
-            history=history,
-            step_index=step_index,
-            format=observation.format,
-        )
-        validated_action = self.validate_action(action)
+        # 2. Local Model Client / Embedded VLA Runtime (100% offline, zero external cloud LLM)
+        if self.client is not None:
+            if isinstance(self.client, CustomLLMClient) and not is_local_endpoint(
+                getattr(self.client, "endpoint", "")
+            ):
+                logger.warning(
+                    f"[FAIL-CLOSED] Blocked external cloud LLM endpoint '{getattr(self.client, 'endpoint', '')}'. "
+                    "Returning fail-closed WAIT."
+                )
+                return (
+                    Action(
+                        kind=ActionKind.WAIT,
+                        duration=0.5,
+                        reason="External cloud LLM endpoint blocked in 100% local VLA mode; fail-closed WAIT.",
+                        metadata={"fail_closed": True},
+                    ),
+                    0.0,
+                )
+            action, latency_ms = self.client.predict_action(
+                image_bytes=observation.image_bytes,
+                goal=goal,
+                history=history,
+                step_index=step_index,
+                format=observation.format,
+            )
+            validated_action = self.validate_action(action)
+        elif self._embedded_runtime is not None:
+            action, latency_ms = self._embedded_runtime.predict(
+                observation.image_bytes,
+                goal,
+                step_index=step_index,
+            )
+            validated_action = self.validate_action(action)
+        else:
+            logger.info("[FAIL-CLOSED] No local VLA engine or LocalVAMClient configured; returning fail-closed WAIT.")
+            return (
+                Action(
+                    kind=ActionKind.WAIT,
+                    duration=0.5,
+                    reason="No local VLA engine or LocalVAMClient configured; fail-closed WAIT.",
+                    metadata={"fail_closed": True},
+                ),
+                0.0,
+            )
 
         # 3. Shadow Mode: Run grounder in shadow, compare predictions, and log agreement
         if self.shadow_mode:
@@ -698,6 +816,8 @@ class AceAgent:
                 "grounder_latency_ms": round(grounder_lat, 2),
             }
             self.shadow_history.append(shadow_record)
+            if len(self.shadow_history) > 500:
+                del self.shadow_history[:-500]
             logger.info(
                 f"[SHADOW MODE] Goal='{goal}' | LLM={llm_coord} vs Grounder={grounder_coord} "
                 f"(peak_prob={grounder_conf:.3f}) | distance={distance_px if distance_px is not None else 'N/A'}px | agreed={agreed}"

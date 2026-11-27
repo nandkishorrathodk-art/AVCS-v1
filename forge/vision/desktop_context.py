@@ -38,9 +38,15 @@ class DesktopContextProvider(Protocol):
 
 
 class Win32DesktopContextProvider:
-    """Enumerates visible, titled top-level windows on Windows."""
+    """Enumerates visible, titled top-level windows on Windows (gated behind pure_rgb_only=False)."""
 
-    def __init__(self) -> None:
+    def __init__(self, pure_rgb_only: bool = True) -> None:
+        self.pure_rgb_only = bool(pure_rgb_only)
+        self._user32 = None
+        self._kernel32 = None
+        self._callback_type = None
+        if self.pure_rgb_only:
+            return
         if sys.platform != "win32":
             raise OSError("Win32 desktop context is only available on Windows.")
 
@@ -115,6 +121,16 @@ class Win32DesktopContextProvider:
             self._kernel32.CloseHandle(process)
 
     def snapshot(self) -> dict:
+        if getattr(self, "pure_rgb_only", True) or self._user32 is None:
+            return {
+                "source": "pure_rgb_only",
+                "status": "disabled",
+                "count": 0,
+                "count_semantics": "disabled_in_pure_rgb_only_mode",
+                "foreground_handle": None,
+                "windows": [],
+                "windows_skipped_during_enumeration": 0,
+            }
         foreground = int(self._user32.GetForegroundWindow() or 0)
         windows: list[DesktopWindow] = []
         skipped_during_enumeration = 0

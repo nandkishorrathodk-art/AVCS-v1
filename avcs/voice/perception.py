@@ -13,7 +13,8 @@ code path that returns a pixel, an embedding, or a coordinate to the brain.
 """
 from __future__ import annotations
 
-from typing import Optional
+import math
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -171,3 +172,203 @@ class GroundingPerception:
 
     def close(self) -> None:
         self._morphology.close()
+
+
+class LocalVLAPerception:
+    """Unified single-brain local VLA perception backed by ``FastVLAInferenceEngine``.
+
+    Implements the coordinate-free ``Perception`` protocol (``observe``,
+    ``frame``) plus ``grounding_evidence`` for the fail-closed capability
+    kernel without modifying or breaking ``EyePerception`` / ``GroundingPerception``.
+    """
+
+    def __init__(
+        self,
+        frame_source: Optional[object] = None,
+        engine: Optional[object] = None,
+        *,
+        eye: Optional[object] = None,
+        source: str = "screen",
+        peak_floor: float = 0.75,
+        default_confidence: float = 0.85,
+        session_id: str = "voice-vla",
+    ) -> None:
+        self._frame_source = frame_source
+        self._eye = eye
+        if frame_source is None and eye is None and source:
+            from avcs_sdk.eye_stream import EyeStream
+
+            self._eye = EyeStream(source=source)
+        if engine is None:
+            from avcs.runtime.vla_engine import get_default_fast_engine
+
+            engine = get_default_fast_engine()
+        self.engine = engine
+        self.peak_floor = float(peak_floor)
+        self.default_confidence = float(default_confidence)
+        self.session_id = session_id
+        self._last_frame: Optional[np.ndarray] = None
+        self._last_eye_frame: Optional[object] = None
+        self._last_result: Optional[Dict[str, Any]] = None
+
+    def _capture(self) -> Optional[np.ndarray]:
+        if self._frame_source is not None:
+            src = self._frame_source
+            if callable(src):
+                return src()
+            if hasattr(src, "capture"):
+                return src.capture()
+            if hasattr(src, "grab_screen"):
+                return src.grab_screen()
+            raise TypeError("frame_source must be callable or expose capture()/grab_screen()")
+        if self._eye is not None:
+            if hasattr(self._eye, "step"):
+                eye_frame = self._eye.step()
+                self._last_eye_frame = eye_frame
+                return getattr(eye_frame, "raw_frame", None)
+            if hasattr(self._eye, "grab_screen"):
+                return self._eye.grab_screen()
+        return None
+
+    @property
+    def capture_is_live(self) -> bool:
+        if self._frame_source is not None:
+            return False
+        flag = getattr(self._eye, "capture_is_live", None)
+        if flag is not None:
+            return bool(flag)
+        return self._eye is not None
+
+    def frame(self) -> Optional[np.ndarray]:
+        return self._last_frame
+
+    def observe(self, query: Optional[str] = None) -> ScreenObservation:
+        frame = self._capture()
+        self._last_frame = frame
+        if frame is None:
+            return ScreenObservation(
+                description="no screen available",
+                target_present=None,
+                stability="stable",
+                has_modal=False,
+                active_window="",
+                hotspot_count=0,
+            )
+
+        eye_frame = self._last_eye_frame
+        hotspots = list(getattr(eye_frame, "hotspots", []) or []) if eye_frame is not None else []
+        has_modal = bool(getattr(eye_frame, "has_popup", False)) if eye_frame is not None else False
+        is_stable = bool(getattr(eye_frame, "is_stable", True)) if eye_frame is not None else True
+
+        parts = ["local VLA perception active"]
+        if hotspots:
+            parts.append(f"screen shows {len(hotspots)} interactive element(s)")
+        if has_modal:
+            parts.append("a dialog has appeared")
+        if not is_stable:
+            parts.append("the screen is still changing")
+
+        target_present: Optional[bool] = True if hotspots else None
+        if query:
+            evidence = self.grounding_evidence(query)
+            if evidence is not None:
+                target_present = bool(
+                    evidence.candidate_point_norm is not None
+                    and math.isfinite(evidence.peak_probability)
+                    and evidence.peak_probability >= self.peak_floor
+                )
+
+        return ScreenObservation(
+            description="; ".join(parts),
+            target_present=target_present,
+            stability="stable" if is_stable else "changing",
+            has_modal=has_modal,
+            active_window="",
+            hotspot_count=len(hotspots),
+        )
+
+    def grounding_evidence(self, query: Optional[str]):
+        """Ground ``query`` via ``FastVLAInferenceEngine`` and return kernel evidence."""
+        if not query or self._last_frame is None:
+            return None
+        frame = self._last_frame
+        h, w = frame.shape[:2]
+        try:
+            res = self.engine.act(
+                frame,
+                instruction=query,
+                canvas_w=int(w),
+                canvas_h=int(h),
+                session_id=self.session_id,
+            )
+        except Exception:
+            return None
+        if not isinstance(res, dict):
+            return None
+        self._last_result = res
+
+        from avcs.control.capability import GroundingEvidence
+
+        action = str(res.get("action") or "").strip().lower()
+        coord = res.get("coordinate")
+        if action in ("wait", "stop", "none") or not isinstance(coord, (list, tuple)) or len(coord) < 2:
+            return GroundingEvidence(
+                candidate_point_norm=None,
+                peak_probability=0.0,
+                target_present=False,
+                authorized=False,
+                active_query=query,
+            )
+
+        try:
+            px = float(coord[0])
+            py = float(coord[1])
+        except (TypeError, ValueError):
+            return GroundingEvidence(
+                candidate_point_norm=None,
+                peak_probability=0.0,
+                target_present=False,
+                authorized=False,
+                active_query=query,
+            )
+        if not (math.isfinite(px) and math.isfinite(py)):
+            return GroundingEvidence(
+                candidate_point_norm=None,
+                peak_probability=0.0,
+                target_present=False,
+                authorized=False,
+                active_query=query,
+            )
+
+        nx = max(0.0, min(1.0, px / max(1.0, float(w))))
+        ny = max(0.0, min(1.0, py / max(1.0, float(h))))
+
+        raw_conf = res.get("peak_probability", res.get("confidence"))
+        if raw_conf is not None:
+            try:
+                peak = float(raw_conf)
+            except (TypeError, ValueError):
+                peak = 0.0
+            if not math.isfinite(peak):
+                return GroundingEvidence(
+                    candidate_point_norm=None,
+                    peak_probability=0.0,
+                    target_present=False,
+                    authorized=False,
+                    active_query=query,
+                )
+        else:
+            peak = self.default_confidence
+
+        return GroundingEvidence(
+            candidate_point_norm=(nx, ny),
+            peak_probability=peak,
+            target_present=peak >= self.peak_floor,
+            authorized=False,
+            active_query=query,
+        )
+
+    def close(self) -> None:
+        close = getattr(self._eye, "close", None)
+        if callable(close):
+            close()

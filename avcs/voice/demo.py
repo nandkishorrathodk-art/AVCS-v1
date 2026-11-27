@@ -30,13 +30,46 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from typing import List, Optional
 
-from avcs.control.capability import CapabilityKernel
+from avcs.control.capability import MUTATING_OPS, CapabilityKernel
 from avcs.voice.assistant import Assistant, StaticPerception
-from avcs.voice.brain import ConversationBrain
+from avcs.voice.brain import ConversationBrain, is_loopback_endpoint
 from avcs.voice.stt import NullEngine, default_stt_engine
 from avcs.voice.tts import EspeakNgEngine, NullEngine as NullTtsEngine, Speaker, VoiceProfile
+
+
+def resolve_grants(raw_grants: Optional[List[str]]) -> List[str]:
+    """Expand ``--grant`` arguments while keeping empty grants fail-closed.
+
+    Passing ``"all"`` unlocks all ``MUTATING_OPS``; omitting ``--grant`` or
+    passing an empty sequence returns ``[]``.
+    """
+    if not raw_grants:
+        return []
+    cleaned = [str(g).strip().lower() for g in raw_grants if str(g).strip()]
+    if "all" in cleaned:
+        return sorted(MUTATING_OPS)
+    return cleaned
+
+
+def _validate_llm_endpoint(endpoint: Optional[str]) -> Optional[str]:
+    """Enforce loopback-only ``--llm-endpoint`` URLs (reject external cloud APIs)."""
+    if not endpoint:
+        return None
+    clean = endpoint.strip()
+    if not clean:
+        return None
+    if not is_loopback_endpoint(clean):
+        msg = (
+            f"--llm-endpoint {clean!r} rejected: only loopback endpoints "
+            "(127.0.0.1, localhost, ::1) are permitted."
+        )
+        print(f"warning: {msg}", file=sys.stderr)
+        raise ValueError(msg)
+    return clean
 
 
 def _voice_profile(args) -> VoiceProfile:
@@ -85,14 +118,27 @@ def _wav_turn_reader(spec: str):
 def build_assistant(args) -> Assistant:
     from avcs.reasoning.provider import LLMReasoningProvider
 
-    provider = LLMReasoningProvider(
-        endpoint=args.llm_endpoint or None,
-        model=args.llm_model or None,
-    )
-    brain = ConversationBrain(
-        provider=provider,
-        language=getattr(args, "voice_language", "hinglish"),
-    )
+    llm_endpoint = _validate_llm_endpoint(getattr(args, "llm_endpoint", None))
+    llm_model = getattr(args, "llm_model", None) or None
+    if llm_endpoint:
+        provider = LLMReasoningProvider(
+            endpoint=llm_endpoint,
+            api_key=(os.environ.get("AVCS_LLM_API_KEY") or "").strip(),
+            model=llm_model,
+        )
+        brain = ConversationBrain(
+            provider=provider,
+            language=getattr(args, "voice_language", "hinglish"),
+        )
+    else:
+        # Delegate to ConversationBrain(provider=None) so loopback-only enforcement
+        # and offline RuleBrain fallback apply consistently without cloud calls.
+        brain = ConversationBrain(
+            provider=None,
+            language=getattr(args, "voice_language", "hinglish"),
+        )
+        if llm_model and getattr(brain, "provider", None) is not None:
+            brain.provider.model = llm_model
 
     if args.silent:
         speaker = Speaker(engine=NullTtsEngine(), profile=_voice_profile(args))
@@ -112,7 +158,20 @@ def build_assistant(args) -> Assistant:
         record_audio = _wav_turn_reader(args.audio)
 
     perception = None
-    if args.lexicon_eyes:
+    if getattr(args, "local_vla", False):
+        try:
+            from avcs.voice.perception import LocalVLAPerception
+
+            perception = LocalVLAPerception(
+                source="screen" if not getattr(args, "synthetic_eyes", False) else "synthetic"
+            )
+        except Exception as exc:
+            print(
+                f"warning: local VLA perception unavailable ({exc}); running without perception.",
+                file=sys.stderr,
+            )
+            perception = None
+    elif args.lexicon_eyes:
         # Labelled-control grounding via the AVC lexicon. This is the path that
         # actually authorizes a click: it returns a real candidate point from a
         # recognised control label, where the goal grounder's gate collapses.
@@ -164,8 +223,9 @@ def build_assistant(args) -> Assistant:
     floor = args.peak_floor
     if floor is None:
         floor = 0.45 if args.lexicon_eyes else 0.75
+    granted_ops = resolve_grants(getattr(args, "grant", None))
     kernel = CapabilityKernel(
-        granted_ops=args.grant or (),
+        granted_ops=granted_ops,
         min_peak_probability=floor,
         path_roots=args.path_roots,
         allowed_apps=args.allowed_apps,
@@ -185,7 +245,7 @@ def build_assistant(args) -> Assistant:
                 "actions will be refused.",
                 file=sys.stderr,
             )
-    elif args.lexicon_eyes:
+    elif args.lexicon_eyes or (granted_ops and (getattr(args, "local_vla", False) or getattr(args, "eyes", False))):
         # A granted click with no hand attached is reported as allowed but not
         # performed, which reads as a gap. A virtual hand records the coordinate
         # the click resolved to and moves no cursor, so the loop is visibly
@@ -233,6 +293,10 @@ def _check_llm(assistant, args) -> None:
     "the process ran" for "the brain works".
     """
     provider = assistant.brain.provider
+    endpoint = getattr(provider, "endpoint", None)
+    if endpoint and not is_loopback_endpoint(endpoint):
+        print(f"[LLM CHECK] BLOCKED: non-loopback endpoint {endpoint!r} is quarantined.")
+        raise SystemExit(2)
     if not getattr(provider, "api_key", ""):
         print("[LLM CHECK] no API key configured.")
         print("  set AVCS_LLM_API_KEY (and optionally AVCS_LLM_ENDPOINT / AVCS_LLM_MODEL),")
@@ -287,18 +351,21 @@ def main() -> None:
     ap.add_argument("--eyes", action="store_true", help="use real pure-pixel screen perception")
     ap.add_argument("--lexicon-eyes", action="store_true",
                     help="ground labelled controls via the AVC lexicon (authorizes clicks)")
+    ap.add_argument("--local-vla", action="store_true",
+                    help="use LocalVLAPerception (FastVLAInferenceEngine) for unified local VLA perception")
     ap.add_argument("--synthetic-eyes", action="store_true", help="force the headless frame buffer")
     ap.add_argument("--desktop-eyes", action="store_true",
                     help="with --lexicon-eyes, read a synthetic desktop with real controls")
     ap.add_argument("--ground", action="store_true",
                     help="with --eyes, also run the trained grounder so the gate can pass")
     ap.add_argument("--llm-endpoint", type=str, default=None,
-                    help="override the LLM endpoint (default: env or local Ollama)")
+                    help="override the local loopback LLM endpoint (127.0.0.1, localhost, ::1)")
     ap.add_argument("--llm-model", type=str, default=None, help="override the LLM model name")
     ap.add_argument("--voice-language", choices=["hinglish", "english"], default="hinglish",
                     help="mouth voice; default hinglish since the user speaks it")
-    ap.add_argument("--grant", nargs="*", default=["click"],
-                    help="mutating ops allowed; pass no values for a fully fail-closed run")
+    ap.add_argument("--grant", nargs="*", default=[],
+                    help="mutating ops allowed (fail-closed empty default; pass '--grant all' for all "
+                         "MUTATING_OPS, or list ops like click double_click right_click drag type_text press_key scroll)")
     ap.add_argument("--peak-floor", type=float, default=None,
                     help="kernel grounding floor (default: 0.45 for --lexicon-eyes, else 0.75)")
     ap.add_argument("--live", action="store_true", help="authorize REAL mouse/keyboard actuation")
@@ -321,6 +388,11 @@ def main() -> None:
                     help="probe the configured LLM endpoint with one minimal request and "
                          "report honestly whether the key, endpoint and model work, then exit")
     args = ap.parse_args()
+
+    try:
+        _validate_llm_endpoint(args.llm_endpoint)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     if args.get_ears:
         from avcs.voice.stt import download_vosk_model, find_vosk_model

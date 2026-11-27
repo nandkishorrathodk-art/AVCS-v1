@@ -168,14 +168,19 @@ class EyeStream(StreamingVisualCortexV2):
             self.weights_status = f"weights file not found: {weights_path}"
             return False
 
-        is_vault = str(weights_path).endswith(".avcs")
-        if not is_vault:
-            try:
-                with open(weights_path, "rb") as f:
-                    header = f.read(5)
-                is_vault = (header == b"AVCS\x01")
-            except Exception:
-                is_vault = False
+        is_vault = False
+        try:
+            with open(weights_path, "rb") as f:
+                header = f.read(5)
+            is_vault = (header == b"AVCS\x01")
+        except Exception:
+            header = b""
+            is_vault = False
+
+        if not is_vault and str(weights_path).endswith(".avcs"):
+            # Only treat .avcs as encrypted vault unless it is clearly a plain PyTorch archive
+            if header[:2] not in (b"PK", b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05"):
+                is_vault = True
 
         if is_vault:
             try:
@@ -227,6 +232,8 @@ class EyeStream(StreamingVisualCortexV2):
             ckpt_dict = checkpoint["state_dict"]
         elif "model_state_dict" in checkpoint and isinstance(checkpoint["model_state_dict"], dict):
             ckpt_dict = checkpoint["model_state_dict"]
+        elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
+            ckpt_dict = checkpoint["model"]
         else:
             ckpt_dict = checkpoint
 

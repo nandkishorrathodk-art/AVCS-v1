@@ -12,6 +12,7 @@ import mmap
 import os
 import struct
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -52,6 +53,7 @@ class SharedMemoryBroadcaster:
         self._mmap: Optional[mmap.mmap] = None
         self._file = None
         self._temp_path: Optional[str] = None
+        self._lock = threading.Lock()
         self._initialize_buffer()
 
     def _initialize_buffer(self) -> None:
@@ -67,8 +69,13 @@ class SharedMemoryBroadcaster:
                 self._file = open(self._temp_path, "w+b")
         else:
             self._file = open(self._temp_path, "w+b")
-        self._file.truncate(self.buffer_size)
-        self._file.flush()
+        try:
+            cur_size = os.path.getsize(self._temp_path)
+        except OSError:
+            cur_size = -1
+        if cur_size != self.buffer_size:
+            self._file.truncate(self.buffer_size)
+            self._file.flush()
 
         if os.name == "nt":
             self._mmap = mmap.mmap(
@@ -90,54 +97,54 @@ class SharedMemoryBroadcaster:
         Returns:
             sequence_number of the published frame
         """
-        if self._mmap is None:
-            return 0
+        with self._lock:
+            if self._mmap is None:
+                return 0
 
-        self.seq_num += 1
-        now = time.time()
+            self.seq_num += 1
+            now = time.time()
 
-        if hasattr(state_or_dict, "to_dict"):
-            payload_dict = state_or_dict.to_dict()
-        elif isinstance(state_or_dict, dict):
-            payload_dict = state_or_dict
-        else:
-            payload_dict = {"frame": self.seq_num}
+            if hasattr(state_or_dict, "to_dict"):
+                payload_dict = state_or_dict.to_dict()
+            elif isinstance(state_or_dict, dict):
+                payload_dict = state_or_dict
+            else:
+                payload_dict = {"frame": self.seq_num}
 
-        raw_json = json.dumps(payload_dict).encode("utf-8")
-        payload_len = len(raw_json)
-
-        # Max payload capacity check
-        max_payload = self.buffer_size - HEADER_SIZE
-        if payload_len > max_payload:
-            payload_dict = {
-                "error": "payload_truncated",
-                "original_len": payload_len,
-                "max_capacity": max_payload,
-            }
             raw_json = json.dumps(payload_dict).encode("utf-8")
             payload_len = len(raw_json)
 
-        crc = binascii.crc32(raw_json) & 0xFFFFFFFF
+            # Max payload capacity check
+            max_payload = self.buffer_size - HEADER_SIZE
+            if payload_len > max_payload:
+                payload_dict = {
+                    "error": "payload_truncated",
+                    "original_len": payload_len,
+                    "max_capacity": max_payload,
+                }
+                raw_json = json.dumps(payload_dict).encode("utf-8")
+                payload_len = len(raw_json)
 
-        # Pack binary header
-        header = struct.pack(
-            HEADER_FORMAT,
-            MAGIC_HEADER,
-            IPC_VERSION,
-            0,  # flags
-            self.seq_num,
-            now,
-            payload_len,
-            crc,
-        )
+            crc = binascii.crc32(raw_json) & 0xFFFFFFFF
 
-        # Write to memory mapped buffer
-        self._mmap.seek(0)
-        self._mmap.write(header)
-        self._mmap.write(raw_json)
-        self._mmap.flush()
+            # Pack binary header
+            header = struct.pack(
+                HEADER_FORMAT,
+                MAGIC_HEADER,
+                IPC_VERSION,
+                0,  # flags
+                self.seq_num,
+                now,
+                payload_len,
+                crc,
+            )
 
-        return self.seq_num
+            # Write payload before finalizing header seq/crc? Keep atomic-style write:
+            self._mmap.seek(0)
+            self._mmap.write(header)
+            self._mmap.write(raw_json)
+
+            return self.seq_num
 
     def close(self) -> None:
         """Closes memory map and releases file handle."""
@@ -220,6 +227,10 @@ class SharedMemoryReader:
         if seq == self._last_seq:
             return None  # No new frame
 
+        max_payload = max(0, self.buffer_size - HEADER_SIZE)
+        if payload_len <= 0 or payload_len > max_payload:
+            return None
+
         raw_payload = self._mmap.read(payload_len)
         if len(raw_payload) < payload_len:
             return None
@@ -228,12 +239,15 @@ class SharedMemoryReader:
         if actual_crc != expected_crc:
             return None  # Frame checksum mismatch or partial write
 
-        self._last_seq = seq
-
         try:
             data = json.loads(raw_payload.decode("utf-8"))
         except Exception:
             return None
+
+        if not isinstance(data, dict) or data.get("error") == "payload_truncated":
+            return None
+
+        self._last_seq = seq
 
         return IPCPerceptionFrame(
             sequence_number=seq,

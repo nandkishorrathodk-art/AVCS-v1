@@ -33,6 +33,9 @@ app = FastAPI(
 )
 
 # Global lazy-loaded cloud neural engine
+import threading
+
+_init_lock = threading.Lock()
 _eye: Optional[HumanEye] = None
 _fovea: Optional[FovealAcuityEngine] = None
 _focus_detector: Optional[VisualFocusDetector] = None
@@ -44,11 +47,17 @@ _grounder_load_attempted = False
 
 def get_engine() -> Tuple[HumanEye, FovealAcuityEngine, VisualFocusDetector, NeuromuscularServoingController]:
     global _eye, _fovea, _focus_detector, _servoing
-    if _eye is None:
-        _eye = HumanEye(source="synthetic", load_weights=True)
-        _fovea = FovealAcuityEngine(device="cpu", load_weights=True)
-        _focus_detector = VisualFocusDetector(history_maxlen=35)
-        _servoing = NeuromuscularServoingController(driver=VirtualCursorDriver())
+    if _eye is None or _servoing is None:
+        with _init_lock:
+            if _eye is None:
+                eye = HumanEye(source="synthetic", load_weights=True)
+                fovea = FovealAcuityEngine(device="cpu", load_weights=True)
+                focus_detector = VisualFocusDetector(history_maxlen=35)
+                servoing = NeuromuscularServoingController(driver=VirtualCursorDriver())
+                _fovea = fovea
+                _focus_detector = focus_detector
+                _servoing = servoing
+                _eye = eye
     return _eye, _fovea, _focus_detector, _servoing
 
 
@@ -68,7 +77,12 @@ def verify_api_key(x_api_key: Optional[str] = Header(None)) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Inference service authentication is not configured.",
         )
-    if not x_api_key or not hmac.compare_digest(x_api_key, master_key):
+    if not x_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header",
+        )
+    if not hmac.compare_digest(x_api_key.encode("utf-8"), master_key.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key header",
@@ -90,15 +104,20 @@ def get_grounder() -> Optional[GoalConditionedGrounder]:
     if _grounder_load_attempted:
         return _grounder
 
-    _grounder_load_attempted = True
-    checkpoint = _grounding_checkpoint_path()
-    try:
-        _grounder = load_grounding_checkpoint(checkpoint, device="cpu")
-        _grounder_loaded = _grounder.is_trained
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        print(f"[AVCS] Goal-grounding checkpoint unavailable: {exc}", file=sys.stderr)
-        _grounder = None
-        _grounder_loaded = False
+    with _init_lock:
+        if _grounder_load_attempted:
+            return _grounder
+        checkpoint = _grounding_checkpoint_path()
+        try:
+            g = load_grounding_checkpoint(checkpoint, device="cpu")
+            _grounder = g
+            _grounder_loaded = g.is_trained
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            print(f"[AVCS] Goal-grounding checkpoint unavailable: {exc}", file=sys.stderr)
+            _grounder = None
+            _grounder_loaded = False
+        finally:
+            _grounder_load_attempted = True
     return _grounder
 
 

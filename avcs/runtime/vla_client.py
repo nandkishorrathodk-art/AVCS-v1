@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import logging
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -45,6 +46,8 @@ class VLAClient:
         self.jpeg_quality = jpeg_quality
         self.timeout_s = timeout_s
         self._ws: Optional[Any] = None
+        self._ws_lock = threading.Lock()
+        self._http_act_url = self._resolve_http_url()
 
     @staticmethod
     def _strip_endpoint_suffixes(url: str) -> str:
@@ -92,7 +95,7 @@ class VLAClient:
                 if hasattr(self._ws, "connected") and self._ws.connected:
                     return self._ws
             except Exception:
-                self.close()
+                self._close_unlocked()
 
         if websocket is None:
             raise RuntimeError("websocket-client package is required for WebSocket transport: pip install websocket-client")
@@ -103,6 +106,10 @@ class VLAClient:
         return self._ws
 
     def close(self) -> None:
+        with self._ws_lock:
+            self._close_unlocked()
+
+    def _close_unlocked(self) -> None:
         if self._ws is not None:
             try:
                 self._ws.close()
@@ -161,8 +168,6 @@ class VLAClient:
         t_enc_ms: float,
         seq: Optional[Union[int, str]] = None,
     ) -> Dict[str, Any]:
-        ws = self._ensure_ws_connected(instruction, width, height)
-
         # Build framed packet: [4-byte header_len] [header JSON] [jpeg binary]
         header_dict: Dict[str, Any] = {
             "instruction": instruction,
@@ -175,12 +180,16 @@ class VLAClient:
         header_bytes = json.dumps(header_dict).encode("utf-8")
         packet = len(header_bytes).to_bytes(4, byteorder="big") + header_bytes + jpeg_bytes
 
-        t_net_start = time.perf_counter()
-        ws.send_binary(packet)
-        raw_msg = ws.recv()
-        t_roundtrip_ms = (time.perf_counter() - t_net_start) * 1000.0
+        with self._ws_lock:
+            ws = self._ensure_ws_connected(instruction, width, height)
+            t_net_start = time.perf_counter()
+            ws.send_binary(packet)
+            raw_msg = ws.recv()
+            t_roundtrip_ms = (time.perf_counter() - t_net_start) * 1000.0
 
         result = json.loads(raw_msg)
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(f"VLA server error: {result['error']}")
         result["compression_ms"] = round(t_enc_ms, 2)
         result["roundtrip_ms"] = round(t_roundtrip_ms, 2)
         result["payload_bytes"] = len(jpeg_bytes)

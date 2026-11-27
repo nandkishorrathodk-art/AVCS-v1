@@ -1,0 +1,23 @@
+{
+  "phase": "phase2_gate2",
+  "gate2_passed": true,
+  "golden_diagnostic": {
+    "total_episodes": 500,
+    "passed_episodes": 500,
+    "pass_rate": 1.0,
+    "p95_sync_error_ms": 4.558
+  },
+  "dataloader_benchmark": {
+    "decoded_frames": 5000,
+    "elapsed_s": 1.775,
+    "frames_per_sec": 2817.2
+  },
+  "lerobot_patches_verified": true,
+  "visual_audit_frames_written": [
+    "benchmarks\\results\\phase2_visual_audit\\audit_golden_diagnostic_ep_0000_000.jpg",
+    "benchmarks\\results\\phase2_visual_audit\\audit_golden_diagnostic_ep_0000_001.jpg",
+    "benchmarks\\results\\phase2_visual_audit\\audit_golden_diagnostic_ep_0000_002.jpg",
+    "benchmarks\\results\\phase2_visual_audit\\audit_golden_diagnostic_ep_0000_003.jpg",
+    "benchmarks\\results\\phase2_visual_audit\\audit_golden_diagnostic_ep_0000_004.jpg"
+  ]
+}

@@ -1,18 +1,14 @@
-"""[5] llm_bridge.py: Live 2-Way Communication Bridge (AVCS <---> LLM Stream).
+"""[5] llm_bridge.py: Local Single-Brain VLA Bridge (AVCS <---> Local VLA Engine).
 
 Connects the real-time visual narrator, foveal vision streams, and motor hands
-to System 2 LLMs (Gemini Flash, Claude Sonnet, or Meta Llama 3.2). Enables the
-LLM to guide execution with multimodal foveal high-acuity patch transport and
-dense visual statistics.
-
-Transport is a plain OpenAI-compatible ``/chat/completions`` POST over the
-standard library, supporting both text and multimodal image payloads.
+strictly through the self-contained local VLA engine (Qwen2.5-VL-3B + GUI-Actor +
+ParallelActionHeads). Zero external cloud LLM endpoints or outbound HTTP APIs.
 
 Invariants:
 - Pure-pixel security: zero OCR, zero DOM, zero UIA.
-- Application agnosticism: zero hardcoded proprietary application names.
+- 100% offline local VLA: zero external cloud calls (OpenAI, Anthropic, Gemini, api.parthlabs.in).
 - Pure ASCII: 100% pure ASCII characters.
-- Coordinate privacy: zero coordinate arrays or bounding boxes in prompts.
+- Coordinate privacy: zero coordinate arrays or bounding boxes in dialogue prompts.
 """
 from __future__ import annotations
 
@@ -21,19 +17,27 @@ import io
 import json
 import os
 import re
-import urllib.error
-import urllib.request
+import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
 
-from avcs.reasoning.credentials import extract_message_text
-
 from .narrator import LiveCommentary
 
-DEFAULT_BASE_URL = "https://api.parthlabs.in/v1"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_local_url(url: str) -> bool:
+    """Return True only when url points to a local loopback host."""
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in ("http", "https", "ws", "wss") and host in _LOCAL_HOSTS
 
 
 def encode_patch_to_base64(patch: np.ndarray) -> str:
@@ -98,18 +102,113 @@ def summarize_foveal_patches(patches: List[np.ndarray]) -> str:
     return "[Dense Foveal Vision Statistics]:\n" + "\n".join(f"- {s}" for s in summaries)
 
 
+_ACTION_MAP: Dict[str, str] = {
+    "left_click": "click",
+    "click": "click",
+    "primary_click": "click",
+    "mouse_click": "click",
+    "right_click": "right_click",
+    "secondary_click": "right_click",
+    "double_click": "double_click",
+    "triple_click": "triple_click",
+    "mouse_move": "mouse_move",
+    "move": "mouse_move",
+    "hover": "mouse_move",
+    "cursor_move": "mouse_move",
+    "left_click_drag": "left_click_drag",
+    "drag": "left_click_drag",
+    "drag_start": "left_click_drag",
+    "scroll": "scroll",
+    "mouse_scroll": "scroll",
+    "wheel": "scroll",
+    "key": "hotkey",
+    "hotkey": "hotkey",
+    "press": "hotkey",
+    "press_key": "hotkey",
+    "shortcut": "hotkey",
+    "key_press": "hotkey",
+    "type": "type",
+    "type_text": "type",
+    "input_text": "type",
+    "write": "type",
+    "wait": "wait",
+    "sleep": "wait",
+    "delay": "wait",
+    "stop": "finish",
+    "finish": "finish",
+    "done": "finish",
+    "complete": "finish",
+    "abort": "abort",
+    "switch_app": "switch_app",
+    "recover": "recover",
+}
+_VALID_COMMANDS = frozenset(_ACTION_MAP.values())
+_POINTER_COMMANDS = frozenset(
+    {"click", "right_click", "double_click", "triple_click", "mouse_move", "left_click_drag"}
+)
+
+
+def _map_action_name(raw_action: str) -> str:
+    """Map raw VLA/runtime action primitive names onto canonical LLMCommand actions."""
+    return _ACTION_MAP.get(str(raw_action or "").strip().lower(), "wait")
+
+
+def _coerce_coord(value: Any) -> Optional[Tuple[int, int]]:
+    """Convert a 2-element sequence into an integer (x, y) tuple, or None."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        fx, fy = float(value[0]), float(value[1])
+        if not (np.isfinite(fx) and np.isfinite(fy)):
+            return None
+        return (int(round(fx)), int(round(fy)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_keys(value: Any) -> Optional[List[str]]:
+    """Normalize key names from string or sequence into a non-empty list."""
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split("+") if p.strip()]
+        return parts or None
+    if isinstance(value, (list, tuple)):
+        parts = [str(k).strip() for k in value if str(k).strip()]
+        return parts or None
+    return None
+
+
+def _coerce_scroll_delta(value: Any) -> Optional[Tuple[int, int]]:
+    """Normalize scroll delta (dx, dy) or scalar vertical delta."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not np.isfinite(float(value)):
+            return None
+        return (0, int(round(float(value))))
+    return _coerce_coord(value)
+
+
 @dataclass(frozen=True)
 class LLMCommand:
-    """Action directive emitted by System 2 LLM."""
-    action: str                  # "click", "type", "wait", "finish", "abort", "switch_app", "hotkey", "recover"
+    """Action directive emitted by the local VLA engine."""
+    action: str                  # "click", "right_click", "double_click", "triple_click", "mouse_move", "left_click_drag", "scroll", "type", "hotkey", "wait", "finish", "abort", "switch_app", "recover"
     target: Optional[str] = None # Description of target element
     text: Optional[str] = None   # Text to type
     reason: Optional[str] = None # Cognitive rationale
-    source: str = "llm"          # "llm" or "heuristic_fallback"
+    source: str = "local_vla"    # "local_vla" or "heuristic_fallback"
+    coordinate: Optional[Tuple[int, int]] = None
+    start_coordinate: Optional[Tuple[int, int]] = None
+    end_coordinate: Optional[Tuple[int, int]] = None
+    keys: Optional[List[str]] = None
+    scroll_delta: Optional[Tuple[int, int]] = None
 
 
 class LLMBridge:
-    """The 2-way streaming dialogue bridge between AVCS and System 2."""
+    """Local single-brain VLA bridge between AVCS perception and motor control.
+
+    All external cloud LLM endpoints (OpenAI, Anthropic, Gemini, api.parthlabs.in)
+    have been removed. Perception, action prediction, and dialogue route strictly
+    through the local VLA engine (in-process ``EmbeddedVAMRuntime`` or a local
+    loopback ``FastVLAInferenceEngine`` server).
+    """
 
     def __init__(
         self,
@@ -118,126 +217,164 @@ class LLMBridge:
         base_url: Optional[str] = None,
         timeout: float = 30.0,
         vision_enabled: bool = False,
+        vla_engine: Optional[Any] = None,
     ) -> None:
-        """``vision_enabled`` defaults to False to honor the System 1/System 2
-        boundary in ``docs/AVCS_ENGINEERING_RULES.md``: screen images, crops and
-        their encodings must not be sent to System 2. Enabling it is an explicit
-        opt-in that a caller (and a product/privacy decision) must make, not a
-        default a caller inherits silently.
-        """
-        self.api_key = (
-            api_key
-            or os.environ.get("AVC_API_KEY")
-            or os.environ.get("AVCS_API_KEY")
-            or os.environ.get("AVCS_LLM_API_KEY")
-            or os.environ.get("GEMINI_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-        )
-        self.base_url = (
+        self.api_key = ""
+        raw_url = (
             base_url
-            or os.environ.get("AVC_BASE_URL")
-            or os.environ.get("AVCS_BASE_URL")
-            or os.environ.get("AVCS_LLM_BASE_URL")
-            or os.environ.get("AVCS_LLM_ENDPOINT")
+            or os.environ.get("AVCS_VLA_SERVER_URL")
+            or os.environ.get("AVCS_LOCAL_VAM_ENDPOINT")
             or DEFAULT_BASE_URL
         ).rstrip("/")
-        explicit_model = model_name or os.environ.get("AVC_MODEL") or os.environ.get("AVCS_LLM_MODEL")
+        if not _is_local_url(raw_url):
+            raise ValueError(
+                f"External cloud LLM URLs are disabled ({raw_url!r}); "
+                "AVCS operates 100% locally via the local VLA engine."
+            )
+        self.base_url = raw_url
         self.model_name = (
-            explicit_model
-            or ("avc-reasoner-v1" if "api.parthlabs.in" in self.base_url else "gemini-flash-lite-latest")
+            model_name
+            or os.environ.get("AVCS_LOCAL_VAM_MODEL")
+            or "Qwen2.5-VL-3B-Instruct"
         )
-
-        # With no key in the environment, fall back to the platform-managed key
-        # and its proxy endpoint. This is what makes the packaged assistant live
-        # out of the box inside a managed runtime instead of quietly degrading to
-        # the heuristic planner. An explicitly empty api_key ("") still means
-        # "force offline" -- see resolve_llm_credentials.
-        self.credential_source = "user" if self.api_key else "none"
-        if api_key is None and not self.api_key:
-            from avcs.reasoning.credentials import resolve_llm_credentials
-
-            creds = resolve_llm_credentials(endpoint=base_url)
-            if creds.live:
-                self.api_key = creds.api_key
-                self.base_url = creds.endpoint.rstrip("/")
-                self.credential_source = creds.source
-                # A model name the caller never chose must not outlive the
-                # endpoint it belonged to; use the one the new endpoint serves.
-                if not explicit_model:
-                    self.model_name = creds.model
+        self.credential_source = "local_vla"
         self.timeout = timeout
         self.vision_enabled = vision_enabled
+        self._vla_engine = vla_engine
+        self._vla_engine_attempted = False
+        self._embedded_runtime: Optional[Any] = None
+        self._embedded_attempted = False
         self.conversation_history: List[Dict[str, Any]] = []
 
-    # ------------------------------------------------------------------ #
-    # Real model transport
-    # ------------------------------------------------------------------ #
-    def _call_llm(
+    def _get_local_vla_engine(self) -> Optional[Any]:
+        """Lazily initialize FastVLAInferenceEngine for local single-brain VLA inference."""
+        if self._vla_engine is not None:
+            return self._vla_engine
+        if self._vla_engine_attempted:
+            return None
+        self._vla_engine_attempted = True
+        try:
+            from avcs.runtime.vla_engine import FastVLAInferenceEngine
+            self._vla_engine = FastVLAInferenceEngine()
+            return self._vla_engine
+        except Exception:
+            return None
+
+    def _get_embedded_runtime(self) -> Optional[Any]:
+        """Lazily initialize the in-process EmbeddedVAMRuntime for local inference."""
+        if self._embedded_runtime is not None:
+            return self._embedded_runtime
+        if self._embedded_attempted:
+            return None
+        self._embedded_attempted = True
+        try:
+            from avcs.models.local_model import EmbeddedVAMRuntime
+            self._embedded_runtime = EmbeddedVAMRuntime()
+            return self._embedded_runtime
+        except Exception:
+            return None
+
+    def _call_local_vla(
         self,
-        prompt: str,
+        user_goal: str,
+        commentary: LiveCommentary,
         fovea_patches: Optional[List[np.ndarray]] = None,
-    ) -> str:
-        """POST the prompt and optional multimodal foveal patches to OpenAI-compatible endpoint."""
-        if not self.api_key:
-            raise RuntimeError("no API key configured for LLMBridge")
-
-        if fovea_patches and len(fovea_patches) > 0:
-            content_items: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        frame: Optional[np.ndarray] = None,
+    ) -> Optional[LLMCommand]:
+        """Run local single-brain VLA inference without any external cloud calls."""
+        # Encode frame or representative patch for in-process VLA runtime
+        img_array = frame if isinstance(frame, np.ndarray) and frame.size > 0 else None
+        if img_array is None and fovea_patches:
             for patch in fovea_patches:
-                try:
-                    b64_png = encode_patch_to_base64(patch)
-                    content_items.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64_png}"},
-                    })
-                except Exception:
-                    pass
-            messages = [{"role": "user", "content": content_items}]
-        else:
-            messages = [{"role": "user", "content": prompt}]
+                if isinstance(patch, np.ndarray) and patch.size > 0:
+                    img_array = patch
+                    break
 
-        payload = json.dumps(
-            {
-                "model": self.model_name,
-                "messages": messages,
-                "temperature": 0.0,
-            }
-        ).encode("utf-8")
+        image_bytes = b""
+        if img_array is not None:
+            buf = io.BytesIO()
+            if img_array.ndim == 2:
+                Image.fromarray(img_array.astype(np.uint8), mode="L").convert("RGB").save(buf, format="JPEG")
+            else:
+                Image.fromarray(img_array[:, :, :3].astype(np.uint8), mode="RGB").save(buf, format="JPEG")
+            image_bytes = buf.getvalue()
 
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
+        # 1. FastVLAInferenceEngine (injected or lazily initialized)
+        engine = self._get_local_vla_engine()
+        if engine is not None and img_array is not None:
+            try:
+                if hasattr(engine, "act") and callable(engine.act):
+                    res = engine.act(img_array, user_goal)
+                elif hasattr(engine, "infer") and callable(engine.infer):
+                    res = engine.infer(img_array, user_goal)
+                else:
+                    res = None
 
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+                if isinstance(res, dict):
+                    raw_act = str(res.get("action") or res.get("action_name") or "wait").strip().lower()
+                    mapped = _map_action_name(raw_act)
+                    coord = _coerce_coord(res.get("coordinate"))
+                    start_coord = _coerce_coord(res.get("start_coordinate"))
+                    end_coord = _coerce_coord(res.get("end_coordinate"))
+                    keys = _coerce_keys(res.get("keys"))
+                    scroll_delta = _coerce_scroll_delta(res.get("scroll_delta"))
+                    text_val = str(res["text"]) if res.get("text") is not None else None
+                    target_val = (
+                        str(res["target"])
+                        if res.get("target") is not None
+                        else (user_goal if mapped in _POINTER_COMMANDS else None)
+                    )
+                    return LLMCommand(
+                        action=mapped,
+                        target=target_val,
+                        text=text_val,
+                        reason=str(res.get("reason") or f"Local FastVLAInferenceEngine predicted {raw_act}"),
+                        source="local_vla",
+                        coordinate=coord,
+                        start_coordinate=start_coord,
+                        end_coordinate=end_coord,
+                        keys=keys,
+                        scroll_delta=scroll_delta,
+                    )
+            except Exception:
+                pass
 
-        # Reasoning models may return content:null with the answer in
-        # reasoning_content; the shared extractor falls through the known fields
-        # instead of indexing ["content"] and raising an opaque TypeError.
-        text = extract_message_text(body)
-        if not text:
-            raise ValueError("model returned an empty message")
-        return text
+        # 2. In-process EmbeddedVAMRuntime (zero-network local CPU neural weights)
+        runtime = self._get_embedded_runtime()
+        if runtime is not None and image_bytes:
+            try:
+                act_obj, _lat = runtime.predict(image_bytes, user_goal, step_index=len(self.conversation_history) // 2 + 1)
+                act_kind = getattr(act_obj.kind, "value", str(act_obj.kind)).strip().lower()
+                mapped = _map_action_name(act_kind)
+                return LLMCommand(
+                    action=mapped,
+                    target=user_goal if mapped in _POINTER_COMMANDS else None,
+                    text=getattr(act_obj, "text", None),
+                    reason=getattr(act_obj, "reason", None) or "Local EmbeddedVAMRuntime directive",
+                    source="local_vla",
+                    coordinate=_coerce_coord(getattr(act_obj, "coordinate", None)),
+                    start_coordinate=_coerce_coord(getattr(act_obj, "start_coordinate", None)),
+                    end_coordinate=_coerce_coord(getattr(act_obj, "end_coordinate", None)),
+                    keys=_coerce_keys(getattr(act_obj, "keys", None)),
+                    scroll_delta=_coerce_scroll_delta(getattr(act_obj, "scroll_delta", None)),
+                )
+            except Exception:
+                pass
+
+        return None
 
     @staticmethod
     def _parse_command(content: str, goal: str) -> LLMCommand:
-        """Extract the single JSON directive the model was asked to return."""
+        """Extract a single JSON directive emitted by the local VLA model."""
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
             raise ValueError(f"model reply contained no JSON object: {content!r}")
 
         data: Dict[str, Any] = json.loads(match.group(0))
-        action = str(data.get("action", "")).strip().lower()
-        valid_actions = {"click", "type", "wait", "finish", "abort", "switch_app", "hotkey", "recover"}
-        if action not in valid_actions:
-            raise ValueError(f"model returned an unknown action: {action!r}")
+        raw_action = str(data.get("action", "")).strip().lower()
+        if raw_action not in _ACTION_MAP and raw_action not in _VALID_COMMANDS:
+            raise ValueError(f"model returned an unknown action: {raw_action!r}")
+        action = _map_action_name(raw_action)
 
         target = data.get("target")
         text = data.get("text")
@@ -245,8 +382,13 @@ class LLMBridge:
             action=action,
             target=str(target) if target else None,
             text=str(text) if text else None,
-            reason=str(data.get("reason") or f"model directive for goal: {goal}"),
-            source="llm",
+            reason=str(data.get("reason") or f"local VLA directive for goal: {goal}"),
+            source="local_vla",
+            coordinate=_coerce_coord(data.get("coordinate")),
+            start_coordinate=_coerce_coord(data.get("start_coordinate")),
+            end_coordinate=_coerce_coord(data.get("end_coordinate")),
+            keys=_coerce_keys(data.get("keys")),
+            scroll_delta=_coerce_scroll_delta(data.get("scroll_delta")),
         )
 
     # ------------------------------------------------------------------ #
@@ -257,8 +399,9 @@ class LLMBridge:
         user_goal: str,
         commentary: LiveCommentary,
         fovea_patches: Optional[List[np.ndarray]] = None,
+        frame: Optional[np.ndarray] = None,
     ) -> LLMCommand:
-        """Sends live commentary and optional foveal patches to LLM and parses the next action directive."""
+        """Route visual commentary and patches through the local VLA engine."""
         prompt_sections = [
             f"Goal: {user_goal}",
             f"Current Screen State:\n{commentary.to_llm_prompt()}",
@@ -269,24 +412,19 @@ class LLMBridge:
             if summary:
                 prompt_sections.append(summary)
 
-        prompt_sections.append(
-            "What should AVCS do next? Reply ONLY with a single JSON object in this format:\n"
-            '{"action": "click"|"type"|"wait"|"finish"|"switch_app", "target": "element_name", "text": "text_if_type", "reason": "short explanation"}'
-        )
         prompt = "\n\n".join(prompt_sections)
 
-        if not self.api_key:
-            return self._heuristic_fallback(user_goal, commentary, fovea_patches)
-
-        try:
-            content = self._call_llm(prompt, fovea_patches=fovea_patches)
-            command = self._parse_command(content, user_goal)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            print(f"[LLMBridge] Model request failed ({exc}); using local heuristic planner.")
-            return self._heuristic_fallback(user_goal, commentary, fovea_patches)
+        command = self._call_local_vla(
+            user_goal=user_goal,
+            commentary=commentary,
+            fovea_patches=fovea_patches,
+            frame=frame,
+        )
+        if command is None:
+            command = self._heuristic_fallback(user_goal, commentary, fovea_patches)
 
         self.conversation_history.append({"role": "user", "content": prompt})
-        self.conversation_history.append({"role": "assistant", "content": content})
+        self.conversation_history.append({"role": "assistant", "content": command.reason or command.action})
         return command
 
     def describe_screen(
@@ -294,15 +432,13 @@ class LLMBridge:
         frame_or_patches: Union[np.ndarray, List[np.ndarray]],
         prompt: str = "Describe what is visible on this screen in detail.",
     ) -> str:
-        """Query LLM directly for natural language description of screen frame or patches.
+        """Produce a strictly local pixel-derived summary of screen frame or patches.
 
-        When vision_enabled=True, encodes frame or foveal patches to base64 PNGs and queries
-        /v1/chat/completions directly for natural language description without forcing command
-        action JSON parsing.
         When vision_enabled=False, raises PermissionError to preserve privacy.
+        External cloud HTTP requests are permanently disabled.
         """
         if not self.vision_enabled:
-            raise PermissionError("Screen image egress disabled. Set vision_enabled=True to send pixels.")
+            raise PermissionError("Screen image egress disabled. Set vision_enabled=True to inspect pixels locally.")
 
         if isinstance(frame_or_patches, np.ndarray):
             patches = [frame_or_patches]
@@ -311,51 +447,10 @@ class LLMBridge:
         else:
             raise TypeError("frame_or_patches must be a numpy ndarray or a list of numpy ndarrays")
 
-        if not self.api_key:
-            raise RuntimeError("no API key configured for LLMBridge")
-
-        content_items: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for patch in patches:
-            if isinstance(patch, np.ndarray) and patch.size > 0:
-                b64_png = encode_patch_to_base64(patch)
-                content_items.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64_png}"},
-                })
-
-        messages = [{"role": "user", "content": content_items}]
-        payload = json.dumps(
-            {
-                "model": self.model_name,
-                "messages": messages,
-                "temperature": 0.0,
-            }
-        ).encode("utf-8")
-
-        if self.base_url.endswith("/v1"):
-            endpoint = f"{self.base_url}/chat/completions"
-        elif "/v1" in self.base_url:
-            endpoint = f"{self.base_url}/chat/completions"
-        else:
-            endpoint = f"{self.base_url}/v1/chat/completions"
-
-        request = urllib.request.Request(
-            endpoint,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
-
-        content = str(extract_message_text(body)).strip()
+        summary = summarize_foveal_patches(patches) or "Local frame contains uniform/blank visual content."
         self.conversation_history.append({"role": "user", "content": prompt})
-        self.conversation_history.append({"role": "assistant", "content": content})
-        return content
+        self.conversation_history.append({"role": "assistant", "content": summary})
+        return summary
 
     def _heuristic_fallback(
         self,

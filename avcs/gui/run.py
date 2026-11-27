@@ -13,7 +13,24 @@ eyes and a `click` grant are an explicit opt-in for the control-grounding path.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+
+
+def _validate_llm_endpoint(endpoint: str | None) -> str | None:
+    if not endpoint:
+        return None
+    clean = endpoint.strip()
+    if not clean:
+        return None
+    from avcs.voice.brain import is_loopback_endpoint
+
+    if not is_loopback_endpoint(clean):
+        raise ValueError(
+            f"--llm-endpoint {clean!r} rejected: only loopback endpoints "
+            "(127.0.0.1, localhost, ::1) are permitted."
+        )
+    return clean
 
 
 def main() -> int:
@@ -24,25 +41,25 @@ def main() -> int:
                     choices=["demo", "desktop", "synthetic", "screen"],
                     help="demo = a scripted screen with layout and motion; "
                          "screen = the real screen")
-    ap.add_argument("--eyes", default="scene", choices=["scene", "lexicon"],
+    ap.add_argument("--eyes", default="scene", choices=["scene", "lexicon", "vla"],
                     help="scene = describe the screen (the assistant default); "
                          "lexicon = also read control labels, which is what can "
-                         "ground a click")
+                         "ground a click; vla = local FastVLAInferenceEngine perception")
     ap.add_argument("--scene", default="desktop",
                     choices=["desktop", "terminal", "media", "dialog", "scroll"],
                     help="initial scripted scene for --source demo")
     ap.add_argument("--grant", nargs="*", default=None,
                     help="capabilities granted to the kernel; defaults to none "
-                         "(the assistant looks and talks) and to ['click'] only "
-                         "with --eyes lexicon")
+                         "(fail-closed) and to ['click'] only with --eyes lexicon. "
+                         "Pass '--grant all' to unlock all MUTATING_OPS.")
     ap.add_argument("--live", action="store_true",
                     help="authorize REAL mouse/keyboard actuation (needs a grant)")
     ap.add_argument("--virtual", action="store_true",
                     help="run the GUI in virtual mode: no microphone, no server TTS, "
                          "and no physical mouse/keyboard actuation")
     ap.add_argument("--llm-endpoint", default=None,
-                    help="OpenAI-compatible LLM endpoint for the GUI bridge "
-                         "(or set AVCS_LLM_ENDPOINT)")
+                    help="Local loopback OpenAI-compatible LLM endpoint (127.0.0.1, "
+                         "localhost, ::1) for the GUI bridge")
     ap.add_argument("--llm-model", default=None,
                     help="LLM model name for the GUI bridge "
                          "(or set AVCS_LLM_MODEL)")
@@ -80,6 +97,11 @@ def main() -> int:
                          "watcher has no hand, so it can never actuate.")
     args = ap.parse_args()
 
+    try:
+        llm_endpoint = _validate_llm_endpoint(args.llm_endpoint)
+    except ValueError as exc:
+        ap.error(str(exc))
+
     if args.virtual and args.live:
         ap.error("--virtual cannot be combined with --live")
 
@@ -92,15 +114,21 @@ def main() -> int:
     from avcs.gui.server import build_app
 
     brain = None
-    if args.llm_endpoint or args.llm_model or args.language != "hinglish":
+    if llm_endpoint or args.llm_model or args.language != "hinglish":
         from avcs.reasoning.provider import LLMReasoningProvider
         from avcs.voice.brain import ConversationBrain
 
-        provider = LLMReasoningProvider(
-            endpoint=args.llm_endpoint,
-            model=args.llm_model,
-        )
-        brain = ConversationBrain(provider=provider, language=args.language)
+        if llm_endpoint:
+            provider = LLMReasoningProvider(
+                endpoint=llm_endpoint,
+                api_key=(os.environ.get("AVCS_LLM_API_KEY") or "").strip(),
+                model=args.llm_model,
+            )
+            brain = ConversationBrain(provider=provider, language=args.language)
+        else:
+            brain = ConversationBrain(provider=None, language=args.language)
+            if args.llm_model and getattr(brain, "provider", None) is not None:
+                brain.provider.model = args.llm_model
 
     mouth = "silent" if args.virtual else args.mouth
     ears = False if args.virtual else not args.no_ears

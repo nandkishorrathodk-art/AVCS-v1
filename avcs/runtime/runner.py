@@ -26,8 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from avcs.protocol.actions import Action, ActionKind
 from avcs.runtime.agent import AceAgent
-from avcs.runtime.client import CustomLLMClient
-from avcs.os_io.computer import ExecutionSafetyFirewall, Observation, SafetyCheckResult, WindowsComputer
+from avcs.os_io.computer import ExecutionSafetyFirewall, Observation, SafetyCheckResult, SafetyRiskLevel, WindowsComputer
 from avcs.os_io.hud import AVCSVisualHUD, play_acoustic_earcon
 from avcs.models.local_model import LocalVAMClient
 from avcs.runtime.planner import CognitivePlanner, ReflectionDiagnostic, SubGoal
@@ -571,7 +570,8 @@ class DualStageVerifier:
             is_launch_intent = bool(re.search(r'\b(open|launch|start|run)\b', goal, re.IGNORECASE))
             is_non_app_action = bool(
                 re.search(
-                    r'\b(type|write|input|enter|search|'
+                    r'\b(type|write|input|enter|search|calculate|compute|copy|paste|play|'
+                    r'minimize|maximize|refresh|reload|select\s+all|'
                     r'save|save\s*file|ctrl\+s|'
                     r'click|press|hit|select|scroll|drag|drop|hover|dismiss|close|wait)\b',
                     goal,
@@ -635,9 +635,14 @@ class DualStageVerifier:
         # 2. Hunting Loop Check
         if repetition_count >= 2:
             orig_x, orig_y = (current_cursor if current_cursor else (640, 400))
+            orig_x = max(0, min(1280, int(orig_x)))
+            orig_y = max(0, min(800, int(orig_y)))
             offset_x = 25 if orig_x < 1200 else -25
             offset_y = 25 if orig_y < 750 else -25
-            breakout_target = (orig_x + offset_x, orig_y + offset_y)
+            breakout_target = (
+                max(0, min(1280, orig_x + offset_x)),
+                max(0, min(800, orig_y + offset_y)),
+            )
             breakout_act = Action(
                 kind=ActionKind.LEFT_CLICK,
                 coordinate=breakout_target,
@@ -847,6 +852,7 @@ class AceRunner:
         shadow_mode: bool = False,
         min_peak_probability: float = 0.75,
         enable_dagger_recovery: bool = False,
+        pure_rgb_only: bool = True,
     ) -> None:
         self.computer = computer or WindowsComputer()
         self.agent = agent or AceAgent()
@@ -857,6 +863,7 @@ class AceRunner:
         self.shadow_mode = shadow_mode
         self.min_peak_probability = min_peak_probability
         self.enable_dagger_recovery = enable_dagger_recovery
+        self.pure_rgb_only = pure_rgb_only
         self.blacklisted_coordinates: set[Tuple[int, int]] = set()
         self.shadow_comparisons: List[Dict[str, Any]] = []
         self.dagger_interventions: List[Dict[str, Any]] = []
@@ -1048,8 +1055,12 @@ class AceRunner:
         lookup_anchor = current_anchor
         if lookup_anchor is None:
             # Auto-detect live desktop state anchor if none explicitly provided
-            active_title = self.verifier.get_active_window_title()
-            active_proc = self.verifier.get_foreground_process_name()
+            if self.pure_rgb_only:
+                active_title = ""
+                active_proc = ""
+            else:
+                active_title = self.verifier.get_active_window_title()
+                active_proc = self.verifier.get_foreground_process_name()
             vis_hash = None
             try:
                 init_obs = self.computer.observe(format=image_format)
@@ -1071,6 +1082,9 @@ class AceRunner:
 
             # Replay with firewall and breakout safety checks
             for cached_act in cache_lookup.actions:
+                if session.step_count >= max_steps:
+                    logger.warning("[SKILL CACHE REPLAY HALTED] Reached max_steps limit.")
+                    break
                 native_target = None
                 if cached_act.coordinate:
                     native_target = self.computer._canonical_to_native(*cached_act.coordinate)
@@ -1078,8 +1092,21 @@ class AceRunner:
                     native_target = self.computer._canonical_to_native(*cached_act.start_coordinate)
                 self.check_safety_breakout(target_coord=native_target)
 
+                cls_name = ""
+                if self.user32:
+                    try:
+                        fg_hwnd = self.user32.GetForegroundWindow()
+                        if fg_hwnd:
+                            buf = ctypes.create_unicode_buffer(256)
+                            self.user32.GetClassNameW(fg_hwnd, buf, 256)
+                            cls_name = buf.value
+                    except Exception:
+                        cls_name = ""
+
                 # Evaluate execution safety firewall during cache replay
-                firewall_res = self.firewall.evaluate(cached_act, user_confirmed=user_confirmed)
+                firewall_res = self.firewall.evaluate(
+                    cached_act, active_window_class=cls_name, user_confirmed=user_confirmed
+                )
                 if not firewall_res.allowed:
                     logger.warning(f"[SKILL CACHE REPLAY BLOCKED] {firewall_res.reason}")
                     session.record_step(Action(kind=ActionKind.WAIT, duration=0.5, reason=firewall_res.reason), plan_latency_ms=0.0)
@@ -1124,8 +1151,9 @@ class AceRunner:
             )
 
         mode_str = "[DRY-RUN]" if dry_run else "[LIVE-ACTUATION]"
-        logger.info(f"Starting Ace-Control-Medium Autopilot {mode_str}")
-        logger.info(f"Goal: '{goal}' | Max Steps: {max_steps} | Model: {self.agent.client.model}")
+        logger.info(f"Starting AVCS Single-Brain Local VLA Autopilot {mode_str}")
+        model_name = getattr(self.agent.client, "model", None) or "local-vla"
+        logger.info(f"Goal: '{goal}' | Max Steps: {max_steps} | Model: {model_name}")
 
         # Minimize console window if calling from Windows Terminal/PowerShell to reveal desktop workspace
         if not dry_run and not self.no_minimize:
@@ -1229,7 +1257,11 @@ class AceRunner:
                     curr_cursor_xy = None
                     if hasattr(self.computer, "get_cursor_pos"):
                         try:
-                            curr_cursor_xy = self.computer.get_cursor_pos()
+                            raw_cursor = self.computer.get_cursor_pos()
+                            if raw_cursor is not None and hasattr(self.computer, "_native_to_canonical"):
+                                curr_cursor_xy = self.computer._native_to_canonical(*raw_cursor)
+                            else:
+                                curr_cursor_xy = raw_cursor
                         except Exception:
                             pass
                     stage3_check = self.verifier.verify_stage3_recovery(
@@ -1255,8 +1287,12 @@ class AceRunner:
                         continue
 
                 # 4. Anchor-Verified Skill Cache Check for active Sub-Goal
-                active_title = self.verifier.get_active_window_title()
-                active_proc = self.verifier.get_foreground_process_name()
+                if self.pure_rgb_only:
+                    active_title = ""
+                    active_proc = ""
+                else:
+                    active_title = self.verifier.get_active_window_title()
+                    active_proc = self.verifier.get_foreground_process_name()
                 vis_hash = compute_visual_hash(obs)
                 subgoal_anchor = current_anchor or UIStateAnchor(
                     window_title=active_title or None,
@@ -1270,7 +1306,11 @@ class AceRunner:
                 if sg_lookup.hit and sg_lookup.actions:
                     logger.info(f"[SKILL CACHE HIT (SUB-GOAL)] {sg_lookup.reason}")
                     replay_blocked = False
+                    replayed_count = 0
                     for cached_act in sg_lookup.actions:
+                        if session.step_count >= max_steps:
+                            replay_blocked = True
+                            break
                         native_target = None
                         if cached_act.coordinate:
                             native_target = self.computer._canonical_to_native(*cached_act.coordinate)
@@ -1278,24 +1318,40 @@ class AceRunner:
                             native_target = self.computer._canonical_to_native(*cached_act.start_coordinate)
                         self.check_safety_breakout(target_coord=native_target)
 
-                        firewall_res = self.firewall.evaluate(cached_act, user_confirmed=user_confirmed)
+                        cls_name = ""
+                        if self.user32:
+                            try:
+                                fg_hwnd = self.user32.GetForegroundWindow()
+                                if fg_hwnd:
+                                    buf = ctypes.create_unicode_buffer(256)
+                                    self.user32.GetClassNameW(fg_hwnd, buf, 256)
+                                    cls_name = buf.value
+                            except Exception:
+                                cls_name = ""
+
+                        firewall_res = self.firewall.evaluate(
+                            cached_act, active_window_class=cls_name, user_confirmed=user_confirmed
+                        )
                         if not firewall_res.allowed:
                             logger.warning(f"[SKILL CACHE REPLAY BLOCKED] {firewall_res.reason}")
                             session.record_step(Action(kind=ActionKind.WAIT, duration=0.5, reason=firewall_res.reason), plan_latency_ms=0.0)
+                            replayed_count += 1
                             replay_blocked = True
                             break
 
                         session.record_step(cached_act, plan_latency_ms=0.0, is_subgoal_stop=True)
-                        self.computer.execute(cached_act, dry_run=dry_run)
+                        replayed_count += 1
                         if cached_act.kind == ActionKind.STOP:
                             break
+                        self.computer.execute(cached_act, dry_run=dry_run)
 
                     if not replay_blocked:
                         if hasattr(active_subgoal, "mark_completed"):
                             active_subgoal.mark_completed()
                         subgoal_idx += 1
-                        step_idx += len(sg_lookup.actions)
+                        step_idx += replayed_count
                         continue
+                    step_idx += replayed_count
                 elif sg_lookup.entry is not None:
                     logger.info(
                         f"[SKILL CACHE SUB-GOAL ANCHOR DRIFT] {sg_lookup.reason} "
@@ -1344,7 +1400,10 @@ class AceRunner:
                                 diverted_coord = cand
                                 break
                         if diverted_coord is None:
-                            diverted_coord = (orig_x + 10, orig_y + 10)
+                            diverted_coord = (
+                                max(0, min(1280, orig_x + 10)),
+                                max(0, min(800, orig_y + 10)),
+                            )
 
                         action = dataclasses.replace(
                             action,
@@ -1422,7 +1481,10 @@ class AceRunner:
                                 new_coord = cand
                                 break
                         if new_coord is None:
-                            new_coord = (orig_x + 10, orig_y + 10)
+                            new_coord = (
+                                max(0, min(1280, orig_x + 10)),
+                                max(0, min(800, orig_y + 10)),
+                            )
                         logger.warning(
                             f"Loop detected: Click action repeated {effective_reps + 1} times. "
                             f"Jittering position from {action.coordinate} to {new_coord}."
@@ -1436,7 +1498,7 @@ class AceRunner:
 
                     diag = ReflectionDiagnostic(
                         failed_subgoal=active_subgoal,
-                        failure_reason=f"Loop deadlock: action {action.kind.value} repeated {effective_reps} times without UI progress",
+                        failure_reason=f"Loop repeated {effective_reps} times without UI progress for {action.kind.value}",
                         stuck_repetitions=effective_reps,
                         stuck_action=action.to_dict(),
                     )
@@ -1491,8 +1553,11 @@ class AceRunner:
                         reason=firewall_res.reason,
                     )
                     session.record_step(blocked_act, observation=obs, plan_latency_ms=plan_latency_ms)
-                    # Trigger dynamic replan if firewall blocks critical action
-                    if firewall_res.requires_confirmation and not user_confirmed:
+                    # Trigger dynamic replan if firewall blocks critical action or console hazard
+                    if (
+                        firewall_res.requires_confirmation
+                        or getattr(firewall_res, "risk_level", None) == SafetyRiskLevel.CONSOLE_HAZARD
+                    ) and not user_confirmed:
                         diag = ReflectionDiagnostic(
                             failed_subgoal=active_subgoal,
                             failure_reason=firewall_res.reason,
@@ -1646,8 +1711,7 @@ class AceRunner:
                 else:
                     self.computer.execute(action, dry_run=False)
 
-                if native_target is not None:
-                    self._last_actuation_coord = native_target
+                self._last_actuation_coord = native_target
 
                 # Layer 5 Stage 1 Physical Verification (optical delta / click ripple)
                 if not dry_run and action.kind in (
@@ -1738,7 +1802,7 @@ class AceRunner:
                     expected_window_title=expected_window,
                     expected_process_name=expected_process,
                     goal=goal,
-                    timeout=0.0 if dry_run else 2.5,
+                    timeout=0.0 if (dry_run or session_aborted_exc is not None) else 2.5,
                 )
                 all_subgoals_completed = (subgoal_idx >= len(subgoals)) and all(
                     getattr(sg, "status", None) == "completed" or (isinstance(sg, dict) and sg.get("status") == "completed")
@@ -1815,32 +1879,56 @@ class AceRunner:
         return session
 
 
+class _InProcessVLAClient:
+    """Adapter exposing in-process FastVLAInferenceEngine under the AceAgent vla_client contract."""
+
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+
+    def act(
+        self,
+        frame: Any,
+        instruction: str = "Perform action",
+        width: int = 1280,
+        height: int = 800,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.engine.act(
+            image=frame,
+            instruction=instruction,
+            canvas_w=width,
+            canvas_h=height,
+            session_id=session_id,
+        )
+
+
 def main() -> None:
     """CLI Entrypoint for the Ace Autopilot."""
     parser = argparse.ArgumentParser(
         description="AVCS Ace-Control-Medium Autonomous Visual GUI Autopilot."
     )
     parser.add_argument("--goal", type=str, required=True, help="User goal to execute on the desktop.")
-    parser.add_argument("--endpoint", type=str, default=None, help="Custom LLM API endpoint URL.")
-    parser.add_argument("--model", type=str, default=None, help="Frontier model identifier (e.g. gpt-6-astra, fable-5.5).")
-    parser.add_argument("--api-key", type=str, default=None, help="API key for custom LLM provider.")
+    parser.add_argument("--endpoint", type=str, default=None, help="Local VLA HTTP endpoint URL (loopback only).")
+    parser.add_argument("--model", type=str, default=None, help="Local VLA model identifier (e.g. Qwen2.5-VL-3B-Instruct).")
+    parser.add_argument("--api-key", type=str, default=None, help="Optional auth token for local VAM server.")
     parser.add_argument("--max-steps", type=int, default=30, help="Maximum execution steps before aborting.")
     parser.add_argument("--format", type=str, default="jpeg", choices=["webp", "jpeg", "png"], help="Screen capture compression format.")
-    parser.add_argument("--protocol", type=str, default=None, choices=["openai", "anthropic", "gemini", "auto"], help="API wire protocol.")
+    parser.add_argument("--protocol", type=str, default="local", choices=["local", "auto"], help="Local VLA wire protocol.")
     parser.add_argument("--timeout", type=float, default=None, help="HTTP request timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Observe and plan without dispatching hardware mouse/keyboard events.")
     parser.add_argument("--no-voice", action="store_true", help="Disable natural voice speech feedback.")
     parser.add_argument("--no-hud", action="store_true", help="Disable on-screen HUD transparent overlay.")
     parser.add_argument("--no-minimize", action="store_true", help="Do not minimize calling console/terminal window.")
-    parser.add_argument("--local-vam", action="store_true", help="Use local edge Vision-Action Model (vLLM / TensorRT-LLM) instead of cloud.")
+    parser.add_argument("--local-vam", action="store_true", help="Use local edge Vision-Action Model server (vLLM / TensorRT-LLM).")
+    parser.add_argument("--local-vla", action="store_true", help="Run in-process FastVLAInferenceEngine (local Qwen2.5-VL-3B + GUI-Actor + ParallelActionHeads).")
     parser.add_argument("--local-endpoint", type=str, default="http://127.0.0.1:8000/v1", help="Local VAM endpoint URL.")
     parser.add_argument("--local-model", type=str, default="Qwen2.5-VL-3B-Instruct", help="Local VAM model identifier.")
     parser.add_argument("--display-target", type=str, default="primary", help="Target display: 'primary', 'virtual', or monitor index 0, 1, ...")
     parser.add_argument("--cortex", type=str, default="cortex_v2", choices=["cortex_v2", "human_eye", "none"], help="Visual cortex sensory gate: 'cortex_v2' (StreamingVisualCortexV2 ConvGRU), 'human_eye' (HumanEye), or 'none'.")
-    parser.add_argument("--vla-server", "--vla-url", dest="vla_server", type=str, default=os.environ.get("AVCS_VLA_SERVER_URL", ""), help="Remote VLA server URL (e.g. https://...trycloudflare.com or ws://...) for WebSocket Fast Brain.")
+    parser.add_argument("--vla-server", "--vla-url", dest="vla_server", type=str, default=os.environ.get("AVCS_VLA_SERVER_URL", ""), help="Local WebSocket VLA server URL (e.g. ws://127.0.0.1:8000/ws/act) for Fast Brain.")
     parser.add_argument("--grounder", "--enable-grounder", dest="enable_grounder", action="store_true", help="Force enable legacy local GoalConditionedGrounder for direct actuation.")
-    parser.add_argument("--no-grounder", "--cloud-only", dest="disable_grounder", action="store_true", help="Disable local GoalConditionedGrounder and use Cloud LLM only.")
-    parser.add_argument("--shadow-mode", action="store_true", help="Run local grounder in shadow mode to compare against Cloud LLM.")
+    parser.add_argument("--no-grounder", dest="disable_grounder", action="store_true", help="Disable local GoalConditionedGrounder.")
+    parser.add_argument("--shadow-mode", action="store_true", help="Run local grounder in shadow mode alongside local VLA.")
     parser.add_argument("--grounder-checkpoint", type=str, default="runs/weights/goal_grounder_best.pt", help="Path to GoalConditionedGrounder weights checkpoint.")
     parser.add_argument("--min-peak-prob", type=float, default=0.75, help="Confidence floor for local grounder gated actuation (default: 0.75).")
     parser.add_argument("--capture-hud", action="store_true", help="Make HUD visible to screen capture tools even in live mode.")
@@ -1848,30 +1936,28 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Fast Brain configuration: Remote WebSocket VLA (/ws/act) takes precedence.
+    # Fast Brain configuration: In-process --local-vla or local WebSocket VLA (/ws/act).
     # Legacy local grounder is ONLY used if explicitly passed via --grounder.
     use_grounder = args.enable_grounder and not args.disable_grounder
     grounder_ckpt = Path(args.grounder_checkpoint)
-    if args.vla_server:
-        logger.info(f"Fast Brain active: Remote WebSocket VLA connected to {args.vla_server} (/ws/act)")
+    vla_client = None
+    if args.local_vla:
+        from avcs.runtime.vla_engine import FastVLAInferenceEngine
+
+        fast_engine = FastVLAInferenceEngine()
+        vla_client = _InProcessVLAClient(fast_engine)
+        logger.info("Fast Brain active: In-process FastVLAInferenceEngine (--local-vla)")
+    elif args.vla_server:
+        logger.info(f"Fast Brain active: Local WebSocket VLA connected to {args.vla_server} (/ws/act)")
     elif use_grounder and grounder_ckpt.exists():
         logger.info(f"Fast Brain active: Local GoalConditionedGrounder loaded from {grounder_ckpt} (peak_prob floor={args.min_peak_prob})")
 
-    if args.local_vam:
-        client = LocalVAMClient(
-            endpoint=args.local_endpoint or args.endpoint,
-            model=args.local_model or args.model,
-            timeout=args.timeout or 5.0,
-            allow_offline_mock=args.dry_run,
-        )
-    else:
-        client = CustomLLMClient(
-            endpoint=args.endpoint,
-            model=args.model,
-            api_key=args.api_key,
-            protocol=args.protocol,
-            timeout=args.timeout,
-        )
+    client = LocalVAMClient(
+        endpoint=args.local_endpoint or args.endpoint,
+        model=args.local_model or args.model,
+        timeout=args.timeout or 5.0,
+        allow_offline_mock=args.dry_run,
+    )
 
     disp_target: Union[str, int] = args.display_target
     if isinstance(disp_target, str) and disp_target.isdigit():
@@ -1885,6 +1971,7 @@ def main() -> None:
         shadow_mode=args.shadow_mode,
         min_peak_probability=args.min_peak_prob,
         checkpoint_path=args.grounder_checkpoint,
+        vla_client=vla_client,
         vla_server_url=args.vla_server,
     )
     computer = WindowsComputer(target_display=disp_target)

@@ -1,0 +1,198 @@
+{
+  "phase": "phase1_gate1",
+  "timestamp_utc": "2026-11-26T10:45:12Z",
+  "gate1_passed": true,
+  "config_path": "configs/phase1_eval.yaml",
+  "observation_contract": {
+    "observation_type": "screenshot",
+    "require_a11y_tree": false,
+    "require_terminal": false,
+    "use_dom": false,
+    "use_ocr": false
+  },
+  "checks": {
+    "protocol_roundtrip": {
+      "passed": true,
+      "primitives_verified": 10
+    },
+    "mock_agent_lifecycle": {
+      "passed": true,
+      "errors": 0,
+      "closed_guard_verified": true
+    }
+  },
+  "measured_local": {
+    "showdown_clicks": {
+      "benchmark": "generalagents/showdown-clicks",
+      "sample_count": 557,
+      "tolerance_px": 15.0,
+      "hits": 0,
+      "strict_hits": 0,
+      "accuracy": 0.0,
+      "strict_accuracy": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.68
+      ],
+      "bootstrap_95_ci": [
+        0.0,
+        0.0
+      ],
+      "strict_bootstrap_95_ci": [
+        0.0,
+        0.0
+      ],
+      "latency_p50_ms": 0.1,
+      "latency_p90_ms": 0.2,
+      "latency_p95_ms": 0.2,
+      "latency_p99_ms": 0.3,
+      "latency_mean_ms": 3.9,
+      "dataset_source": "data\\showdown-clicks-dev\\data.csv"
+    },
+    "screenspot_pro": {
+      "benchmark": "screenspot-pro",
+      "observation_mode": "pure_rgb",
+      "sample_count": 30,
+      "tolerance_px": 15.0,
+      "hits": 0,
+      "strict_hits": 0,
+      "accuracy": 0.0,
+      "strict_accuracy": 0.0,
+      "small_icon_count": 25,
+      "small_icon_recall": 0.0,
+      "small_icon_strict_recall": 0.0,
+      "mean_center_l2_px": 438.2,
+      "median_center_l2_px": 337.4,
+      "wilson_95_ci": [
+        0.0,
+        11.35
+      ],
+      "bootstrap_95_ci": [
+        0.0,
+        0.0
+      ],
+      "latency_p50_ms": 67.2,
+      "latency_p95_ms": 100.6,
+      "latency_p99_ms": 103.5,
+      "by_category": {
+        "cad": {
+          "count": 5,
+          "hits": 0,
+          "strict_hits": 0,
+          "accuracy": 0.0,
+          "strict_accuracy": 0.0
+        },
+        "ide": {
+          "count": 10,
+          "hits": 0,
+          "strict_hits": 0,
+          "accuracy": 0.0,
+          "strict_accuracy": 0.0
+        },
+        "creative": {
+          "count": 5,
+          "hits": 0,
+          "strict_hits": 0,
+          "accuracy": 0.0,
+          "strict_accuracy": 0.0
+        },
+        "spreadsheet": {
+          "count": 5,
+          "hits": 0,
+          "strict_hits": 0,
+          "accuracy": 0.0,
+          "strict_accuracy": 0.0
+        },
+        "os_chrome": {
+          "count": 5,
+          "hits": 0,
+          "strict_hits": 0,
+          "accuracy": 0.0,
+          "strict_accuracy": 0.0
+        }
+      },
+      "dataset_source": "cleanroom_synthetic"
+    },
+    "osworld_verified_smoke": {
+      "benchmark": "osworld-verified",
+      "observation_mode": "pure_rgb",
+      "env_flags": {
+        "observation_type": "screenshot",
+        "require_a11y_tree": false,
+        "require_terminal": false,
+        "use_dom": false,
+        "use_ocr": false
+      },
+      "task_count": 30,
+      "successes": 0,
+      "completion_rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        11.35
+      ],
+      "bootstrap_95_ci": [
+        0.0,
+        0.0
+      ],
+      "median_steps_to_completion": null,
+      "stall_rate": 100.0,
+      "deterministic_reset_rate": 100.0,
+      "error_count": 0,
+      "latency_p50_ms": 24.7,
+      "latency_p95_ms": 29.3,
+      "latency_p99_ms": 33.9,
+      "rollout_log_path": "benchmarks\\results\\phase1_osworld_smoke_rollouts.jsonl",
+      "dataset_source": "cleanroom_synthetic_smoke"
+    }
+  },
+  "published_literature_baselines": [
+    {
+      "model": "ace-control-medium",
+      "accuracy": 77.56,
+      "latency_ms": 533,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "ace-control-small",
+      "accuracy": 72.89,
+      "latency_ms": 324,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "Operator",
+      "accuracy": 64.27,
+      "latency_ms": 6385,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "UI-TARS-72B-SFT",
+      "accuracy": 54.4,
+      "latency_ms": 1977,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "Claude 3.7 Sonnet",
+      "accuracy": 53.68,
+      "latency_ms": 9656,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "OmniParser V2 + GPT-4o",
+      "accuracy": 51.71,
+      "latency_ms": 12642,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "Qwen2.5-VL-72B-Instruct",
+      "accuracy": 24.78,
+      "latency_ms": 3790,
+      "source": "published_vendor_report"
+    },
+    {
+      "model": "GPT-4o",
+      "accuracy": 5.21,
+      "latency_ms": null,
+      "source": "published_vendor_report"
+    }
+  ]
+}

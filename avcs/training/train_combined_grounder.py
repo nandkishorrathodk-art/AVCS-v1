@@ -367,6 +367,15 @@ def train_combined_grounder(
         collate_fn=lambda batch: ui_grounding_collate_fn(batch, heatmap_size=HEATMAP_SIZE),
         num_workers=0,
     )
+    if len(validation_samples) == 0:
+        raise ValueError("The combined validation split is empty")
+    val_loader = DataLoader(
+        validation_samples,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: ui_grounding_collate_fn(batch, heatmap_size=HEATMAP_SIZE),
+        num_workers=0,
+    )
     model = GoalConditionedGrounder(feature_dim=feature_dim, input_size=input_size).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 
@@ -376,7 +385,7 @@ def train_combined_grounder(
     best_validation_loss = math.inf
     for epoch in range(1, epochs + 1):
         train_metrics = train_epoch(model, train_loader, optimizer, device)
-        validation_metrics = train_epoch(model, train_loader, None, device)
+        validation_metrics = train_epoch(model, val_loader, None, device)
         history.append(
             {
                 "epoch": float(epoch),

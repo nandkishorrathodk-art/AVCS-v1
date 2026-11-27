@@ -456,9 +456,15 @@ class FastAffordanceHead(nn.Module):
             # - Must be a local maximum within its 3x3 spatial neighborhood
             # - Must exceed minimum confidence threshold
             # - Must beat static background by at least competitive margin
+            # - Exclude the 1-cell zero-padded border ring (3x3 conv padding artifact)
             is_peak = (heat == max_pool) & (heat >= threshold)
             if margin > 0.0:
                 is_peak = is_peak & ((heat - static_heat) >= margin)
+            if H > 2 and W > 2:
+                is_peak[0, :] = False
+                is_peak[-1, :] = False
+                is_peak[:, 0] = False
+                is_peak[:, -1] = False
 
             peak_indices = torch.nonzero(is_peak, as_tuple=False)
             if len(peak_indices) == 0:
@@ -501,6 +507,11 @@ class FastAffordanceHead(nn.Module):
                 eff_margin = min(margin, 0.02) if margin > 0.0 else 0.0
                 if eff_margin > 0.0:
                     is_peak = is_peak & ((heat - static_heat) >= eff_margin)
+                if H > 2 and W > 2:
+                    is_peak[0, :] = False
+                    is_peak[-1, :] = False
+                    is_peak[:, 0] = False
+                    is_peak[:, -1] = False
                 peak_indices = torch.nonzero(is_peak, as_tuple=False)
                 if len(peak_indices) == 0:
                     continue
@@ -1153,7 +1164,7 @@ class HumanEye(nn.Module):
             if frame_sub.ndim == 2:
                 frame_rgb = np.stack([frame_sub, frame_sub, frame_sub], axis=-1)
             else:
-                frame_rgb = frame_sub
+                frame_rgb = frame_sub[..., :3] if frame_sub.shape[-1] > 3 else frame_sub
 
             arr = np.ascontiguousarray(frame_rgb)
             if not arr.flags.writeable:
@@ -1169,6 +1180,10 @@ class HumanEye(nn.Module):
                 # Fused graph: backbone + category + affordance logits in one
                 # runtime call, removing three rounds of per-frame dispatch.
                 cat_logits, aff_logits, feat = self._onnx_accel.run_torch(t_resized)
+                if feat.device != self.device:
+                    cat_logits = cat_logits.to(self.device)
+                    aff_logits = aff_logits.to(self.device)
+                    feat = feat.to(self.device)
                 self._last_feat = feat
                 cat_probs = torch.softmax(cat_logits, dim=-1)[0]
                 cat_idx = int(torch.argmax(cat_probs).item())
@@ -1184,6 +1199,13 @@ class HumanEye(nn.Module):
                     margin=0.05,
                     feat=feat,
                 )
+                if not affordances and hasattr(self, "objectness_model"):
+                    try:
+                        obj_hotspots = self.detect_objectness(frame=frame)
+                        if obj_hotspots:
+                            affordances = obj_hotspots[: self.affordance_top_k]
+                    except Exception:
+                        pass
                 self._last_affordances = affordances
             else:
                 feat = self.backbone(t_resized)
@@ -1237,21 +1259,8 @@ class HumanEye(nn.Module):
             num_moving_objects=len(moving_objs),
         )
 
-        # Throttled Win32 foreground window title query (<= 2 Hz to prevent 200ms message pipe stalls)
+        # Pure-RGB invariant: never query OS window titles via win32gui during observe()
         win_title = getattr(self, "active_window_title", None)
-        if win_title is None and sys.platform == "win32" and not getattr(self, "source_is_synthetic", False) and frame is None:
-            if (t0 - self._last_win_title_check) > 0.5:
-                self._last_win_title_check = t0
-                try:
-                    import win32gui
-                    fg = win32gui.GetForegroundWindow()
-                    if fg:
-                        t = win32gui.GetWindowText(fg)
-                        if t:
-                            self._cached_win_title = t
-                except Exception:
-                    pass
-            win_title = self._cached_win_title
 
         if self.memory.latest_tree is not None and surprise < 0.05 and not moving_objs:
             current_tree = self.memory.latest_tree
@@ -1355,6 +1364,11 @@ class HumanEye(nn.Module):
         self.frame_count = 0
         self._last_perceived_seq = None
         self._last_state = None
+        self._last_feat = None
+        self._last_affordances = []
+        self._last_category_name = "screen"
+        self._last_category_conf = 1.0
+        self._latest_raw_frame = None
         self._latencies.clear()
 
     @property

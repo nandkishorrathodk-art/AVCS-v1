@@ -834,3 +834,129 @@ def test_resolve_backbone_dtype_and_down_proj_fp16_guard():
     with torch.no_grad():
         safe = guarded(x)
     assert torch.isfinite(safe).all(), f"Expected finite output from guarded down_proj, got {safe}"
+
+
+def test_subpixel_coords_loss_supervision_and_component_sum():
+    """Verifies UnifiedMultiTaskLoss supervises subpixel_coords directly while keeping exact component sum."""
+    from avcs.models.vla_cortex import UnifiedMultiTaskLoss
+
+    criterion = UnifiedMultiTaskLoss(
+        weight_action=0.5,
+        weight_coord_l1=10.0,
+        weight_coord_l2=10.0,
+        weight_patch_ce=5.0,
+    )
+    b, k = 2, 16
+    xs = (torch.arange(4, dtype=torch.float32) + 0.5) / 4.0
+    ys = (torch.arange(4, dtype=torch.float32) + 0.5) / 4.0
+    my, mx = torch.meshgrid(ys, xs, indexing="ij")
+    patch_coords = torch.stack([mx.flatten(), my.flatten()], dim=-1)
+
+    target_coords = torch.tensor([[0.125, 0.125], [0.875, 0.875]], dtype=torch.float32)
+    target_actions = torch.tensor([0, 0], dtype=torch.long)
+
+    attn_logits = torch.zeros(b, k, requires_grad=True)
+    soft_xy = torch.tensor([[0.50, 0.50], [0.50, 0.50]], dtype=torch.float32, requires_grad=True)
+    sub_xy = torch.tensor([[0.125, 0.125], [0.875, 0.875]], dtype=torch.float32, requires_grad=True)
+    action_logits = torch.zeros(b, 10, requires_grad=True)
+
+    loss_dict = criterion(
+        {
+            "attn_logits": attn_logits,
+            "target_coords": soft_xy,
+            "subpixel_coords": sub_xy,
+            "patch_coords": patch_coords.unsqueeze(0).expand(b, -1, -1),
+            "action_logits": action_logits,
+        },
+        target_coords=target_coords,
+        target_actions=target_actions,
+    )
+
+    component_sum = (
+        loss_dict["weighted_patch_ce"]
+        + loss_dict["weighted_coord_l1"]
+        + loss_dict["weighted_coord_l2"]
+        + loss_dict["weighted_action"]
+    )
+    assert torch.allclose(loss_dict["total_loss"], component_sum, atol=1e-6)
+    # Direct subpixel error is zero here, so L1 must be 0.35 * mean(|0.5 - target|) = 0.35 * 0.375
+    assert abs(loss_dict["loss_coord_l1"].item() - (0.35 * 0.375)) < 1e-5
+
+    loss_dict["total_loss"].backward()
+    assert sub_xy.grad is not None and torch.isfinite(sub_xy.grad).all()
+    assert soft_xy.grad is not None and torch.isfinite(soft_xy.grad).all()
+
+
+def test_lora_linear_enable_and_out_of_place_fp16_backward():
+    """Verifies LoRALinear wraps only top N decoder layers and supports finite FP16 out-of-place backward."""
+    LoRALinear = train_vla_module.LoRALinear
+    _install_fp16_overflow_guards = train_vla_module._install_fp16_overflow_guards
+
+    class ToyAttn(torch.nn.Module):
+        def __init__(self, dim: int = 16) -> None:
+            super().__init__()
+            self.q_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            self.k_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            self.v_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+            self.o_proj = torch.nn.Linear(dim, dim, bias=False, dtype=torch.float16)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class ToyDecoderLayer(torch.nn.Module):
+        def __init__(self, dim: int = 16) -> None:
+            super().__init__()
+            self.self_attn = ToyAttn(dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x + self.self_attn(x)
+
+    class ToyBackbone(torch.nn.Module):
+        def __init__(self, num_layers: int = 4, dim: int = 16) -> None:
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.language_model = torch.nn.Module()
+            self.model.language_model.layers = torch.nn.ModuleList(
+                [ToyDecoderLayer(dim) for _ in range(num_layers)]
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for layer in self.model.language_model.layers:
+                x = layer(x)
+            return x
+
+    model = QwenGUIActorModel(dry_run=True, backbone_hidden_dim=16, pointer_hidden_dim=16, query_dim=16)
+    toy_bb = ToyBackbone(num_layers=4, dim=16).eval()
+    for p in toy_bb.parameters():
+        p.requires_grad = False
+    _install_fp16_overflow_guards(toy_bb)
+    model.backbone = toy_bb
+
+    wrapped = model.enable_lora(lora_layers=2, r=4, lora_alpha=8.0)
+    assert wrapped == 8  # 2 layers * (q, k, v, o)
+    assert model.lora_config == {"lora_layers": 2, "r": 4, "lora_alpha": 8.0}
+
+    # Lower 2 layers remain frozen plain Linear; upper 2 use LoRALinear
+    layers = toy_bb.model.language_model.layers
+    assert not isinstance(layers[0].self_attn.q_proj, LoRALinear)
+    assert isinstance(layers[2].self_attn.q_proj, LoRALinear)
+    assert isinstance(layers[3].self_attn.o_proj, LoRALinear)
+
+    model.train(True)
+    assert layers[2].self_attn.q_proj.base_layer.training is False
+    assert layers[2].self_attn.q_proj.training is True
+
+    # Simulate FP16 overflow spike (70000 -> +inf) entering LoRA-wrapped o_proj; must backprop finite grads
+    x = torch.full((2, 4, 16), 2.0, dtype=torch.float16, requires_grad=True)
+    out = toy_bb(x).float().pow(2).mean()
+    out.backward()
+    lora_grads = [
+        p.grad for n, p in toy_bb.named_parameters() if "lora_" in n and p.requires_grad
+    ]
+    assert len(lora_grads) == 16  # 8 projections * (lora_A + lora_B)
+    assert all(g is not None and torch.isfinite(g).all() for g in lora_grads)
+    saved_keys = [k for k in model.state_dict() if (not k.startswith("backbone.") or ".lora_" in k)]
+    assert any(".lora_A." in k for k in saved_keys)
+    assert any(".lora_B." in k for k in saved_keys)
+    assert not any("layers.0." in k for k in saved_keys)
+

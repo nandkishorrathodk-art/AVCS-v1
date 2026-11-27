@@ -364,6 +364,8 @@ class LeRobotV3TrajectoryEpisode:
     pixel_diff_ratio: float = 0.0
     image_bytes: bytes = b""
     image_tensor: Optional[torch.Tensor] = None
+    is_recovery_step: bool = False
+    task_success: bool = True
 
     @property
     def latency_ns(self) -> int:
@@ -395,6 +397,8 @@ class LeRobotV3TrajectoryEpisode:
             "typed_text": self.typed_text,
             "pixel_diff_ratio": self.pixel_diff_ratio,
             "image_bytes": self.image_bytes,
+            "is_recovery_step": self.is_recovery_step,
+            "task_success": self.task_success,
         }
 
     @classmethod
@@ -420,6 +424,8 @@ class LeRobotV3TrajectoryEpisode:
             typed_text=str(data.get("typed_text", "")),
             pixel_diff_ratio=float(data.get("pixel_diff_ratio", 0.0)),
             image_bytes=bytes(data.get("image_bytes", b"")),
+            is_recovery_step=bool(data.get("is_recovery_step", False)),
+            task_success=bool(data.get("task_success", True)),
         )
 
 
@@ -509,6 +515,8 @@ class TrajectoryCleaner:
                         pixel_diff_ratio=max(prev.pixel_diff_ratio, step.pixel_diff_ratio),
                         image_bytes=prev.image_bytes,
                         image_tensor=prev.image_tensor,
+                        is_recovery_step=bool(prev.is_recovery_step or step.is_recovery_step),
+                        task_success=bool(prev.task_success and step.task_success),
                     )
                     continue
             cleaned.append(step)
@@ -518,36 +526,182 @@ class TrajectoryCleaner:
     def quarantine_misclicks(
         steps: List[LeRobotV3TrajectoryEpisode],
         undo_window_ns: int = 1_500_000_000,  # 1.5s
+        retain_recovery_fraction: float = 0.0,
     ) -> Tuple[List[LeRobotV3TrajectoryEpisode], int]:
-        """Quarantines misclicks followed by Ctrl+Z / undo within 1.5s."""
+        """Quarantines misclicks followed by Ctrl+Z/Esc/undo within 1.5s.
+
+        Optionally retains a bounded fraction (e.g. 0.12) of clean undo-recovery pairs
+        tagged with `is_recovery_step=True` per Roadmap Stage 3 recovery preservation.
+        """
         if not steps:
             return [], 0
-        quarantine_indices = set()
+        pairs: List[Tuple[int, int]] = []
         for i, step in enumerate(steps):
-            is_undo = (step.action_kind == 6) and (step.typed_text.lower() in ("ctrl+z", "undo") or 29 in step.hotkey_ids)
+            is_undo = (step.action_kind == 6) and (
+                step.typed_text.lower() in ("ctrl+z", "cmd+z", "undo", "esc", "escape")
+                or any(k in step.hotkey_ids for k in (29, 41))
+            )
             if is_undo and i > 0:
                 for j in range(i - 1, -1, -1):
                     prior = steps[j]
                     if step.action_event_ns - prior.action_event_ns <= undo_window_ns:
                         if prior.action_kind in (0, 1, 2, 4):
-                            quarantine_indices.add(j)
-                            quarantine_indices.add(i)
-                            break  # Undo targets the nearest preceding action
+                            pairs.append((j, i))
+                            break
                     else:
                         break
-        cleaned = [step for i, step in enumerate(steps) if i not in quarantine_indices]
+
+        retain_count = int(round(len(pairs) * max(0.0, min(1.0, retain_recovery_fraction))))
+        retained_indices = set()
+        quarantine_indices = set()
+        for pair_idx, (j, i) in enumerate(pairs):
+            if pair_idx < retain_count:
+                retained_indices.update((j, i))
+            else:
+                quarantine_indices.update((j, i))
+
+        cleaned: List[LeRobotV3TrajectoryEpisode] = []
+        for idx, step in enumerate(steps):
+            if idx in quarantine_indices:
+                continue
+            if idx in retained_indices:
+                step.is_recovery_step = True
+            cleaned.append(step)
         return cleaned, len(quarantine_indices)
 
+    @staticmethod
+    def coalesce_scrolling(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        max_scroll_gap_ns: int = 250_000_000,  # 250ms
+    ) -> List[LeRobotV3TrajectoryEpisode]:
+        """Aggregates rapid consecutive scroll bursts (within 250ms) into single deltas."""
+        if not steps:
+            return []
+        cleaned: List[LeRobotV3TrajectoryEpisode] = []
+        for step in steps:
+            if step.action_kind == 5 and cleaned and cleaned[-1].action_kind == 5:
+                prev = cleaned[-1]
+                time_delta = step.action_event_ns - prev.action_event_ns
+                if 0 <= time_delta <= max_scroll_gap_ns:
+                    dx = prev.scroll_delta[0] + step.scroll_delta[0]
+                    dy = prev.scroll_delta[1] + step.scroll_delta[1]
+                    cleaned[-1] = LeRobotV3TrajectoryEpisode(
+                        episode_id=prev.episode_id,
+                        step_index=prev.step_index,
+                        video_frame_index=prev.video_frame_index,
+                        frame_present_ns=prev.frame_present_ns,
+                        action_event_ns=step.action_event_ns,
+                        screen_width=prev.screen_width,
+                        screen_height=prev.screen_height,
+                        dpi_scale=prev.dpi_scale,
+                        os_platform=prev.os_platform,
+                        task_instruction=prev.task_instruction,
+                        subgoal_instruction=prev.subgoal_instruction,
+                        cursor_pre_xy=prev.cursor_pre_xy,
+                        action_kind=5,
+                        target_xy=prev.target_xy,
+                        drag_trajectory_xy=prev.drag_trajectory_xy,
+                        scroll_delta=(dx, dy),
+                        hotkey_ids=prev.hotkey_ids,
+                        typed_text=prev.typed_text,
+                        pixel_diff_ratio=max(prev.pixel_diff_ratio, step.pixel_diff_ratio),
+                        image_bytes=prev.image_bytes,
+                        image_tensor=prev.image_tensor,
+                        is_recovery_step=prev.is_recovery_step or step.is_recovery_step,
+                        task_success=prev.task_success and step.task_success,
+                    )
+                    continue
+            cleaned.append(step)
+        return cleaned
+
+    @staticmethod
+    def quarantine_dead_clicks(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        min_pixel_diff: float = 1e-4,
+    ) -> Tuple[List[LeRobotV3TrajectoryEpisode], int]:
+        """Drops non-recovery clicks whose post-action frame shows zero visual change."""
+        cleaned: List[LeRobotV3TrajectoryEpisode] = []
+        dropped = 0
+        for step in steps:
+            if step.action_kind in (0, 1, 2) and not step.is_recovery_step and step.pixel_diff_ratio <= min_pixel_diff:
+                dropped += 1
+                continue
+            cleaned.append(step)
+        return cleaned, dropped
+
+    @staticmethod
+    def redact_pii_regions(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        redact_boxes_norm: Optional[Sequence[Tuple[float, float, float, float]]] = None,
+    ) -> List[LeRobotV3TrajectoryEpisode]:
+        """Blacks out normalized credential/PII bounding boxes in RGB image_bytes before archival."""
+        if not steps or not redact_boxes_norm:
+            return steps
+        import io
+        from PIL import ImageDraw
+
+        for step in steps:
+            if not step.image_bytes:
+                continue
+            with Image.open(io.BytesIO(step.image_bytes)) as pil_img:
+                rgb = pil_img.convert("RGB")
+                w, h = rgb.size
+                draw = ImageDraw.Draw(rgb)
+                for bx1, by1, bx2, by2 in redact_boxes_norm:
+                    x1 = max(0, min(w, int(round(min(bx1, bx2) * w))))
+                    y1 = max(0, min(h, int(round(min(by1, by2) * h))))
+                    x2 = max(0, min(w, int(round(max(bx1, bx2) * w))))
+                    y2 = max(0, min(h, int(round(max(by1, by2) * h))))
+                    if x2 > x1 and y2 > y1:
+                        draw.rectangle([(x1, y1), (x2, y2)], fill=(0, 0, 0))
+                buf = io.BytesIO()
+                rgb.save(buf, format="JPEG", quality=90)
+                step.image_bytes = buf.getvalue()
+        return steps
+
+    @staticmethod
+    def segment_episodes(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        idle_split_ns: int = 5_000_000_000,
+    ) -> List[List[LeRobotV3TrajectoryEpisode]]:
+        """Segments continuous streams into atomic episodes on STOP (9) or >5s pause gaps."""
+        if not steps:
+            return []
+        segments: List[List[LeRobotV3TrajectoryEpisode]] = []
+        cur: List[LeRobotV3TrajectoryEpisode] = []
+        for step in steps:
+            if cur and (step.action_event_ns - cur[-1].action_event_ns) > idle_split_ns:
+                for idx, s in enumerate(cur):
+                    s.step_index = idx
+                segments.append(cur)
+                cur = []
+            cur.append(step)
+            if step.action_kind == 9:
+                for idx, s in enumerate(cur):
+                    s.step_index = idx
+                segments.append(cur)
+                cur = []
+        if cur:
+            for idx, s in enumerate(cur):
+                s.step_index = idx
+            segments.append(cur)
+        return segments
+
     @classmethod
-    def clean_trajectory(cls, steps: List[LeRobotV3TrajectoryEpisode]) -> List[LeRobotV3TrajectoryEpisode]:
-        """Runs full 4-stage curation pipeline on an episode trajectory."""
+    def clean_trajectory(
+        cls,
+        steps: List[LeRobotV3TrajectoryEpisode],
+        retain_recovery_fraction: float = 0.0,
+    ) -> List[LeRobotV3TrajectoryEpisode]:
+        """Runs full curation pipeline on an episode trajectory."""
         s1 = cls.collapse_idle_frames(steps)
         s2 = cls.smooth_jitter(s1)
         s3 = cls.coalesce_typing(s2)
-        s4, _ = cls.quarantine_misclicks(s3)
-        for i, step in enumerate(s4):
+        s4 = cls.coalesce_scrolling(s3)
+        s5, _ = cls.quarantine_misclicks(s4, retain_recovery_fraction=retain_recovery_fraction)
+        for i, step in enumerate(s5):
             step.step_index = i
-        return s4
+        return s5
 
 
 class QADoctor:
@@ -658,6 +812,60 @@ class QADoctor:
         """
         local_idx = global_frame_idx - episode_start_frame
         return max(0, min(local_idx, max(0, episode_length - 1)))
+
+    @staticmethod
+    def verify_video_frame_counts(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        actual_video_frame_count: int,
+    ) -> Dict[str, Any]:
+        """Verifies every step's video_frame_index is within [0, actual_video_frame_count - 1]."""
+        bad = [
+            idx
+            for idx, s in enumerate(steps)
+            if s.video_frame_index < 0 or s.video_frame_index >= actual_video_frame_count
+        ]
+        return {
+            "valid": len(bad) == 0 and actual_video_frame_count > 0,
+            "actual_video_frame_count": actual_video_frame_count,
+            "out_of_range_steps": bad,
+        }
+
+    @staticmethod
+    def render_visual_replay_audit(
+        steps: Sequence[LeRobotV3TrajectoryEpisode],
+        output_dir: Union[str, Path],
+        max_frames: int = 20,
+    ) -> List[Path]:
+        """Draws recorded click/drag markers onto RGB frames for human spot-audits."""
+        import io
+        from PIL import ImageDraw
+
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        written: List[Path] = []
+        for idx, step in enumerate(list(steps)[:max_frames]):
+            if step.image_bytes:
+                with Image.open(io.BytesIO(step.image_bytes)) as pil_img:
+                    img = pil_img.convert("RGB")
+            elif step.image_tensor is not None:
+                arr = (step.image_tensor.detach().cpu().clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+                img = Image.fromarray(arr, mode="RGB")
+            else:
+                img = Image.new("RGB", (min(step.screen_width, 640), min(step.screen_height, 400)), color=(28, 32, 38))
+
+            draw = ImageDraw.Draw(img)
+            px = max(0, min(img.width - 1, int(round(step.target_xy[0] * (img.width - 1)))))
+            py = max(0, min(img.height - 1, int(round(step.target_xy[1] * (img.height - 1)))))
+            r = max(6, min(14, min(img.width, img.height) // 60))
+            color = (46, 204, 113) if step.is_recovery_step else (231, 76, 60)
+            draw.ellipse((px - r, py - r, px + r, py + r), outline=color, width=2)
+            draw.line((px - r * 2, py, px + r * 2, py), fill=color, width=2)
+            draw.line((px, py - r * 2, px, py + r * 2), fill=color, width=2)
+
+            file_out = out_path / f"audit_{step.episode_id}_{idx:03d}.jpg"
+            img.save(file_out, format="JPEG", quality=88)
+            written.append(file_out)
+        return written
 
 
 class LeRobotV3Dataset(Dataset):
@@ -806,7 +1014,7 @@ ACTION_NAME_TO_INDEX: Dict[str, int] = {
     "move": 3,
     "hover": 3,
     "cursor_move": 3,
-    "triple_click": 3,
+    "triple_click": 0,
     "drag_start": 4,
     "drag_end": 4,
     "drag": 4,
@@ -995,15 +1203,19 @@ class Phase4DataMixtureDataset(Dataset):
             traj_tensor = raw_traj.float()
         else:
             traj_tensor = torch.tensor(list(raw_traj)[:16], dtype=torch.float32)
-            if traj_tensor.shape[0] < 16:
-                padding = traj_tensor[-1:].repeat(16 - traj_tensor.shape[0], 1)
-                traj_tensor = torch.cat([traj_tensor, padding], dim=0)
+        if traj_tensor.numel() == 0 or traj_tensor.shape[0] == 0:
+            traj_tensor = torch.full((16, 2), 0.5, dtype=torch.float32)
+        elif traj_tensor.shape[0] < 16:
+            padding = traj_tensor[-1:].repeat(16 - traj_tensor.shape[0], 1)
+            traj_tensor = torch.cat([traj_tensor, padding], dim=0)
 
         s_delta = item.get("scroll_delta", (0.0, 0.0))
         if isinstance(s_delta, torch.Tensor):
             scroll_tensor = s_delta.float()
         else:
             scroll_tensor = torch.tensor(list(s_delta)[:2], dtype=torch.float32)
+        if scroll_tensor.numel() > 0 and scroll_tensor.abs().max() > 1.5:
+            scroll_tensor = (scroll_tensor / 120.0).clamp(-1.0, 1.0)
 
         return {
             "image": img_tensor,
@@ -1086,4 +1298,167 @@ def create_phase4_train_val_dataloaders(
     )
 
     return train_loader, val_loader
+
+
+def save_lerobot_v3_shards(
+    episodes: Sequence[Sequence[LeRobotV3TrajectoryEpisode]],
+    root_dir: Union[str, Path],
+    episodes_per_file: int = 100,
+) -> Dict[str, Any]:
+    """Serializes LeRobot v3.0 episodes into canonical chunk-XXX/file-XXX shards."""
+    import base64
+
+    root = Path(root_dir)
+    data_dir = root / "data"
+    chunk_dir = data_dir / "chunk-000"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import pyarrow as pa  # type: ignore[import-untyped]
+        import pyarrow.parquet as pq  # type: ignore[import-untyped]
+        has_parquet = True
+    except Exception:
+        has_parquet = False
+
+    shard_files: List[str] = []
+    total_rows = 0
+    for shard_idx in range(0, max(1, len(episodes)), episodes_per_file):
+        chunk_eps = episodes[shard_idx : shard_idx + episodes_per_file]
+        if not chunk_eps:
+            continue
+        rows: List[Dict[str, Any]] = []
+        for ep in chunk_eps:
+            for step in ep:
+                d = step.to_dict()
+                raw_b = d.pop("image_bytes", b"")
+                d["image_b64"] = base64.b64encode(raw_b).decode("ascii") if raw_b else ""
+                rows.append(d)
+                total_rows += 1
+
+        file_idx = shard_idx // episodes_per_file
+        if has_parquet:
+            shard_path = chunk_dir / f"file-{file_idx:03d}.parquet"
+            table = pa.Table.from_pylist(rows)
+            pq.write_table(table, shard_path)
+        else:
+            shard_path = chunk_dir / f"file-{file_idx:03d}.jsonl"
+            with open(shard_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+        shard_files.append(str(shard_path))
+
+    return {
+        "format": "parquet" if has_parquet else "jsonl",
+        "shards": shard_files,
+        "episode_count": len(episodes),
+        "total_rows": total_rows,
+    }
+
+
+def load_lerobot_v3_shards(root_dir: Union[str, Path]) -> List[List[LeRobotV3TrajectoryEpisode]]:
+    """Loads LeRobot v3.0 chunked Parquet or JSONL shards back into grouped episodes."""
+    import base64
+
+    data_dir = Path(root_dir) / "data"
+    parquet_files = sorted(data_dir.rglob("*.parquet"))
+    jsonl_files = sorted(data_dir.rglob("*.jsonl"))
+
+    rows: List[Dict[str, Any]] = []
+    if parquet_files:
+        import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
+        for pf in parquet_files:
+            rows.extend(pq.read_table(pf).to_pylist())
+    elif jsonl_files:
+        for jf in jsonl_files:
+            with open(jf, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        rows.append(json.loads(line))
+
+    grouped: Dict[str, List[LeRobotV3TrajectoryEpisode]] = {}
+    for row in rows:
+        b64 = row.pop("image_b64", "")
+        if b64:
+            row["image_bytes"] = base64.b64decode(b64)
+        ep_step = LeRobotV3TrajectoryEpisode.from_dict(row)
+        grouped.setdefault(ep_step.episode_id, []).append(ep_step)
+    return list(grouped.values())
+
+
+def run_phase2_gate2(
+    output_path: str = "benchmarks/results/phase2_gate2_report.json",
+    audit_dir: str = "benchmarks/results/phase2_visual_audit",
+    num_episodes: int = 500,
+    steps_per_episode: int = 10,
+) -> Dict[str, Any]:
+    """Runs Phase 2 Gate 2 verification and writes structured telemetry report."""
+    episodes = generate_golden_diagnostic_dataset(
+        num_episodes=num_episodes,
+        steps_per_episode=steps_per_episode,
+    )
+    audit = QADoctor.audit_dataset(episodes)
+
+    ds = LeRobotV3Dataset(episodes=episodes, target_size=(256, 256))
+    loader = make_lerobot_v3_dataloader(ds, batch_size=64, shuffle=False)
+    t0 = time.perf_counter()
+    decoded_frames = 0
+    for batch in loader:
+        decoded_frames += int(batch["image"].shape[0])
+    elapsed_s = max(1e-6, time.perf_counter() - t0)
+    frames_per_sec = decoded_frames / elapsed_s
+
+    sample_audit_files = QADoctor.render_visual_replay_audit(episodes[0], output_dir=audit_dir, max_frames=5)
+    idx_patch_ok = (
+        QADoctor.patch_lerobot_3513([0, 9, 15], 10) == [0, 9, 9]
+        and QADoctor.patch_lerobot_3080(105, 100, 10) == 5
+    )
+
+    gate_passed = bool(
+        audit["pass_rate"] == 1.0
+        and audit["p95_sync_error_ms"] < 5.0
+        and frames_per_sec > 120.0
+        and idx_patch_ok
+        and len(sample_audit_files) == 5
+    )
+
+    report = {
+        "phase": "phase2_gate2",
+        "gate2_passed": gate_passed,
+        "golden_diagnostic": {
+            "total_episodes": audit["total_episodes"],
+            "passed_episodes": audit["passed_episodes"],
+            "pass_rate": audit["pass_rate"],
+            "p95_sync_error_ms": round(audit["p95_sync_error_ms"], 3),
+        },
+        "dataloader_benchmark": {
+            "decoded_frames": decoded_frames,
+            "elapsed_s": round(elapsed_s, 3),
+            "frames_per_sec": round(frames_per_sec, 1),
+        },
+        "lerobot_patches_verified": idx_patch_ok,
+        "visual_audit_frames_written": [str(p) for p in sample_audit_files],
+    }
+    out_file = Path(output_path)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="LeRobot v3.0 Data QA & Phase 2 Gate 2 Runner")
+    parser.add_argument("--gate2", action="store_true", help="Execute Phase 2 Exit Gate 2 audit & benchmark")
+    parser.add_argument("--output", type=str, default="benchmarks/results/phase2_gate2_report.json")
+    parser.add_argument("--episodes", type=int, default=500)
+    args = parser.parse_args()
+
+    res = run_phase2_gate2(output_path=args.output, num_episodes=args.episodes)
+    print(f"PHASE2-GATE2: {'PASS' if res['gate2_passed'] else 'FAIL'} ({res['dataloader_benchmark']['frames_per_sec']} fps) -> {args.output}")
+
+
+if __name__ == "__main__":
+    main()
+
 

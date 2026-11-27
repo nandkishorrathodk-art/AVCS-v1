@@ -29,12 +29,13 @@ classifiers = [
 keywords = [
     "avcs",
     "visual-cortex",
+    "single-brain-vla",
+    "pure-rgb",
     "screen-perception",
     "computer-use",
     "ai-agents",
-    "v-jepa",
-    "affordance",
-    "visual-servoing",
+    "vla",
+    "gui-actor",
     "biological-vision",
 ]
 requires-python = ">=3.9"
@@ -69,6 +70,11 @@ server = [
 client = [
     "requests>=2.31.0",
 ]
+vla = [
+    "transformers>=4.49.0",
+    "peft>=0.14.0",
+    "accelerate>=1.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/Parth-labs-in/AVCS"
@@ -78,6 +84,7 @@ Issues = "https://github.com/Parth-labs-in/AVCS/issues"
 
 [project.scripts]
 avcs-ace = "avcs.ace.runner:main"
+avcs-vla = "avcs.runtime.runner:main"
 avcs-benchmark = "avcs.benchmark:main"
 avcs-hud = "avcs.dashboard:main"
 avcs-gui = "avcs.gui:launch_gui"
@@ -104,3 +111,16 @@ avcs_sdk = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+exclude = ["**/__pycache__", ".venv", "runs"]

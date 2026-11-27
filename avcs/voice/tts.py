@@ -309,11 +309,9 @@ class EspeakNgEngine(TtsEngine):
 
 
 class NeuralVoiceModelEngine(TtsEngine):
-    """Deep learning neural voice model engine.
+    """Quarantined cloud neural voice stub (disabled in 100% offline local VLA mode).
 
-    Synthesizes rich, human-quality neural speech using transformer-based neural vocoder models
-    (Microsoft Neural Voice models: en-US-AriaNeural, en-US-GuyNeural, en-US-JennyNeural).
-    Produces natural prosody, breathing, intonation, and zero robotic native-ness.
+    Cloud WebSocket synthesis (edge_tts) is disabled to prevent outbound network calls.
     """
 
     name = "neural-voice"
@@ -324,52 +322,12 @@ class NeuralVoiceModelEngine(TtsEngine):
         self._lock = threading.Lock()
 
     def available(self) -> bool:
-        try:
-            import edge_tts
-            return True
-        except ImportError:
-            return False
+        return False
 
     def synthesize(self, text: str, profile: VoiceProfile) -> PcmClip:
-        if not self.available():
-            raise EngineNotAvailable("edge_tts neural speech package is not available")
-        text = (text or "").strip()
-        if not text:
-            return PcmClip(samples=np.zeros(0, dtype=np.int16), sample_rate=24000)
-
-        import asyncio
-        import edge_tts
-
-        voice = profile.voice_variant if profile.voice_variant and "Neural" in profile.voice_variant else self.voice_model
-
-        rate_delta = int(round((profile.speed_wpm - 165) / 1.65))
-        rate_str = f"{rate_delta:+d}%" if rate_delta != 0 else "+0%"
-
-        async def _synthesize():
-            communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-            audio_bytes = bytearray()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_bytes.extend(chunk["data"])
-            return bytes(audio_bytes)
-
-        try:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                        mp3_bytes = ex.submit(lambda: asyncio.run(_synthesize())).result(timeout=20)
-                else:
-                    mp3_bytes = loop.run_until_complete(_synthesize())
-            except RuntimeError:
-                mp3_bytes = asyncio.run(_synthesize())
-
-            clip = PcmClip(samples=np.zeros(len(mp3_bytes), dtype=np.int16), sample_rate=24000)
-            clip._mp3_data = mp3_bytes
-            return clip
-        except Exception as exc:
-            raise SynthesisError(f"Neural voice model synthesis failed: {exc}") from exc
+        raise EngineNotAvailable(
+            "Cloud WebSocket TTS (edge_tts) is disabled in 100% offline local VLA mode."
+        )
 
     def play(self, clip: PcmClip) -> bool:
         if clip.is_empty:
@@ -693,21 +651,18 @@ class Speaker:
         self,
         engine: Optional[TtsEngine] = None,
         profile: Optional[VoiceProfile] = None,
+        allow_cloud_tts: bool = False,
     ) -> None:
         self.profile = profile or VoiceProfile()
         if engine is not None:
             self.engine = engine
         else:
-            neural = NeuralVoiceModelEngine()
-            if neural.available():
-                self.engine = neural
+            win_nat = WindowsNaturalSpeechEngine()
+            if win_nat.available():
+                self.engine = win_nat
             else:
-                win_nat = WindowsNaturalSpeechEngine()
-                if win_nat.available():
-                    self.engine = win_nat
-                else:
-                    espeak = EspeakNgEngine()
-                    self.engine = espeak if espeak.available() else NullEngine()
+                espeak = EspeakNgEngine()
+                self.engine = espeak if espeak.available() else NullEngine()
 
     @property
     def engine_name(self) -> str:

@@ -185,46 +185,34 @@ class ParthLabsGatewayHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Invalid or expired AVC_API_KEY"})
                 return
 
-            # Check if backend LLM credentials are set on the gateway host
-            backend_key = (
-                os.environ.get("BACKEND_LLM_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("OPENAI_API_KEY")
-            )
-
-            # If backend key is configured, forward to underlying model provider
-            if backend_key:
+            # Cloud backend proxy forwarding is disabled in 100% self-contained local VLA mode.
+            # Route strictly locally (loopback-only if configured) without outbound cloud API calls.
+            target_url = os.environ.get("AVCS_LOCAL_VAM_ENDPOINT", "").strip()
+            if target_url and any(h in target_url for h in ("127.0.0.1", "localhost", "::1")):
                 try:
-                    target_url = os.environ.get(
-                        "BACKEND_LLM_URL",
-                        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                    )
                     body_copy = dict(body)
-                    body_copy["model"] = os.environ.get("BACKEND_LLM_MODEL", "gemini-flash-lite-latest")
+                    body_copy["model"] = os.environ.get("AVCS_LOCAL_VAM_MODEL", "Qwen2.5-VL-3B-Instruct")
                     req = urllib.request.Request(
                         target_url,
                         data=json.dumps(body_copy).encode("utf-8"),
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {backend_key}",
-                        },
+                        headers={"Content-Type": "application/json"},
                         method="POST",
                     )
                     with urllib.request.urlopen(req, timeout=30.0) as resp:
                         resp_data = json.loads(resp.read().decode("utf-8"))
                     self._send_json(200, resp_data)
                     return
-                except Exception as exc:
+                except Exception:
                     pass
 
-            # Gateway Heuristic Reasoning Router (Fallback)
+            # Local fail-closed fallback (WAIT)
             messages = body.get("messages", [])
             last_prompt = messages[-1].get("content", "") if messages else ""
 
             response_content = json.dumps({
                 "action": "wait",
                 "target": "None",
-                "reason": "Parth Labs Gateway routing prompt to System 1 sensory observer.",
+                "reason": "Local-only VLA gateway fallback (cloud proxy disabled).",
             })
 
             completion = {

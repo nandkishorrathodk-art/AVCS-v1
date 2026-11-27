@@ -510,10 +510,12 @@ class AVCSController:
         if self._stream_error is not None:
             raise RuntimeError("AVCS streaming worker failed") from self._stream_error
 
-    def locate(self, query: str, frame: Optional[np.ndarray] = None) -> GroundingResult:
+    def locate(self, query: str, frame: Optional[np.ndarray] = None, op: str = "click") -> GroundingResult:
         """Locates a natural-language query on screen using the trained neural grounder.
         
         Coordinates remain internal to AVCS. System 2 does not receive or manage them.
+        ``op`` is forwarded to the capability kernel so double_click/drag/etc. are
+        checked against the correct grant, not always "click".
         """
         clean_q = query.strip()
         if not clean_q:
@@ -529,7 +531,7 @@ class AVCSController:
             # decision belongs to the capability kernel. It checks the grant,
             # the query allow-list, frame degeneracy and the grounding peak.
             decision = self.capability.authorize_prediction(
-                op="click",
+                op=op,
                 query=clean_q,
                 prediction=prediction,
                 frame=frame,
@@ -570,7 +572,7 @@ class AVCSController:
 
         # 1. Ground target
         try:
-            grounding = self.locate(clean_q)
+            grounding = self.locate(clean_q, op="double_click" if double_click else "click")
         except UnvalidatedGroundingError as exc:
             if not self.is_grounder_trained:
                 raise
@@ -816,6 +818,29 @@ class AVCSController:
         """Types text with fail-closed visual focus verification."""
         t0 = time.perf_counter()
         field = target_field or target_query
+
+        # Capability check: type_text is a mutating op that needs an explicit
+        # grant, just like click. Without this check, type_text bypassed the
+        # CapabilityKernel entirely.
+        from avcs.control.capability import GroundingEvidence
+        type_decision = self.capability.authorize(
+            op="type_text",
+            query=field or "current_focus",
+            evidence=GroundingEvidence(
+                candidate_point_norm=None,
+                peak_probability=1.0,
+            ),
+        )
+        if not type_decision.allowed:
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            return ActionResult(
+                action="type_text",
+                target_query=field or "current_focus",
+                success=False,
+                verified=False,
+                message=f"Typing blocked by capability kernel: {type_decision.reason}.",
+                latency_ms=dt_ms,
+            )
 
         # If a target input field was named, locate and click into it first
         if field:

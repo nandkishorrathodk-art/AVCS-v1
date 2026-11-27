@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 # OpenAI-compatible chat endpoints.  base_url can be overridden per provider.
 PROVIDERS: dict[str, dict[str, str]] = {
@@ -103,10 +104,39 @@ class RuleBackend:
                 "blocking_issues": [], "confidence": 0.7}
 
 
-class RemoteBackend:
-    """OpenAI-compatible chat completions over stdlib urllib (no SDK needed)."""
+_LOCAL_ONLY_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_QUARANTINED_CLOUD_HOSTS = frozenset({
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.x.ai",
+    "api.deepseek.com",
+    "integrate.api.nvidia.com",
+})
 
-    def __init__(self, provider: str, model: Optional[str] = None, timeout: int = 60) -> None:
+
+def _is_loopback_url(url: str) -> bool:
+    """Return True only when ``url`` targets a local loopback host."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in ("http", "https") and host in _LOCAL_ONLY_HOSTS
+
+
+class RemoteBackend:
+    """OpenAI-compatible chat completions over stdlib urllib (quarantined to loopback or _post mock)."""
+
+    def __init__(
+        self,
+        provider: str,
+        model: Optional[str] = None,
+        timeout: int = 60,
+        _post: Optional[Callable[..., Any]] = None,
+    ) -> None:
         if provider not in PROVIDERS:
             raise ValueError(f"unknown provider {provider!r}")
         spec = PROVIDERS[provider]
@@ -118,8 +148,31 @@ class RemoteBackend:
         self._base = os.environ.get(f"{provider.upper()}_BASE_URL", spec["base"]).rstrip("/")
         self._model = model or spec["model"]
         self._timeout = timeout
+        if _post is not None:
+            self._post = _post  # type: ignore[method-assign]
+
+    def _post(self, url: str, body: bytes, headers: dict[str, str], timeout: int) -> Any:
+        if not _is_loopback_url(url):
+            host = (urllib.parse.urlsplit(url).hostname or url).lower()
+            raise RuntimeError(
+                f"RemoteBackend quarantined: outbound request to external host {host!r} is refused (loopback only)."
+            )
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
 
     def complete(self, system: str, user: str, max_tokens: int = 400) -> str:
+        url = f"{self._base}/chat/completions"
+        post_fn = self._post
+        is_mocked_post = not (hasattr(post_fn, "__func__") and post_fn.__func__ is _UNPATCHED_REMOTE_POST)
+        if not is_mocked_post:
+            host = (urllib.parse.urlsplit(url).hostname or self._base).lower()
+            if host in _QUARANTINED_CLOUD_HOSTS or not _is_loopback_url(url):
+                raise RuntimeError(
+                    f"RemoteBackend quarantined: outbound request to external host {host!r} is refused "
+                    "unless targeting loopback or a test mock (_post)."
+                )
+
         body = json.dumps({
             "model": self._model,
             "messages": [
@@ -129,20 +182,22 @@ class RemoteBackend:
             "max_tokens": max_tokens,
             "temperature": 0.2,
         }).encode()
-        req = urllib.request.Request(
-            f"{self._base}/chat/completions",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._key}",
-            },
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._key}",
+        }
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode())
+            data = post_fn(url, body, headers, self._timeout)
+            if isinstance(data, (bytes, bytearray)):
+                data = json.loads(data.decode())
+            elif isinstance(data, str):
+                data = json.loads(data)
             return data["choices"][0]["message"]["content"]
         except (urllib.error.URLError, KeyError, json.JSONDecodeError) as exc:
             return json.dumps({"error": f"{self.name} backend failed: {exc}"})
+
+
+_UNPATCHED_REMOTE_POST = RemoteBackend._post
 
 
 class LocalBackend:

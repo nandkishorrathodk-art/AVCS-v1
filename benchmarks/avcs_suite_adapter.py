@@ -197,9 +197,17 @@ class AVCSSuiteDriver(OSCursorDriver):
 class AVCSSuiteAdapter:
     """Production AgentAdapter implementation for AVCS Suite A deterministic fixtures."""
 
-    def __init__(self, port: int = 8765, base_url: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        port: int = 8765,
+        base_url: Optional[str] = None,
+        pure_rgb_only: bool = True,
+        draw_grid: bool = False,
+    ) -> None:
         self.port = port
         self._custom_base_url = base_url
+        self.pure_rgb_only = bool(pure_rgb_only)
+        self.draw_grid = bool(draw_grid)
 
         # Initialize real capture adapter
         if sys.platform == "win32":
@@ -223,7 +231,7 @@ class AVCSSuiteAdapter:
         return self._custom_base_url or os.environ.get("AVCS_FIXTURE_URL", f"http://127.0.0.1:{self.port}")
 
     def _find_fixture_hwnd(self) -> Optional[int]:
-        if sys.platform != "win32":
+        if getattr(self, "pure_rgb_only", True) or sys.platform != "win32":
             return None
         try:
             import win32gui
@@ -233,9 +241,9 @@ class AVCSSuiteAdapter:
             return None
 
     def _inspect_visible_controls(self, hwnd: int) -> List[Dict[str, Any]]:
-        """Enumerates visible physical child controls using Win32 API."""
+        """Enumerates visible physical child controls using Win32 API (gated behind pure_rgb_only=False)."""
         controls: List[Dict[str, Any]] = []
-        if sys.platform != "win32" or not hwnd:
+        if getattr(self, "pure_rgb_only", True) or sys.platform != "win32" or not hwnd:
             return controls
 
         try:
@@ -283,17 +291,20 @@ class AVCSSuiteAdapter:
                 frame = np.full((1200, 1920, 3), 40, dtype=np.uint8)
         state = self.eye.observe(frame=frame)
 
-        # 2. Locate active fixture window
-        hwnd = self._find_fixture_hwnd()
-        if hwnd:
-            # Update active window title for safety controller
-            self.eye.active_window_title = "AVCS Deterministic Fixture Suite A"
-            try:
-                ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
-            except Exception:
-                pass
+        # 2. Locate active fixture window (only when pure_rgb_only=False)
+        hwnd = None
+        controls: List[Dict[str, Any]] = []
+        if not getattr(self, "pure_rgb_only", True):
+            hwnd = self._find_fixture_hwnd()
+            if hwnd:
+                # Update active window title for safety controller
+                self.eye.active_window_title = "AVCS Deterministic Fixture Suite A"
+                try:
+                    ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+                except Exception:
+                    pass
 
-        controls = self._inspect_visible_controls(hwnd) if hwnd else []
+            controls = self._inspect_visible_controls(hwnd) if hwnd else []
 
         # 3. Task Intent Analysis & Disambiguation
         task_lower = task.lower()

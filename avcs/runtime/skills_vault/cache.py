@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import io
 from pathlib import Path
@@ -470,6 +471,7 @@ class SkillCache:
         self.db_path = self.vault_dir / "skills.db"
         self._entries: Dict[str, List[SkillCacheEntry]] = {}
         self._conn: Optional[Any] = None
+        self._lock = threading.RLock()
         if self.backend == "sqlite":
             self._init_sqlite()
         self._load_all()
@@ -574,30 +576,31 @@ class SkillCache:
         return None
 
     def _load_all(self) -> None:
-        self._entries.clear()
-        if self.backend == "sqlite":
-            if self.db_path.exists():
-                try:
-                    conn = self._get_connection()
-                    cursor = conn.cursor()
+        with self._lock:
+            self._entries.clear()
+            if self.backend == "sqlite":
+                if self.db_path.exists():
                     try:
-                        cursor.execute("SELECT entry_json FROM skills ORDER BY created_at ASC")
-                        for (row_json,) in cursor.fetchall():
-                            entry = SkillCacheEntry.from_dict(json.loads(row_json))
-                            self._entries.setdefault(entry.goal_hash, []).append(entry)
-                    finally:
-                        cursor.close()
-                except Exception as e:
-                    logger.warning(f"Failed to load skills from SQLite {self.db_path}: {e}")
-        else:
-            if self.skills_dir.exists():
-                for file_path in self.skills_dir.glob("*.json"):
-                    try:
-                        data = json.loads(file_path.read_text(encoding="utf-8"))
-                        entry = SkillCacheEntry.from_dict(data)
-                        self._entries.setdefault(entry.goal_hash, []).append(entry)
+                        conn = self._get_connection()
+                        cursor = conn.cursor()
+                        try:
+                            cursor.execute("SELECT entry_json FROM skills ORDER BY created_at ASC")
+                            for (row_json,) in cursor.fetchall():
+                                entry = SkillCacheEntry.from_dict(json.loads(row_json))
+                                self._entries.setdefault(entry.goal_hash, []).append(entry)
+                        finally:
+                            cursor.close()
                     except Exception as e:
-                        logger.warning(f"Failed to load cached skill {file_path}: {e}")
+                        logger.warning(f"Failed to load skills from SQLite {self.db_path}: {e}")
+            else:
+                if self.skills_dir.exists():
+                    for file_path in self.skills_dir.glob("*.json"):
+                        try:
+                            data = json.loads(file_path.read_text(encoding="utf-8"))
+                            entry = SkillCacheEntry.from_dict(data)
+                            self._entries.setdefault(entry.goal_hash, []).append(entry)
+                        except Exception as e:
+                            logger.warning(f"Failed to load cached skill {file_path}: {e}")
 
         # Automatically load and sync verified golden trajectories from skills_vault/golden/*.json
         golden_dir = getattr(self, "golden_dir", self.vault_dir / "golden")
@@ -678,9 +681,10 @@ class SkillCache:
                             except Exception:
                                 v_hash = None
 
-                        anchors.append(UIStateAnchor(window_title=window_title, process_name=process_name))
                         if v_hash:
                             anchors.append(UIStateAnchor(window_title=window_title, process_name=process_name, visual_hash=v_hash))
+                        else:
+                            anchors.append(UIStateAnchor(window_title=window_title, process_name=process_name))
 
                     g_hash = self.hash_goal(goal)
                     g_slug = self.slugify(goal)
@@ -756,25 +760,26 @@ class SkillCache:
             metadata=metadata or {},
         )
 
-        if self.backend == "sqlite":
-            self._init_sqlite()
-            conn = self._get_connection()
-            with conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO skills (entry_id, goal, goal_hash, goal_slug, entry_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (entry_id, goal, g_hash, g_slug, json.dumps(entry.to_dict()), created_time),
-                )
+        with self._lock:
+            if self.backend == "sqlite":
+                self._init_sqlite()
+                conn = self._get_connection()
+                with conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO skills (entry_id, goal, goal_hash, goal_slug, entry_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (entry_id, goal, g_hash, g_slug, json.dumps(entry.to_dict()), created_time),
+                    )
+                self._entries.setdefault(g_hash, []).append(entry)
+                logger.info(f"Cached skill saved in SQLite for '{goal}' ({len(act_dicts)} actions, {len(anchor_list)} anchors) -> id={entry_id}")
+                return f"sqlite://{self.db_path}#skills/{entry_id}"
+
+            filename = f"{g_hash}_{entry_id}_{g_slug}.json"
+            target_path = self.skills_dir / filename
+            target_path.write_text(json.dumps(entry.to_dict(), indent=2), encoding="utf-8")
+
             self._entries.setdefault(g_hash, []).append(entry)
-            logger.info(f"Cached skill saved in SQLite for '{goal}' ({len(act_dicts)} actions, {len(anchor_list)} anchors) -> id={entry_id}")
-            return f"sqlite://{self.db_path}#skills/{entry_id}"
-
-        filename = f"{g_hash}_{entry_id}_{g_slug}.json"
-        target_path = self.skills_dir / filename
-        target_path.write_text(json.dumps(entry.to_dict(), indent=2), encoding="utf-8")
-
-        self._entries.setdefault(g_hash, []).append(entry)
-        logger.info(f"Cached skill saved for '{goal}' ({len(act_dicts)} actions, {len(anchor_list)} anchors) -> {filename}")
-        return str(target_path)
+            logger.info(f"Cached skill saved for '{goal}' ({len(act_dicts)} actions, {len(anchor_list)} anchors) -> {filename}")
+            return str(target_path)
 
     def lookup(
         self,
@@ -889,24 +894,25 @@ class SkillCache:
 
     def clear(self) -> None:
         """Clears memory and disk cache."""
-        self._entries.clear()
-        if self.skills_dir.exists():
-            for f in self.skills_dir.glob("*.json"):
+        with self._lock:
+            self._entries.clear()
+            if self.skills_dir.exists():
+                for f in self.skills_dir.glob("*.json"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            if self._conn is not None:
                 try:
-                    f.unlink()
+                    with self._conn:
+                        self._conn.execute("DELETE FROM skills")
                 except Exception:
                     pass
-        if self._conn is not None:
-            try:
-                with self._conn:
-                    self._conn.execute("DELETE FROM skills")
-            except Exception:
-                pass
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
         for suffix in ("", "-wal", "-shm", "-journal"):
             p = self.db_path.with_name(self.db_path.name + suffix)
             if p.exists():

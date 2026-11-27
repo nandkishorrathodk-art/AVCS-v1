@@ -9,10 +9,27 @@ import json
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from adapters.tool_schemas import get_ollama_tools
 from forge.vision.cortex.sdk import ScreenEye
 from avcs.drivers.base import BaseAVCSDriver, StepResult
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _validate_loopback_host(host: str) -> str:
+    cleaned = (host or "").strip().rstrip("/")
+    parsed = urlsplit(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"Ollama host must be an absolute HTTP(S) loopback URL, got: {host!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("Ollama host must not contain embedded credentials")
+    if parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+        raise ValueError(
+            f"Ollama host must be a loopback endpoint (127.0.0.1, localhost, ::1), got: {host!r}"
+        )
+    return cleaned
 
 
 class OllamaAVCSDriver(BaseAVCSDriver):
@@ -25,8 +42,9 @@ class OllamaAVCSDriver(BaseAVCSDriver):
         model: str = "llama3.2-vision",
         force_virtual_motor: bool = False,
     ) -> None:
+        validated_host = _validate_loopback_host(host)
         super().__init__(eye=eye, force_virtual_motor=force_virtual_motor)
-        self.host = host.rstrip("/")
+        self.host = validated_host
         self.model = model
         self.tools = get_ollama_tools()
 
@@ -50,7 +68,8 @@ class OllamaAVCSDriver(BaseAVCSDriver):
 
     def chat(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Sends chat request to local Ollama daemon with AVCS tool schemas."""
-        url = f"{self.host}/api/chat"
+        host = _validate_loopback_host(self.host)
+        url = f"{host}/api/chat"
         payload = {
             "model": self.model,
             "messages": messages,

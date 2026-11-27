@@ -236,10 +236,10 @@ class MockQwenBackbone(nn.Module):
 
 
 def _sanitize_fp16_value(obj: Any, max_abs: float = 60000.0) -> Any:
-    """Recursively clamps FP16 tensors to prevent Inf -> (Inf * 0 = NaN) inside RMSNorm."""
+    """Recursively clamps FP16 tensors out-of-place to prevent Inf -> (Inf * 0 = NaN) inside RMSNorm."""
     if isinstance(obj, torch.Tensor):
         if obj.dtype == torch.float16:
-            return torch.nan_to_num(obj, nan=0.0, posinf=max_abs, neginf=-max_abs).clamp_(-max_abs, max_abs)
+            return torch.nan_to_num(obj, nan=0.0, posinf=max_abs, neginf=-max_abs).clamp(-max_abs, max_abs)
         return obj
     if isinstance(obj, tuple):
         return tuple(_sanitize_fp16_value(item, max_abs=max_abs) for item in obj)
@@ -298,17 +298,53 @@ def _install_fp16_overflow_guards(backbone: nn.Module, max_abs: float = 32768.0)
     return hook_count
 
 
+class LoRALinear(nn.Module):
+    """Lightweight rank-r LoRA adapter wrapping a frozen nn.Linear without peft dependency."""
+
+    def __init__(
+        self,
+        base_layer: nn.Module,
+        r: int = 16,
+        lora_alpha: float = 32.0,
+        lora_dropout: float = 0.05,
+    ) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        for p in self.base_layer.parameters():
+            p.requires_grad = False
+        in_features = int(getattr(base_layer, "in_features"))
+        out_features = int(getattr(base_layer, "out_features"))
+        self.r = int(r)
+        self.lora_alpha = float(lora_alpha)
+        self.scaling = self.lora_alpha / float(max(1, self.r))
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
+
+        dev = getattr(getattr(base_layer, "weight", None), "device", torch.device("cpu"))
+        self.lora_A = nn.Linear(in_features, self.r, bias=False).to(device=dev, dtype=torch.float32)
+        self.lora_B = nn.Linear(self.r, out_features, bias=False).to(device=dev, dtype=torch.float32)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_safe = _sanitize_fp16_value(x, max_abs=32768.0) if x.dtype == torch.float16 else x
+        base_out = self.base_layer(x_safe)
+        lora_in = self.lora_dropout(x_safe.to(dtype=self.lora_A.weight.dtype))
+        lora_delta = self.lora_B(self.lora_A(lora_in)) * self.scaling
+        return base_out + lora_delta.to(dtype=base_out.dtype)
+
+
 class QwenGUIActorModel(nn.Module):
-    """Attaches GUIActorPatchPointer + ParallelActionHeads to frozen Qwen2.5-VL-3B-Instruct.
+    """Attaches GUIActorPatchPointer + ParallelActionHeads to Qwen2.5-VL-3B-Instruct.
 
     Backbone Architecture:
-    - Pretrained Qwen/Qwen2.5-VL-3B-Instruct: ~3.74B parameters (100% frozen, requires_grad=False).
+    - Pretrained Qwen/Qwen2.5-VL-3B-Instruct (~3.75B parameters, frozen by default;
+      optional lightweight LoRA adapters on top decoder attention layers via enable_lora).
     - Head Architecture:
       - Patch projection: nn.Linear(2048, pointer_hidden_dim) [512-dim widened]
       - Query projection: nn.Linear(2048, query_dim) [512-dim widened]
       - GUIActorPatchPointer: cross-attention + sub-patch offset MLP (~1.31M params)
       - ParallelActionHeads: 10 discrete actions + modifiers + continuous parameters (~564K params)
-    - Total Trainable Parameters with 512-dim projections: ~3.98M (3,978,386 params, <0.11% of total model).
+    - Default (lora_layers=0): 3,978,386 trainable params (<0.11% of total model).
     """
 
     def __init__(
@@ -325,14 +361,18 @@ class QwenGUIActorModel(nn.Module):
         target_token_budget: int = 400,
         use_rolling_kv: bool = False,
         max_history_steps: int = 16,
+        lora_layers: int = 0,
+        lora_r: int = 16,
     ) -> None:
         super().__init__()
         self.dry_run = dry_run
+        self.load_in_4bit = False
         self.backbone_hidden_dim = backbone_hidden_dim
         self.pointer_hidden_dim = pointer_hidden_dim
         self.query_dim = query_dim
         self.backbone_dtype = backbone_dtype
         self.max_pixels = int(max_pixels)
+        self.lora_config: Optional[Dict[str, int]] = None
         self.use_token_pruning = use_token_pruning
         self.target_token_budget = target_token_budget
         self.use_rolling_kv = use_rolling_kv
@@ -350,6 +390,7 @@ class QwenGUIActorModel(nn.Module):
                     f"(dtype={'BF16' if resolved_dtype == torch.bfloat16 else 'FP16'}{'/NF4' if load_in_4bit else ''}, "
                     f"max_pixels={self.max_pixels})..."
                 )
+                self.load_in_4bit = bool(load_in_4bit)
                 if load_in_4bit:
                     from transformers import BitsAndBytesConfig
                     bnb_cfg = BitsAndBytesConfig(
@@ -357,9 +398,11 @@ class QwenGUIActorModel(nn.Module):
                         bnb_4bit_quant_type="nf4",
                         bnb_4bit_compute_dtype=resolved_dtype,
                     )
+                    dev_map: Any = {"": int(os.environ.get("LOCAL_RANK", 0))} if torch.cuda.is_available() else "auto"
                     self.backbone = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                         model_id,
                         quantization_config=bnb_cfg,
+                        device_map=dev_map,
                         attn_implementation="sdpa",
                         torch_dtype=resolved_dtype,
                     )
@@ -437,11 +480,100 @@ class QwenGUIActorModel(nn.Module):
             else None
         )
 
+        if int(lora_layers) > 0 and self.backbone is not None and not isinstance(self.backbone, MockQwenBackbone):
+            self.enable_lora(lora_layers=int(lora_layers), r=int(lora_r))
+
+    @staticmethod
+    def _resolve_decoder_layers(backbone: nn.Module) -> Optional[nn.ModuleList]:
+        """Locate transformer decoder blocks across Qwen2.5-VL / Qwen2.5 / test layouts."""
+        for path in (
+            ("model", "language_model", "layers"),
+            ("language_model", "layers"),
+            ("model", "layers"),
+            ("layers",),
+        ):
+            cur: Any = backbone
+            for attr in path:
+                cur = getattr(cur, attr, None)
+                if cur is None:
+                    break
+            if isinstance(cur, (nn.ModuleList, list, tuple)) and len(cur) > 0:
+                return cur
+        return None
+
+    def enable_lora(
+        self,
+        lora_layers: int = 8,
+        r: int = 16,
+        lora_alpha: float = 32.0,
+        target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj"),
+    ) -> int:
+        """Attach trainable rank-r LoRA adapters to the top `lora_layers` decoder blocks."""
+        if self.backbone is None or lora_layers <= 0:
+            return 0
+        layers = self._resolve_decoder_layers(self.backbone)
+        if not layers:
+            logger.warning("[LORA] Could not resolve decoder layers on backbone; LoRA disabled.")
+            return 0
+
+        num_layers = len(layers)
+        n_target = min(int(lora_layers), num_layers)
+        start_idx = num_layers - n_target
+        wrapped = 0
+        for block in layers[start_idx:]:
+            for parent_name, parent_mod in list(block.named_modules()):
+                for attr_name in target_modules:
+                    child = getattr(parent_mod, attr_name, None)
+                    if isinstance(child, nn.Linear):
+                        setattr(
+                            parent_mod,
+                            attr_name,
+                            LoRALinear(child, r=r, lora_alpha=lora_alpha),
+                        )
+                        wrapped += 1
+                    elif isinstance(child, LoRALinear):
+                        for p in child.lora_A.parameters():
+                            p.requires_grad = True
+                        for p in child.lora_B.parameters():
+                            p.requires_grad = True
+
+        self.lora_config = {
+            "lora_layers": n_target,
+            "r": int(r),
+            "lora_alpha": float(lora_alpha),
+        }
+        if hasattr(self.backbone, "enable_input_require_grads"):
+            try:
+                self.backbone.enable_input_require_grads()
+            except Exception:
+                pass
+        if hasattr(self.backbone, "gradient_checkpointing_enable"):
+            try:
+                self.backbone.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            except TypeError:
+                try:
+                    self.backbone.gradient_checkpointing_enable()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        logger.info(
+            f"[LORA] Enabled rank-{r} LoRA on top {n_target}/{num_layers} decoder layers "
+            f"({wrapped} attention projections wrapped)."
+        )
+        return wrapped
+
     def train(self, mode: bool = True) -> "QwenGUIActorModel":
-        """Keep frozen VLM backbone permanently in eval() while toggling trainable adapter heads."""
+        """Keep frozen VLM base layers in eval() while toggling adapter heads and LoRA blocks."""
         super().train(mode)
         if self.backbone is not None and not isinstance(self.backbone, MockQwenBackbone):
             self.backbone.eval()
+            for mod in self.backbone.modules():
+                if isinstance(mod, LoRALinear):
+                    mod.train(mode)
+                    mod.base_layer.eval()
         return self
 
     def get_parameter_summary(self) -> Dict[str, int]:
@@ -592,8 +724,12 @@ class QwenGUIActorModel(nn.Module):
         if "pixel_values" in inputs and isinstance(inputs["pixel_values"], torch.Tensor):
             inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
 
-        # 5. Single frozen forward pass through backbone (bypass unused 151k-vocab lm_head & KV cache)
-        with torch.no_grad():
+        # 5. Forward pass through backbone (no_grad when 100% frozen, enable_grad during LoRA training)
+        has_trainable_lora = self.training and any(
+            p.requires_grad for p in self.backbone.parameters()
+        )
+        grad_ctx = torch.enable_grad() if has_trainable_lora else torch.no_grad()
+        with grad_ctx:
             if hasattr(self.backbone, "model"):
                 try:
                     outputs = self.backbone.model(**inputs, use_cache=False, return_dict=True)
@@ -605,7 +741,7 @@ class QwenGUIActorModel(nn.Module):
                 outputs = self.backbone(**inputs, use_cache=False, output_hidden_states=True)
                 last_hidden = outputs.hidden_states[-1]
 
-        # 6. Extract visual patch hidden states from <|image_pad|> token positions
+        # 6. Extract visual patch hidden states from <|image_pad|> tokens and blend instruction+trigger query
         image_token_id = getattr(self.backbone.config, "image_token_id", None)
         if image_token_id is None:
             image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
@@ -622,7 +758,15 @@ class QwenGUIActorModel(nn.Module):
             attn_mask_i = inputs["attention_mask"][i].bool()
             valid_indices = attn_mask_i.nonzero()
             last_idx = valid_indices[-1].item() if len(valid_indices) > 0 else -1
-            batch_pooled_feats.append(last_hidden[i, last_idx, :])
+            trig_vec = last_hidden[i, last_idx, :]
+            if mask_i.any() and last_idx > 0:
+                img_pos = mask_i.nonzero(as_tuple=False).squeeze(-1)
+                last_img_idx = int(img_pos[-1].item())
+                if last_idx > last_img_idx + 1:
+                    instr_slice = last_hidden[i, last_img_idx + 1 : last_idx, :]
+                    if instr_slice.shape[0] > 0:
+                        trig_vec = 0.65 * trig_vec + 0.35 * instr_slice.mean(dim=0)
+            batch_pooled_feats.append(trig_vec)
 
         if len(batch_patch_feats) == 1 or all(p.shape[0] == batch_patch_feats[0].shape[0] for p in batch_patch_feats):
             patch_feats = torch.stack(batch_patch_feats, dim=0)
@@ -642,15 +786,20 @@ class QwenGUIActorModel(nn.Module):
             patch_feats = torch.nan_to_num(patch_feats.float(), nan=0.0, posinf=64.0, neginf=-64.0)
             pooled_feats = torch.nan_to_num(pooled_feats.float(), nan=0.0, posinf=64.0, neginf=-64.0)
 
-        # 7. Derive exact patch grid size (gh, gw)
+        # 7. Derive exact patch grid size (gh, gw) per batch item when available
+        grid_hw_list: Optional[List[Tuple[int, int]]] = None
         if "image_grid_thw" in inputs and inputs["image_grid_thw"] is not None:
             grid_t = inputs["image_grid_thw"]
             if grid_t.dim() == 1:
                 gh = int(grid_t[1].item()) // 2
                 gw = int(grid_t[2].item()) // 2
+                grid_hw_list = [(gh, gw)] * b
             else:
-                gh = int(grid_t[0, 1].item()) // 2
-                gw = int(grid_t[0, 2].item()) // 2
+                grid_hw_list = [
+                    (int(grid_t[idx, 1].item()) // 2, int(grid_t[idx, 2].item()) // 2)
+                    for idx in range(grid_t.shape[0])
+                ]
+                gh, gw = grid_hw_list[0]
         elif grid_hw is not None:
             gh, gw = grid_hw
         else:
@@ -661,6 +810,7 @@ class QwenGUIActorModel(nn.Module):
             "patch_feats": patch_feats,
             "pooled_feats": pooled_feats,
             "grid_hw": (gh, gw),
+            "grid_hw_list": grid_hw_list,
             "backbone_overflow": backbone_overflow,
         }
 
@@ -682,6 +832,7 @@ class QwenGUIActorModel(nn.Module):
         """
         # 1. Extract or use precomputed backbone features
         backbone_overflow = False
+        grid_hw_list: Optional[List[Tuple[int, int]]] = None
         if patch_feats is None or pooled_feats is None:
             feats = self.extract_features(
                 images=images,
@@ -692,6 +843,7 @@ class QwenGUIActorModel(nn.Module):
             patch_feats = feats["patch_feats"]
             pooled_feats = feats["pooled_feats"]
             gh, gw = feats["grid_hw"]
+            grid_hw_list = feats.get("grid_hw_list")
             backbone_overflow = bool(feats.get("backbone_overflow", False))
         else:
             if grid_hw is not None:
@@ -718,16 +870,23 @@ class QwenGUIActorModel(nn.Module):
         proj_query = self.query_proj(pooled_feats)     # (B, query_dim)
 
         # 3. Dynamic exact non-square spatial patch coordinates
-        xs = (torch.arange(gw, device=device, dtype=torch.float32) + 0.5) / max(gw, 1)
-        ys = (torch.arange(gh, device=device, dtype=torch.float32) + 0.5) / max(gh, 1)
-        mesh_y, mesh_x = torch.meshgrid(ys, xs, indexing="ij")
-        patch_coords = torch.stack([mesh_x.flatten(), mesh_y.flatten()], dim=-1)  # (K, 2)
-        if patch_coords.shape[0] != k_patches:
-            patch_coords = (
-                patch_coords[:k_patches]
-                if patch_coords.shape[0] > k_patches
-                else F.pad(patch_coords, (0, 0, 0, k_patches - patch_coords.shape[0]))
-            )
+        def _build_grid_coords(g_h: int, g_w: int) -> torch.Tensor:
+            xs = (torch.arange(g_w, device=device, dtype=torch.float32) + 0.5) / max(g_w, 1)
+            ys = (torch.arange(g_h, device=device, dtype=torch.float32) + 0.5) / max(g_h, 1)
+            mesh_y, mesh_x = torch.meshgrid(ys, xs, indexing="ij")
+            coords = torch.stack([mesh_x.flatten(), mesh_y.flatten()], dim=-1)
+            if coords.shape[0] != k_patches:
+                coords = (
+                    coords[:k_patches]
+                    if coords.shape[0] > k_patches
+                    else F.pad(coords, (0, 0, 0, k_patches - coords.shape[0]), value=-1.0)
+                )
+            return coords
+
+        if grid_hw_list and len(grid_hw_list) == b and len(set(grid_hw_list)) > 1:
+            patch_coords = torch.stack([_build_grid_coords(h_i, w_i) for h_i, w_i in grid_hw_list], dim=0)
+        else:
+            patch_coords = _build_grid_coords(gh, gw)  # (K, 2)
 
         # 4. Optional ShowUI visual token pruning
         if self.pruner is not None:
@@ -1127,7 +1286,7 @@ class GroundingDataset(Dataset):
                 os.makedirs(cache_dir, exist_ok=True)
                 cache_path = os.path.join(
                     cache_dir,
-                    f"cache_stage1_v2_{max_samples}_max{max_elements_per_image}.pt",
+                    f"cache_stage1_v3_{max_samples}_max{max_elements_per_image}.pt",
                 )
                 if os.path.exists(cache_path):
                     logger.info(
@@ -1173,6 +1332,8 @@ class GroundingDataset(Dataset):
                 )
                 try:
                     ds = load_dataset(repo_name, split="train", streaming=True)
+                    if hasattr(ds, "shuffle"):
+                        ds = ds.shuffle(seed=42, buffer_size=2000)
                 except Exception as repo_err:
                     logger.warning(f"[HF-INGEST] Could not open {repo_name}: {repo_err}")
                     continue
@@ -1254,14 +1415,15 @@ class GroundingDataset(Dataset):
                     )
                     if not is_raw_dom_tag and len(raw_instr) >= 3:
                         instr = raw_instr
-                    elif raw_name:
+                    elif len(raw_name) >= 3 and raw_name.lower() not in generic_dom_tags:
                         instr = raw_name if raw_name.lower().startswith("click") else f"Click {raw_name}"
-                    elif raw_purpose:
+                    elif len(raw_purpose) >= 3:
                         instr = raw_purpose
-                    elif raw_desc:
+                    elif len(raw_desc) >= 3:
                         instr = raw_desc
                     else:
-                        instr = "Click target control"
+                        unreadable_skipped += 1
+                        continue
 
                     if self._is_held_out_leakage(instr):
                         self.leakage_filtered_count += 1
@@ -1655,7 +1817,12 @@ def run_overfit_sanity(
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    if getattr(model, "load_in_4bit", False):
+        for name, child in model.named_children():
+            if name != "backbone":
+                child.to(device)
+    else:
+        model.to(device)
     model.train()
 
     if torch.cuda.is_available():
@@ -1956,6 +2123,8 @@ def run_ddp_training(
     max_train_samples: Optional[int] = None,
     backbone_dtype: str = "auto",
     max_pixels: int = 560 * 896,
+    lora_layers: int = 0,
+    lora_r: int = 16,
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -1993,7 +2162,7 @@ def run_ddp_training(
 
     device = torch.device(f"cuda:{local_rank}" if (torch.cuda.is_available() and not dry_run) else "cpu")
 
-    # 2. Initialize Model with 512-dim widened projections (~3.98M params)
+    # 2. Initialize Model with 512-dim widened projections (+ optional top-N LoRA)
     model = QwenGUIActorModel(
         dry_run=dry_run,
         pointer_hidden_dim=512,
@@ -2002,8 +2171,15 @@ def run_ddp_training(
         max_pixels=max_pixels,
         use_token_pruning=use_token_pruning,
         use_rolling_kv=use_rolling_kv,
+        lora_layers=lora_layers,
+        lora_r=lora_r,
     )
-    model.to(device)
+    if getattr(model, "load_in_4bit", False):
+        for name, child in model.named_children():
+            if name != "backbone":
+                child.to(device)
+    else:
+        model.to(device)
     is_dry_backbone = dry_run or getattr(model, "dry_run", False)
 
     # Report parameter counts
@@ -2047,9 +2223,14 @@ def run_ddp_training(
         persistent_workers=(loader_workers > 0),
     ) if len(val_eval_dataset) > 0 else None
 
-    # 3. Optimizer, Warmup+Cosine LR Scheduler & Rebalanced Multi-Task Loss (Patch CE >= 60%)
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-3)
+    # 3. Optimizer (differential LR for LoRA vs heads), Warmup+Cosine LR Scheduler & Rebalanced Loss
+    head_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_" not in n]
+    lora_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_" in n]
+    param_groups = [{"params": head_params, "lr": learning_rate}]
+    if lora_params:
+        param_groups.append({"params": lora_params, "lr": learning_rate * 0.25})
+    trainable_params = head_params + lora_params
+    optimizer = torch.optim.AdamW(param_groups, lr=learning_rate, weight_decay=1e-3)
     total_optim_steps = max(1, epochs * max(1, len(dataloader)))
     warmup_steps = max(1, min(20, total_optim_steps // 10))
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -2089,6 +2270,11 @@ def run_ddp_training(
         epoch_w_coord_l2 = 0.0
         epoch_w_action = 0.0
         epoch_patch_acc = 0.0
+        win_loss = 0.0
+        win_patch_ce = 0.0
+        win_coord_l1 = 0.0
+        win_patch_acc = 0.0
+        win_steps = 0
         step_count = 0
         valid_step_count = 0
         nan_skip_count = 0
@@ -2117,15 +2303,15 @@ def run_ddp_training(
             loss_finite = bool(torch.isfinite(loss).item())
             step_ok_local = (not step_overflow) and loss_finite
 
-            # Always run backward through the connected forward graph (never raw parameters)
-            # so DDP find_unused_parameters=True never marks unused parameters ready twice.
+            # Always run backward through sanitized zeroed forward outputs on overflow
+            # (avoid IEEE 754 NaN * 0.0 = NaN while satisfying DDP graph tracking).
             backward_loss = (
                 loss
                 if step_ok_local
                 else (
-                    outputs["action_logits"].sum() * 0.0
-                    + outputs["target_coords"].sum() * 0.0
-                    + outputs["attn_logits"].sum() * 0.0
+                    (torch.nan_to_num(outputs["action_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+                    + (torch.nan_to_num(outputs["target_coords"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+                    + (torch.nan_to_num(outputs["attn_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
                 )
             )
             backward_loss.backward()
@@ -2154,6 +2340,11 @@ def run_ddp_training(
                 epoch_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
                 epoch_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
                 epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+                win_loss += loss.item()
+                win_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
+                win_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
+                win_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+                win_steps += 1
                 valid_step_count += 1
             else:
                 optimizer.zero_grad()
@@ -2178,14 +2369,20 @@ def run_ddp_training(
                 eta_min = ((total_steps_per_epoch - step_count) * sec_per_step) / 60.0
                 ts = time.strftime("%H:%M:%S")
                 denom = max(1, valid_step_count)
+                w_denom = max(1, win_steps)
                 print(
                     f"[{ts}] [Epoch {epoch}/{epochs} | Step {step_count}/{total_steps_per_epoch}] "
-                    f"Loss: {epoch_loss / denom:.4f} | "
-                    f"Patch CE: {epoch_patch_ce / denom:.4f} (Acc: {(epoch_patch_acc / denom) * 100:.1f}%) | "
-                    f"Coord L1: {epoch_coord_l1 / denom:.4f} | "
+                    f"Loss: {win_loss / w_denom:.4f} (ep {epoch_loss / denom:.4f}) | "
+                    f"Patch CE: {win_patch_ce / w_denom:.4f} (Acc: {(win_patch_acc / w_denom) * 100:.1f}%, ep {(epoch_patch_acc / denom) * 100:.1f}%) | "
+                    f"Coord L1: {win_coord_l1 / w_denom:.4f} | "
                     f"NaN_skips: {nan_skip_count} | {sec_per_step:.2f}s/step (data={data_time:.2f}s) | ETA: {eta_min:.1f}m",
                     flush=True,
                 )
+                win_loss = 0.0
+                win_patch_ce = 0.0
+                win_coord_l1 = 0.0
+                win_patch_acc = 0.0
+                win_steps = 0
 
             data_t0 = time.time()
             if dry_run and step_count >= 5:
@@ -2217,6 +2414,7 @@ def run_ddp_training(
 
         # Distributed Held-Out Validation Evaluation at Epoch End (Capped at 200 samples; prevents NCCL timeout)
         val_strict_acc = 0.0
+        val_patch_acc = 0.0
         if val_dataloader is not None and len(val_dataloader) > 0 and not dry_run:
             unwrapped = model.module if hasattr(model, "module") else model
             unwrapped.eval()
@@ -2302,16 +2500,22 @@ def run_ddp_training(
                 )
 
         if rank == 0:
-            # Save checkpoint
+            # Save checkpoint (adapter heads + any trained LoRA weights)
             ckpt_file = save_path / f"gui_actor_step6_2_epoch_{epoch}.pt"
             unwrapped = model.module if hasattr(model, "module") else model
+            adapter_state = {
+                k: v
+                for k, v in unwrapped.state_dict().items()
+                if (not k.startswith("backbone.") or ".lora_" in k)
+            }
             torch.save({
                 "epoch": epoch,
-                "model_state_dict": {k: v for k, v in unwrapped.state_dict().items() if not k.startswith("backbone.")},
+                "model_state_dict": adapter_state,
+                "lora_config": getattr(unwrapped, "lora_config", None),
                 "stats": stats,
                 "val_strict_acc": val_strict_acc,
             }, ckpt_file)
-            print(f"Saved trainable adapter checkpoint to: {ckpt_file}", flush=True)
+            print(f"Saved trainable adapter checkpoint to: {ckpt_file} ({len(adapter_state)} tensors)", flush=True)
 
         if is_distributed:
             dist.barrier()
@@ -2355,12 +2559,14 @@ def main():
     parser.add_argument("--stream-hf", action="store_true", default=True, help="Stream real desktop samples from showlab/ShowUI-desktop (default: True)")
     parser.add_argument("--no-stream-hf", action="store_true", help="Disable Hugging Face streaming")
     parser.add_argument("--hf-samples", type=int, default=20000, help="Target real desktop samples from showlab/ShowUI-desktop (default: 20000)")
-    parser.add_argument("--max-elements-per-image", type=int, default=5, help="Maximum elements per unique screenshot (default: 5)")
+    parser.add_argument("--max-elements-per-image", type=int, default=12, help="Maximum elements per unique screenshot (default: 12)")
     parser.add_argument("--max-val-samples", type=int, default=200, help="Maximum held-out validation samples evaluated at epoch end (default: 200)")
     parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap on training samples per epoch for step-by-step staging")
     parser.add_argument("--log-interval", type=int, default=10, help="Print training progress every N steps (default: 10)")
     parser.add_argument("--backbone-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision ('auto' picks fp16 Tensor Cores on T4 SM<8.0 and bf16 on Ampere+)")
     parser.add_argument("--max-pixels", type=int, default=560 * 896, help="Max visual pixels for Qwen2.5-VL processor (default: 501760 = 560x896 ~640 patches; 0=uncapped)")
+    parser.add_argument("--lora-layers", type=int, default=8, help="Unfreeze rank-r LoRA on top N Qwen decoder blocks on CUDA (0 disables; default: 8)")
+    parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank when --lora-layers > 0 (default: 16)")
     parser.add_argument("--cache-dir", type=str, default=None, help="Directory for caching streamed Hugging Face datasets")
     parser.add_argument("--prepare-data-only", action="store_true", help="Stream and cache the Stage-1 dataset to disk, then exit without training")
     parser.add_argument("--no-early-abort", action="store_true", help="Disable the Epoch 1 early-abort gate")
@@ -2447,6 +2653,8 @@ def main():
         max_train_samples=args.max_train_samples,
         backbone_dtype=args.backbone_dtype,
         max_pixels=args.max_pixels,
+        lora_layers=(0 if args.dry_run else args.lora_layers),
+        lora_r=args.lora_r,
     )
 
 

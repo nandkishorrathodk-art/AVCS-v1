@@ -40,7 +40,9 @@ class GameReflexController:
 
     def _on_neuro_packet(self, packet: NeuroPacket) -> None:
         """Evaluates live visual surprise spikes to trigger sub-millisecond reflexes."""
-        for threshold, callback in list(self._surprise_hooks):
+        with self._lock:
+            hooks = list(self._surprise_hooks)
+        for threshold, callback in hooks:
             if packet.surprise_score >= threshold:
                 try:
                     callback(packet)
@@ -72,9 +74,9 @@ class GameReflexController:
             if key_clean not in self._held_keys:
                 if hasattr(self.driver, "key_down"):
                     self.driver.key_down(key_clean)
+                    self._held_keys.add(key_clean)
                 elif hasattr(self.driver, "press_key"):
                     self.driver.press_key(key_clean)
-                self._held_keys.add(key_clean)
 
     def release_key(self, key: str) -> None:
         """Releases a currently held key."""
@@ -113,27 +115,28 @@ class GameReflexController:
         max_step: float = 0.05,
     ) -> Tuple[float, float]:
         """Performs a single proportional visual servoing aim adjustment towards target."""
-        curr_x, curr_y = self.driver.get_position_normalized()
-        tx, ty = target_norm
+        with self._lock:
+            curr_x, curr_y = self.driver.get_position_normalized()
+            tx, ty = target_norm
 
-        # IEEE 754 NaN / Inf safety guard
-        if not (math.isfinite(tx) and math.isfinite(ty)):
-            return (curr_x, curr_y)
+            # IEEE 754 NaN / Inf safety guard
+            if not (math.isfinite(tx) and math.isfinite(ty)):
+                return (curr_x, curr_y)
 
-        dx = (tx - curr_x) * gain
-        dy = (ty - curr_y) * gain
+            dx = (tx - curr_x) * gain
+            dy = (ty - curr_y) * gain
 
-        # Direction-preserving Euclidean vector clamping
-        dist = math.hypot(dx, dy)
-        if dist > max_step and dist > 1e-9:
-            scale = max_step / dist
-            dx *= scale
-            dy *= scale
+            # Direction-preserving Euclidean vector clamping
+            dist = math.hypot(dx, dy)
+            if dist > max_step and dist > 1e-9:
+                scale = max_step / dist
+                dx *= scale
+                dy *= scale
 
-        new_x = max(0.0, min(1.0, curr_x + dx))
-        new_y = max(0.0, min(1.0, curr_y + dy))
-        self.driver.move_to_normalized(new_x, new_y)
-        return (new_x, new_y)
+            new_x = max(0.0, min(1.0, curr_x + dx))
+            new_y = max(0.0, min(1.0, curr_y + dy))
+            self.driver.move_to_normalized(new_x, new_y)
+            return (new_x, new_y)
 
     def steer_relative(self, dx_pixels: int, dy_pixels: int) -> None:
         """Moves cursor by relative pixel offsets (e.g. FPS game camera rotation)."""

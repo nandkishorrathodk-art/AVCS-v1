@@ -149,6 +149,27 @@ def test_no_candidate_point_is_refused():
     assert not d.allowed
 
 
+def test_nan_peak_and_drag_peak2_are_refused():
+    import math
+    k = CapabilityKernel(granted_ops=["click", "drag"])
+    d1 = k.authorize(
+        op="click",
+        query="Save",
+        evidence=GroundingEvidence(candidate_point_norm=(0.5, 0.5), peak_probability=math.nan),
+    )
+    assert not d1.allowed
+    assert "non-finite" in d1.reason
+
+    d2 = k.authorize(
+        op="drag",
+        query="Item",
+        evidence=GroundingEvidence(candidate_point_norm=(0.2, 0.2), peak_probability=0.95),
+        arguments={"point2": (0.8, 0.8), "peak2": float("nan")},
+    )
+    assert not d2.allowed
+    assert "non-finite" in d2.reason
+
+
 # --------------------------------------------------------------------------- #
 # Frame degeneracy
 # --------------------------------------------------------------------------- #

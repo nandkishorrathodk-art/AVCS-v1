@@ -12,7 +12,7 @@ import math
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -26,9 +26,6 @@ if sys.platform == "win32":
         _timeEndPeriod = _winmm.timeEndPeriod
         _GetCursorPos = _user32.GetCursorPos
         _SetCursorPos = _user32.SetCursorPos
-        _GetForegroundWindow = _user32.GetForegroundWindow
-        _GetWindowTextLengthW = _user32.GetWindowTextLengthW
-        _GetWindowTextW = _user32.GetWindowTextW
         _GetSystemMetrics = _user32.GetSystemMetrics
         _mouse_event = _user32.mouse_event
         _keybd_event = _user32.keybd_event
@@ -40,9 +37,6 @@ if sys.platform == "win32":
         _timeEndPeriod = None
         _GetCursorPos = None
         _SetCursorPos = None
-        _GetForegroundWindow = None
-        _GetWindowTextLengthW = None
-        _GetWindowTextW = None
         _GetSystemMetrics = None
         _mouse_event = None
         _keybd_event = None
@@ -54,9 +48,6 @@ else:
     _timeEndPeriod = None
     _GetCursorPos = None
     _SetCursorPos = None
-    _GetForegroundWindow = None
-    _GetWindowTextLengthW = None
-    _GetWindowTextW = None
     _GetSystemMetrics = None
     _mouse_event = None
     _keybd_event = None
@@ -340,6 +331,8 @@ class HandMotor:
         self.step_duration_ms = step_duration_ms
         self.failsafe = failsafe if failsafe is not None else CornerBreakoutFailSafe()
         self._latched = False
+        self._keybd_event = _keybd_event
+        self._VkKeyScanW = _VkKeyScanW
 
     @property
     def is_latched(self) -> bool:
@@ -394,23 +387,8 @@ class HandMotor:
 
     @staticmethod
     def get_foreground_title() -> str:
-        if sys.platform != "win32":
-            return ""
-        try:
-            if _GetForegroundWindow is not None and _GetWindowTextW is not None and _GetWindowTextLengthW is not None:
-                hwnd = _GetForegroundWindow()
-                length = _GetWindowTextLengthW(hwnd)
-                buff = ctypes.create_unicode_buffer(length + 1)
-                _GetWindowTextW(hwnd, buff, length + 1)
-                return buff.value
-            else:
-                hwnd = ctypes.windll.user32.GetForegroundWindow()
-                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                buff = ctypes.create_unicode_buffer(length + 1)
-                ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
-                return buff.value
-        except Exception:
-            return ""
+        """Pure-RGB pixel invariant: OS window-title scraping is disabled."""
+        return ""
 
     def generate_trajectory(
         self,
@@ -419,6 +397,7 @@ class HandMotor:
         duration_s: float = 0.35,
     ) -> List[Tuple[int, int]]:
         """Generates 5th-order minimum-jerk trajectory (Flash & Hogan 1985)."""
+        screen_w, screen_h = self.get_screen_size()
         x0, y0 = start_pt
         xf, yf = end_pt
         dx = xf - x0
@@ -437,6 +416,8 @@ class HandMotor:
             tremor_y = math.cos(tau * 15.0) * 0.8 * tremor_window
             cur_x = int(round(x0 + dx * s + tremor_x))
             cur_y = int(round(y0 + dy * s + tremor_y))
+            cur_x = max(0, min(max(1, screen_w - 1), cur_x))
+            cur_y = max(0, min(max(1, screen_h - 1), cur_y))
             waypoints.append((cur_x, cur_y))
 
         return waypoints
@@ -475,13 +456,15 @@ class HandMotor:
         self.set_cursor_pos(target_x, target_y)
         return True
 
-    def click(self, target_x: int, target_y: int) -> bool:
-        """Moves cursor to target and issues native OS mouse click.
-
-        Returns False on non-Windows platforms: this controller drives the
-        native Win32 cursor API, so it cannot actuate a pointer elsewhere. It
-        never reports success for an action it did not perform.
-        """
+    def _click_button(
+        self,
+        target_x: int,
+        target_y: int,
+        down_flag: int,
+        up_flag: int,
+        clicks: int = 1,
+    ) -> bool:
+        """Move cursor to target and issue one or more native Win32 mouse clicks."""
         self._check_failsafe(check_pos=(target_x, target_y))
 
         if sys.platform != "win32":
@@ -492,13 +475,184 @@ class HandMotor:
 
         self._check_failsafe()
 
-        if sys.platform == "win32" and _mouse_event is not None:
-            time.sleep(0.04)
-            _mouse_event(0x0002, 0, 0, 0, 0) # Left down
+        if _mouse_event is None:
+            return False
+
+        for idx in range(clicks):
+            if idx > 0:
+                time.sleep(0.04)
+            else:
+                time.sleep(0.04)
+            _mouse_event(down_flag, 0, 0, 0, 0)
             time.sleep(0.06)
-            _mouse_event(0x0004, 0, 0, 0, 0) # Left up
-            return True
-        return False
+            _mouse_event(up_flag, 0, 0, 0, 0)
+        return True
+
+    def click(self, target_x: int, target_y: int) -> bool:
+        """Moves cursor to target and issues native OS mouse click.
+
+        Returns False on non-Windows platforms: this controller drives the
+        native Win32 cursor API, so it cannot actuate a pointer elsewhere. It
+        never reports success for an action it did not perform.
+        """
+        return self._click_button(target_x, target_y, 0x0002, 0x0004, clicks=1)
+
+    def double_click(self, target_x: int, target_y: int) -> bool:
+        """Moves cursor to target and issues a native OS double-click."""
+        return self._click_button(target_x, target_y, 0x0002, 0x0004, clicks=2)
+
+    def triple_click(self, target_x: int, target_y: int) -> bool:
+        """Moves cursor to target and issues a native OS triple-click."""
+        return self._click_button(target_x, target_y, 0x0002, 0x0004, clicks=3)
+
+    def right_click(self, target_x: int, target_y: int) -> bool:
+        """Moves cursor to target and issues a native OS secondary (right) click."""
+        return self._click_button(target_x, target_y, 0x0008, 0x0010, clicks=1)
+
+    def drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration_s: float = 0.45,
+    ) -> bool:
+        """Drags with primary mouse button held along a minimum-jerk trajectory."""
+        self._check_failsafe(check_pos=(start_x, start_y))
+        self._check_failsafe(check_pos=(end_x, end_y))
+
+        if sys.platform != "win32" or _mouse_event is None:
+            return False
+
+        if not self.move_to(start_x, start_y):
+            return False
+
+        self._check_failsafe()
+        waypoints = self.generate_trajectory((start_x, start_y), (end_x, end_y), duration_s)
+        _mouse_event(0x0002, 0, 0, 0, 0)  # Left down
+        try:
+            time.sleep(0.04)
+            for pt in waypoints:
+                if CornerBreakoutFailSafe.check() or self._latched or self.failsafe.is_latched:
+                    self._latched = True
+                    return False
+                self.set_cursor_pos(pt[0], pt[1])
+                time.sleep(self.step_duration_ms / 1000.0)
+            self.set_cursor_pos(end_x, end_y)
+            time.sleep(0.04)
+        finally:
+            _mouse_event(0x0004, 0, 0, 0, 0)  # Always release left button
+        return True
+
+    def scroll(
+        self,
+        delta: int = -3,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> bool:
+        """Scrolls the mouse wheel vertically (negative = down, positive = up)."""
+        check_pt = (int(x), int(y)) if (x is not None and y is not None) else None
+        self._check_failsafe(check_pos=check_pt)
+
+        if sys.platform != "win32" or _mouse_event is None:
+            return False
+
+        if check_pt is not None and not self.move_to(check_pt[0], check_pt[1]):
+            return False
+
+        wheel_delta = int(delta)
+        if wheel_delta != 0 and abs(wheel_delta) <= 10:
+            wheel_delta *= 120
+        _mouse_event(0x0800, 0, 0, wheel_delta, 0)  # MOUSEEVENTF_WHEEL
+        return True
+
+    @staticmethod
+    def _resolve_vk(key_name: str) -> Tuple[Optional[int], bool]:
+        """Resolve a key name or single character to (vk_code, needs_shift)."""
+        aliases = {
+            "enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+            "space": 0x20, "spacebar": 0x20, "backspace": 0x08, "delete": 0x2E, "del": 0x2E,
+            "insert": 0x2D, "home": 0x24, "end": 0x23, "page_up": 0x21, "pageup": 0x21,
+            "pgup": 0x21, "page_down": 0x22, "pagedown": 0x22, "pgdn": 0x22,
+            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "ctrl": 0x11, "control": 0x11, "lctrl": 0xA2, "left_ctrl": 0xA2,
+            "shift": 0x10, "lshift": 0xA0, "left_shift": 0xA0,
+            "alt": 0x12, "option": 0x12, "lalt": 0xA4, "left_alt": 0xA4,
+            "win": 0x5B, "windows": 0x5B, "super": 0x5B, "cmd": 0x5B, "left_gui": 0x5B,
+            "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
+            "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+        }
+        clean = str(key_name).strip().lower()
+        if clean in aliases:
+            return aliases[clean], False
+        if len(clean) == 1 and _VkKeyScanW is not None:
+            vk = _VkKeyScanW(ord(clean))
+            if vk != -1:
+                return vk & 0xFF, bool((vk >> 8) & 1)
+        return None, False
+
+    def key(self, key_name: str) -> bool:
+        """Presses a single key or '+'-delimited key chord (e.g. 'enter', 'ctrl+s')."""
+        parts = [p.strip() for p in str(key_name).split("+") if p.strip()]
+        if not parts:
+            return False
+        if len(parts) > 1:
+            return self.hotkey(*parts)
+
+        self._check_failsafe()
+        if sys.platform != "win32" or _keybd_event is None:
+            return False
+
+        vk, needs_shift = self._resolve_vk(parts[0])
+        if vk is None:
+            return False
+
+        if needs_shift:
+            _keybd_event(0x10, 0, 0, 0)
+        try:
+            _keybd_event(vk, 0, 0, 0)
+            time.sleep(0.02)
+            _keybd_event(vk, 0, 0x0002, 0)
+        finally:
+            if needs_shift:
+                _keybd_event(0x10, 0, 0x0002, 0)
+        return True
+
+    def hotkey(self, *keys: Union[str, Sequence[str]]) -> bool:
+        """Presses a simultaneous key chord (e.g. hotkey('ctrl', 's') or hotkey(['ctrl', 's']))."""
+        flat: List[str] = []
+        for item in keys:
+            if isinstance(item, (list, tuple)):
+                flat.extend(str(k).strip() for k in item if str(k).strip())
+            else:
+                flat.extend(p.strip() for p in str(item).split("+") if p.strip())
+        if not flat:
+            return False
+
+        self._check_failsafe()
+        if sys.platform != "win32" or _keybd_event is None:
+            return False
+
+        resolved: List[int] = []
+        for name in flat:
+            vk, needs_shift = self._resolve_vk(name)
+            if vk is None:
+                return False
+            if needs_shift and 0x10 not in resolved:
+                resolved.append(0x10)
+            resolved.append(vk)
+
+        held: List[int] = []
+        try:
+            for vk in resolved:
+                _keybd_event(vk, 0, 0, 0)
+                held.append(vk)
+                time.sleep(0.01)
+            time.sleep(0.02)
+        finally:
+            for vk in reversed(held):
+                _keybd_event(vk, 0, 0x0002, 0)
+        return True
 
     def type_text(self, text: str, typing_speed_cps: float = 25.0) -> bool:
         """Types characters with human inter-key jitter."""
@@ -532,9 +686,8 @@ class HandMotor:
         timeout_ms: float = 300.0,
         min_ripple_energy: float = 0.015,
     ) -> RippleResult:
-        """Monitors local ROI around target for click reaction flash or window change."""
+        """Monitors local ROI around target for pure-pixel click reaction flash."""
         t0 = time.perf_counter()
-        initial_title = self.get_foreground_title()
 
         if pre_frame is None:
             pre_frame = capture_fn()
@@ -559,7 +712,6 @@ class HandMotor:
 
         max_diff = 0.0
         verified = False
-        title_changed = False
 
         if _timeBeginPeriod is not None:
             try:
@@ -583,11 +735,7 @@ class HandMotor:
             if energy > max_diff:
                 max_diff = energy
 
-            curr_title = self.get_foreground_title()
-            if curr_title and curr_title != initial_title:
-                title_changed = True
-                verified = True
-            elif max_diff >= min_ripple_energy:
+            if max_diff >= min_ripple_energy:
                 verified = True
 
             # If reaction is not caught on the immediate sample, enter adaptive polling loop
@@ -607,12 +755,6 @@ class HandMotor:
                 if energy > max_diff:
                     max_diff = energy
 
-                curr_title = self.get_foreground_title()
-                if curr_title and curr_title != initial_title:
-                    title_changed = True
-                    verified = True
-                    break
-
                 if max_diff >= min_ripple_energy:
                     verified = True
                     break
@@ -627,5 +769,5 @@ class HandMotor:
             verified=verified,
             surprise_magnitude=round(max_diff, 4),
             latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
-            window_title_changed=title_changed,
+            window_title_changed=False,
         )

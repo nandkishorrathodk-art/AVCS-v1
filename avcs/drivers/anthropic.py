@@ -24,6 +24,11 @@ class AnthropicAVCSDriver(BaseAVCSDriver):
         force_virtual_motor: bool = False,
         client: Optional[Any] = None,
     ) -> None:
+        if client is None:
+            raise RuntimeError(
+                "External cloud driver is disabled in 100% local VLA mode; "
+                "use local VLA or pass a hermetic mock client for tests."
+            )
         super().__init__(eye=eye, force_virtual_motor=force_virtual_motor)
         self.api_key = api_key
         self.model = model

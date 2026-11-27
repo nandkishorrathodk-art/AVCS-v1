@@ -372,11 +372,12 @@ class _CursorDriver:
         if callable(mover):
             mover(px, py)
             return
-        # `XdotoolHand`/`HandMotor` have no bare move; their `click` moves and
-        # clicks. That would click once per waypoint, so a bare move is done
-        # through the underlying tool when one is reachable, and otherwise the
-        # trajectory is computed but not painted. Silence here is deliberate:
-        # `servo_to` still checks the final position and reports the truth.
+        # `HandMotor` provides `set_cursor_pos(x, y)` for instant positioning; using
+        # `HandMotor.move_to` on every waypoint creates an O(N^2) nested trajectory loop.
+        instant_mover = getattr(self._hand, "set_cursor_pos", None)
+        if callable(instant_mover):
+            instant_mover(px, py)
+            return
         mover = getattr(self._hand, "move_to", None)
         if callable(mover):
             try:

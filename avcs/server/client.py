@@ -19,7 +19,6 @@ Usage in any external project:
 from __future__ import annotations
 
 import base64
-import ipaddress
 import io
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,8 +32,27 @@ from forge.vision.capture import open_capture
 from forge.vision.cortex.motor import get_default_driver
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _validate_loopback_endpoint(endpoint_url: str) -> str:
+    endpoint = (endpoint_url or "").strip().rstrip("/")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("endpoint_url must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("endpoint_url must not contain embedded credentials")
+    hostname = parsed.hostname.lower()
+    if hostname not in _LOOPBACK_HOSTS:
+        raise ValueError(
+            f"External non-loopback endpoints are disabled in 100% local VLA mode; "
+            f"only loopback hosts (127.0.0.1, localhost, ::1) are permitted, got {hostname!r}"
+        )
+    return endpoint
+
+
 class AVCSCloudClient:
-    """Lightweight remote client for external projects connecting to AVCS Cloud."""
+    """Lightweight client for local loopback AVCS inference server."""
 
     def __init__(
         self,
@@ -45,22 +63,7 @@ class AVCSCloudClient:
         timeout: float = 5.0,
         allow_insecure_http: bool = False,
     ) -> None:
-        self.endpoint = endpoint_url.rstrip("/")
-        parsed_endpoint = urlsplit(self.endpoint)
-        if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.hostname:
-            raise ValueError("endpoint_url must be an absolute HTTP(S) URL")
-        if parsed_endpoint.username or parsed_endpoint.password:
-            raise ValueError("endpoint_url must not contain embedded credentials")
-        hostname = parsed_endpoint.hostname.lower()
-        try:
-            is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-        if parsed_endpoint.scheme == "http" and not is_loopback and not allow_insecure_http:
-            raise ValueError(
-                "HTTP is only permitted for loopback endpoints; use HTTPS for remote servers "
-                "or explicitly set allow_insecure_http=True for a trusted test network"
-            )
+        self.endpoint = _validate_loopback_endpoint(endpoint_url)
         self.api_key = api_key
         self.timeout = timeout
         self.headers = {"Content-Type": "application/json"}
@@ -79,19 +82,28 @@ class AVCSCloudClient:
 
     def _encode_image(self, frame: np.ndarray, quality: int = 85) -> str:
         """Compresses RGB uint8 numpy array to base64 JPEG (<50 KB) for high-speed transfer."""
-        pil_img = Image.fromarray(frame)
+        arr = frame
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+        pil_img = Image.fromarray(arr)
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
         buf = io.BytesIO()
         pil_img.save(buf, format="JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+    def _url(self, path: str) -> str:
+        endpoint = _validate_loopback_endpoint(self.endpoint)
+        return f"{endpoint}{path}"
+
     def ping(self) -> Dict[str, Any]:
-        """Checks cloud server health and model readiness."""
-        resp = requests.get(f"{self.endpoint}/v1/health", headers=self.headers, timeout=self.timeout)
+        """Checks local AVCS server health and model readiness."""
+        resp = requests.get(self._url("/v1/health"), headers=self.headers, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
     def see(self, frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
-        """Captures local screen, sends to AVCS Cloud, and returns visual perception state."""
+        """Captures local screen, sends to local AVCS server, and returns visual perception state."""
         if frame is None:
             frame = self.source.grab()
 
@@ -105,7 +117,7 @@ class AVCSCloudClient:
         }
 
         resp = requests.post(
-            f"{self.endpoint}/v1/perceive",
+            self._url("/v1/perceive"),
             json=payload,
             headers=self.headers,
             timeout=self.timeout,
@@ -123,13 +135,13 @@ class AVCSCloudClient:
         return [tuple(h) for h in hotspots if action_type == "all" or h[2] == action_type]
 
     def foveate(self, target: Tuple[float, float]) -> Dict[str, Any]:
-        """Requests high-acuity foveal inspection for target coordinate from cloud."""
+        """Requests high-acuity foveal inspection for target coordinate from local server."""
         if self._last_frame is None:
             self.see()
 
         b64_img = self._encode_image(self._last_frame)
         payload = {"image_b64": b64_img, "target": list(target)}
-        resp = requests.post(f"{self.endpoint}/v1/foveate", json=payload, headers=self.headers, timeout=self.timeout)
+        resp = requests.post(self._url("/v1/foveate"), json=payload, headers=self.headers, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -148,7 +160,7 @@ class AVCSCloudClient:
             "query": clean_query,
         }
         resp = requests.post(
-            f"{self.endpoint}/v1/ground",
+            self._url("/v1/ground"),
             json=payload,
             headers=self.headers,
             timeout=self.timeout,
@@ -169,7 +181,7 @@ class AVCSCloudClient:
             "reference_image_b64": self._encode_image(reference_frame) if reference_frame is not None else None,
             "target": list(target),
         }
-        resp = requests.post(f"{self.endpoint}/v1/verify_focus", json=payload, headers=self.headers, timeout=self.timeout)
+        resp = requests.post(self._url("/v1/verify_focus"), json=payload, headers=self.headers, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict) or type(data.get("is_focused")) is not bool:
@@ -177,7 +189,7 @@ class AVCSCloudClient:
         return data["is_focused"]
 
     def move_to(self, target: Tuple[float, float], realtime: bool = True) -> bool:
-        """Requests minimum-jerk trajectory from cloud and executes smooth movement on local OS."""
+        """Requests minimum-jerk trajectory from local server and executes smooth movement on local OS."""
         cur_pos = (
             self.driver.get_position_normalized()
             if hasattr(self.driver, "get_position_normalized")
@@ -185,7 +197,7 @@ class AVCSCloudClient:
         )
 
         payload = {"start": list(cur_pos), "target": list(target)}
-        resp = requests.post(f"{self.endpoint}/v1/plan_trajectory", json=payload, headers=self.headers, timeout=self.timeout)
+        resp = requests.post(self._url("/v1/plan_trajectory"), json=payload, headers=self.headers, timeout=self.timeout)
         resp.raise_for_status()
         traj_data = resp.json()
 

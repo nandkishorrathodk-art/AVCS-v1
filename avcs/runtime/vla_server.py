@@ -231,21 +231,38 @@ def run_inference_with_prefill(
     if _cuda_graph_runner is not None:
         try:
             import torch
+            import torch.nn.functional as F
             # Prepare tensor
             if isinstance(image, np.ndarray):
                 arr = image
             else:
                 arr = np.asarray(image)
+            if arr.ndim == 2:
+                arr = np.stack([arr] * 3, axis=-1)
+            elif arr.ndim == 3 and arr.shape[2] == 4:
+                arr = arr[:, :, :3]
             # Expect (H, W, 3) uint8 -> (1, 3, H, W) float32 in [0, 1]
-            img_t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-            out = _cuda_graph_runner(image=img_t, goals=[instruction])
+            img_t = torch.from_numpy(np.ascontiguousarray(arr)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+            static_img = getattr(_cuda_graph_runner, "static_image", None)
+            if isinstance(static_img, torch.Tensor):
+                if img_t.shape[-2:] != static_img.shape[-2:]:
+                    img_t = F.interpolate(img_t, size=static_img.shape[-2:], mode="bilinear", align_corners=False)
+                img_t = img_t.to(device=static_img.device, dtype=static_img.dtype)
+            if callable(_cuda_graph_runner):
+                out = _cuda_graph_runner(image=img_t, goals=[instruction])
+            else:
+                out = _cuda_graph_runner.replay(image_tensor=img_t)
             latency_ms = (time.perf_counter() - t0) * 1000.0
 
             # Extract predicted coordinates and action
-            coords_norm = out.subpixel_coords[0].cpu().numpy()
+            coords_norm = out.subpixel_coords[0].detach().cpu().numpy()
             pred_x = int(round(float(coords_norm[0]) * canvas_w))
             pred_y = int(round(float(coords_norm[1]) * canvas_h))
-            pred_action = out.action_name[0] if getattr(out, "action_name", None) else action_type
+            pred_action = (
+                out.action_name[0]
+                if getattr(out, "action_name", None)
+                else getattr(out, "action_type", action_type)
+            )
 
             raw_response = f'{{"action": "{pred_action}", "coordinate": [{pred_x}, {pred_y}]}}'
             return {
@@ -318,11 +335,12 @@ def run_inference_with_prefill(
             latency_ms = (time.perf_counter() - t0) * 1000.0
 
             # Calculate smart_resize space for accurate coordinate mapping
-            resized_h, resized_w = smart_resize(canvas_h, canvas_w)
+            # Qwen2.5-VL image_grid_thw stores (T, H // 14, W // 14) unmerged patch grid dimensions
+            resized_h, resized_w = smart_resize(pil_img.height, pil_img.width)
             if "image_grid_thw" in inputs:
                 grid = inputs["image_grid_thw"]
-                resized_h = int(grid[0, 1].item()) * 28
-                resized_w = int(grid[0, 2].item()) * 28
+                resized_h = int(grid[0, 1].item()) * 14
+                resized_w = int(grid[0, 2].item()) * 14
 
             coord = parse_prediction(raw_response, canvas_w=resized_w, canvas_h=resized_h, raw_w=canvas_w, raw_h=canvas_h)
             return {
@@ -411,10 +429,11 @@ async def health_check() -> Dict[str, Any]:
 async def http_act(req: ActRequest) -> ActResponse:
     """HTTP POST /act endpoint for single-turn actuation."""
     t0 = time.perf_counter()
+    loop = asyncio.get_running_loop()
     try:
         raw_bytes = base64.b64decode(req.image_base64)
         t_dec_0 = time.perf_counter()
-        image = decode_turbo_jpeg(raw_bytes)
+        image = await loop.run_in_executor(_inference_executor, decode_turbo_jpeg, raw_bytes)
         decode_ms = (time.perf_counter() - t_dec_0) * 1000.0
     except Exception as exc:
         raise HTTPException(
@@ -422,8 +441,17 @@ async def http_act(req: ActRequest) -> ActResponse:
             detail=f"Invalid base64 JPEG payload: {exc}",
         )
 
-    res = run_inference_with_prefill(image, req.instruction, req.width, req.height)
+    t_inf_0 = time.perf_counter()
+    res = await loop.run_in_executor(
+        _inference_executor,
+        run_inference_with_prefill,
+        image,
+        req.instruction,
+        req.width,
+        req.height,
+    )
     inference_ms = res.get("latency_ms", 0.0)
+    queue_ms = max(0.0, (time.perf_counter() - t_inf_0) * 1000.0 - inference_ms)
     total_ms = (time.perf_counter() - t0) * 1000.0
 
     return ActResponse(
@@ -432,7 +460,7 @@ async def http_act(req: ActRequest) -> ActResponse:
         raw_response=res.get("raw_response", ""),
         latency_ms=inference_ms,
         decode_ms=round(decode_ms, 2),
-        queue_ms=0.0,
+        queue_ms=round(queue_ms, 2),
         total_server_ms=round(total_ms, 2),
         seq=req.seq,
     )
@@ -454,9 +482,62 @@ async def websocket_act(
     pipeline = AsyncInferencePipeline(_inference_executor)
     logger.info(f"WebSocket client connected for /ws/act: {session_instruction} ({session_width}x{session_height})")
 
+    latest_event = asyncio.Event()
+    latest_item: Optional[Tuple[Any, str, int, int, Optional[Union[int, str]], float]] = None
+    closed = False
+    send_lock = asyncio.Lock()
+
+    async def _send_json_safe(payload: Dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def _inference_worker() -> None:
+        nonlocal latest_item
+        while True:
+            await latest_event.wait()
+            latest_event.clear()
+            item = latest_item
+            latest_item = None
+            if item is None:
+                if closed:
+                    break
+                continue
+            img, inst, cw, ch, seq, dec_ms = item
+            try:
+                res = await pipeline.execute_async(
+                    image=img,
+                    instruction=inst,
+                    canvas_w=cw,
+                    canvas_h=ch,
+                    seq=seq,
+                    t_decode_ms=dec_ms,
+                )
+                await _send_json_safe(res)
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            except Exception as exc:
+                logger.error(f"WebSocket worker error: {exc}")
+                try:
+                    await _send_json_safe({
+                        "error": f"Inference failed: {exc}",
+                        "action": "stop",
+                        "coordinate": None,
+                        "latency_ms": 0.0,
+                        "total_server_ms": 0.0,
+                        "seq": seq,
+                    })
+                except Exception:
+                    break
+            if closed and latest_item is None:
+                break
+
+    worker_task = asyncio.create_task(_inference_worker())
+
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
 
             # --------------------------------------------------------------- #
             # Fast Path: Zero-Copy Binary Turbo JPEG Framing
@@ -469,6 +550,7 @@ async def websocket_act(
                 # Zero-copy memoryview wrapper
                 mv = memoryview(raw_data)
                 frame_bytes: Union[memoryview, bytes] = mv
+                header_error: Optional[str] = None
 
                 # Check if binary message has a prefixed 4-byte JSON header
                 # Packet Format: [4 bytes header_len: uint32 BE] [JSON string] [JPEG binary]
@@ -479,20 +561,41 @@ async def websocket_act(
                         if 0 < header_len < len(mv) - 4:
                             try:
                                 header_json = json.loads(mv[4 : 4 + header_len].tobytes().decode("utf-8"))
-                                session_instruction = header_json.get("instruction", session_instruction)
-                                session_width = int(header_json.get("width", session_width))
-                                session_height = int(header_json.get("height", session_height))
+                                if not isinstance(header_json, dict):
+                                    raise ValueError("Header JSON must be an object")
+                                inst_val = header_json.get("instruction")
+                                if inst_val is not None:
+                                    session_instruction = str(inst_val)
+                                w_val = header_json.get("width")
+                                if w_val is not None:
+                                    session_width = int(w_val)
+                                h_val = header_json.get("height")
+                                if h_val is not None:
+                                    session_height = int(h_val)
                                 req_seq = header_json.get("seq")
                                 frame_bytes = mv[4 + header_len :]
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                header_error = f"Invalid binary frame header: {exc}"
+                        else:
+                            header_error = "Invalid binary frame header length"
+
+                if header_error is not None:
+                    await _send_json_safe({
+                        "error": header_error,
+                        "action": "stop",
+                        "coordinate": None,
+                        "latency_ms": 0.0,
+                        "total_server_ms": 0.0,
+                        "seq": req_seq,
+                    })
+                    continue
 
                 try:
                     # Fast decoding from buffer
                     image = decode_turbo_jpeg(frame_bytes)
                     decode_ms = (time.perf_counter() - t_decode_start) * 1000.0
                 except Exception as exc:
-                    await websocket.send_json({
+                    await _send_json_safe({
                         "error": f"Failed to decode binary JPEG frame: {exc}",
                         "action": "stop",
                         "coordinate": None,
@@ -502,16 +605,9 @@ async def websocket_act(
                     })
                     continue
 
-                # Offload inference through async pipeline to avoid blocking the event loop
-                res = await pipeline.execute_async(
-                    image=image,
-                    instruction=session_instruction,
-                    canvas_w=session_width,
-                    canvas_h=session_height,
-                    seq=req_seq,
-                    t_decode_ms=decode_ms,
-                )
-                await websocket.send_json(res)
+                # Stale-frame coalescing: overwrite unconsumed frame so worker always sees newest
+                latest_item = (image, session_instruction, session_width, session_height, req_seq, decode_ms)
+                latest_event.set()
 
             # --------------------------------------------------------------- #
             # Backward Compatibility Path: JSON Text Messages
@@ -519,21 +615,26 @@ async def websocket_act(
             elif "text" in message and message["text"]:
                 try:
                     payload = json.loads(message["text"])
+                    if not isinstance(payload, dict):
+                        raise ValueError("Payload must be a JSON object")
                 except Exception as exc:
-                    await websocket.send_json({"error": f"Invalid JSON text message: {exc}"})
+                    await _send_json_safe({"error": f"Invalid JSON text message: {exc}"})
                     continue
 
                 # Session configuration update message
                 if payload.get("type") == "config":
-                    session_instruction = payload.get("instruction", session_instruction)
-                    session_width = int(payload.get("width", session_width))
-                    session_height = int(payload.get("height", session_height))
-                    await websocket.send_json({"status": "configured", "instruction": session_instruction})
+                    if payload.get("instruction") is not None:
+                        session_instruction = str(payload["instruction"])
+                    if payload.get("width") is not None:
+                        session_width = int(payload["width"])
+                    if payload.get("height") is not None:
+                        session_height = int(payload["height"])
+                    await _send_json_safe({"status": "configured", "instruction": session_instruction})
                     continue
 
-                req_instruction = payload.get("instruction", session_instruction)
-                req_w = int(payload.get("width", session_width))
-                req_h = int(payload.get("height", session_height))
+                req_instruction = str(payload.get("instruction") or session_instruction)
+                req_w = int(payload.get("width") or session_width)
+                req_h = int(payload.get("height") or session_height)
                 req_seq = payload.get("seq")
                 b64_str = payload.get("image_base64", "")
 
@@ -543,7 +644,7 @@ async def websocket_act(
                     image = decode_turbo_jpeg(raw_bytes)
                     decode_ms = (time.perf_counter() - t_decode_start) * 1000.0
                 except Exception as exc:
-                    await websocket.send_json({
+                    await _send_json_safe({
                         "error": f"Invalid base64 JPEG payload: {exc}",
                         "action": "stop",
                         "coordinate": None,
@@ -553,15 +654,8 @@ async def websocket_act(
                     })
                     continue
 
-                res = await pipeline.execute_async(
-                    image=image,
-                    instruction=req_instruction,
-                    canvas_w=req_w,
-                    canvas_h=req_h,
-                    seq=req_seq,
-                    t_decode_ms=decode_ms,
-                )
-                await websocket.send_json(res)
+                latest_item = (image, req_instruction, req_w, req_h, req_seq, decode_ms)
+                latest_event.set()
 
     except (WebSocketDisconnect, RuntimeError) as exc:
         if isinstance(exc, RuntimeError) and "disconnect" not in str(exc).lower():
@@ -570,6 +664,13 @@ async def websocket_act(
             logger.info("WebSocket client disconnected from /ws/act.")
     except Exception as exc:
         logger.error(f"WebSocket server error: {exc}")
+    finally:
+        closed = True
+        latest_event.set()
+        try:
+            await worker_task
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

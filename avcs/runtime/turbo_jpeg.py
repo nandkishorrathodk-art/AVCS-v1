@@ -43,16 +43,22 @@ def encode_turbo_jpeg(
             return b
         img = Image.open(io.BytesIO(b))
     elif isinstance(frame, np.ndarray):
+        arr = frame
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            arr = arr[:, :, :3]
         # Fast path with simplejpeg if available and contiguous uint8
-        if simplejpeg is not None and frame.dtype == np.uint8 and frame.ndim == 3:
+        if simplejpeg is not None and arr.dtype == np.uint8 and arr.ndim == 3:
             try:
-                c_frame = np.ascontiguousarray(frame)
+                c_frame = np.ascontiguousarray(arr)
                 return simplejpeg.encode_jpeg(c_frame, quality=quality, colorspace="RGB", colorsubsamp="420", fastdct=True)
             except Exception:
                 pass
-        img = Image.fromarray(frame)
+        img = Image.fromarray(arr)
     else:
         img = frame
+
+    if getattr(img, "mode", None) not in ("RGB", "L"):
+        img = img.convert("RGB")
 
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=quality, optimize=False, subsampling=2)

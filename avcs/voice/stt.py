@@ -365,10 +365,17 @@ def download_vosk_model(dest_dir: str = "models", model: Optional[str] = None) -
         return target
 
     zip_path = os.path.join(dest_dir, name + ".zip")
+    if not url.lower().startswith("https://"):
+        return None
     try:
         urllib.request.urlretrieve(url, zip_path)
+        real_dest = os.path.realpath(dest_dir)
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(dest_dir)
+            for member in zf.infolist():
+                member_path = os.path.realpath(os.path.join(real_dest, member.filename))
+                if not (member_path == real_dest or member_path.startswith(real_dest + os.sep)):
+                    raise ValueError(f"Unsafe zip member path traversal blocked: {member.filename}")
+            zf.extractall(real_dest)
     except Exception:
         return None
     finally:

@@ -1,0 +1,61 @@
+# Pure-RGB Single-Brain Local VLA Model Architecture Configuration Schema
+# Aligns with Qwen2.5-VL-3B + UI Token Pruner + GUI-Actor Pointer + ParallelActionHeads
+
+architecture:
+  mode: "single_brain_local_vla"
+  pure_rgb_only: true
+  use_dom: false
+  use_a11y_tree: false
+  use_ocr: false
+  scrape_win32_window_titles: false
+  allow_cloud_llm_fallback: false
+  latency_budget_ms: 350.0
+
+safety_kernel:
+  fail_closed: true
+  require_explicit_grant: true
+  min_peak_probability: 0.75
+  reject_non_finite_peaks: true
+
+model:
+  backbone_id: "Qwen/Qwen2.5-VL-3B-Instruct"
+  backbone_hidden_dim: 2048
+  pointer_hidden_dim: 512
+  query_dim: 512
+  backbone_dtype: "auto"
+  max_pixels: 501760  # 560 * 896 (~640 visual patches)
+
+adapters:
+  lora_layers: 8
+  lora_r: 16
+  lora_alpha: 32.0
+  enable_token_pruning: false  # Paused during Stage 1 grounding warmup
+  target_token_budget: 400
+  enable_rolling_kv: false     # Activated in Stage 2 stateful trajectories
+  max_history_steps: 16
+
+action_space:
+  primitives:
+    - "left_click"
+    - "right_click"
+    - "double_click"
+    - "mouse_move"
+    - "left_click_drag"
+    - "scroll"
+    - "key"
+    - "type_text"
+    - "wait"
+    - "stop"
+
+training_stage1:
+  optimizer: "adamw"
+  head_lr: 1.0e-3
+  lora_lr: 2.5e-4
+  weight_decay: 1.0e-3
+  loss_weights:
+    patch_ce: 5.0
+    coord_l1: 10.0
+    coord_l2: 10.0
+    action_ce: 0.5
+  subpixel_blend: 0.65
+  exit_gate_showdown_strict: 0.65

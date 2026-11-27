@@ -257,10 +257,11 @@ class QueryConditionedFovealRefiner(nn.Module):
         foveal_conf = pres_prob
         uncertainty = 1.0 - foveal_conf
 
-        # Box dimensions in crop pixels
+        # Box dimensions in crop pixels (the network saw a crop_size x crop_size
+        # padded tensor, so normalized coordinates span crop_size, not actual_w/h).
         b_ymin, b_xmin, b_ymax, b_xmax = local_bbox
-        box_px_w = (b_xmax - b_xmin) * actual_w
-        box_px_h = (b_ymax - b_ymin) * actual_h
+        box_px_w = (b_xmax - b_xmin) * crop_size
+        box_px_h = (b_ymax - b_ymin) * crop_size
 
         # Determine target point inside crop:
         # If bounding box is well-formed (box_w >= 8px and box_h >= 6px), use geometric box center
@@ -273,17 +274,17 @@ class QueryConditionedFovealRefiner(nn.Module):
             cand_v = local_v
 
         # Coordinate restoration to physical screen space
-        ref_px_x = x0 + cand_u * actual_w
-        ref_px_y = y0 + cand_v * actual_h
+        ref_px_x = float(np.clip(x0 + cand_u * crop_size, 0.0, max(0, W_screen - 1)))
+        ref_px_y = float(np.clip(y0 + cand_v * crop_size, 0.0, max(0, H_screen - 1)))
 
         ref_norm_x = float(np.clip(ref_px_x / max(1, W_screen - 1), 0.0, 1.0))
         ref_norm_y = float(np.clip(ref_px_y / max(1, H_screen - 1), 0.0, 1.0))
 
         # Global bounding box restoration
-        global_ymin = float(np.clip((y0 + b_ymin * actual_h) / max(1, H_screen - 1), 0.0, 1.0))
-        global_xmin = float(np.clip((x0 + b_xmin * actual_w) / max(1, W_screen - 1), 0.0, 1.0))
-        global_ymax = float(np.clip((y0 + b_ymax * actual_h) / max(1, H_screen - 1), 0.0, 1.0))
-        global_xmax = float(np.clip((x0 + b_xmax * actual_w) / max(1, W_screen - 1), 0.0, 1.0))
+        global_ymin = float(np.clip((y0 + b_ymin * crop_size) / max(1, H_screen - 1), 0.0, 1.0))
+        global_xmin = float(np.clip((x0 + b_xmin * crop_size) / max(1, W_screen - 1), 0.0, 1.0))
+        global_ymax = float(np.clip((y0 + b_ymax * crop_size) / max(1, H_screen - 1), 0.0, 1.0))
+        global_xmax = float(np.clip((x0 + b_xmax * crop_size) / max(1, W_screen - 1), 0.0, 1.0))
 
         offset_px = math.hypot(ref_px_x - px_cx, ref_px_y - px_cy)
 

@@ -240,15 +240,16 @@ class StandaloneAVCS(nn.Module):
 # 2. Synthetic Procedural Screen Dataset Generator
 # ---------------------------------------------------------------------------
 class ProceduralDataset(Dataset):
-    def __init__(self, num_samples: int = 2000, size: Tuple[int, int] = (256, 256)):
+    def __init__(self, num_samples: int = 2000, size: Tuple[int, int] = (256, 256), seed_offset: int = 0):
         self.num_samples = num_samples
         self.size = size
+        self.seed_offset = int(seed_offset)
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        np.random.seed(idx)
+        rng = np.random.default_rng(self.seed_offset + idx)
         w, h = self.size
         cat_idx = idx % len(UI_CATEGORIES)
 
@@ -275,7 +276,8 @@ class ProceduralDataset(Dataset):
             mask[18:22, 16:25] = 1
 
         frame_t = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
-        frame_next = frame_t + torch.randn_like(frame_t) * 0.02  # slight variation
+        noise = torch.from_numpy(rng.normal(0.0, 0.02, size=frame_t.shape).astype(np.float32))
+        frame_next = frame_t + noise  # split-seeded variation
 
         return {
             "peripheral": frame_t,
@@ -299,8 +301,8 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"AVCS Model Parameters: {total_params:,}")
 
-    train_ds = ProceduralDataset(num_samples=2500)
-    val_ds = ProceduralDataset(num_samples=300)
+    train_ds = ProceduralDataset(num_samples=2500, seed_offset=0)
+    val_ds = ProceduralDataset(num_samples=300, seed_offset=100_000)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)

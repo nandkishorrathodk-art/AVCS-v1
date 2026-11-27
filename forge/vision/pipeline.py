@@ -110,6 +110,7 @@ class ScreenVision:
         describe_every_s: float = 2.0,
         target_fps: Optional[float] = None,
         desktop_context: Optional[DesktopContextProvider] = None,
+        pure_rgb_only: bool = True,
     ) -> None:
         self.capture = capture if capture is not None else open_capture()
         self.perception = ReflexPerception(rows=rows, cols=cols, downscale=downscale)
@@ -118,7 +119,8 @@ class ScreenVision:
         self.describe_on_change = describe_on_change
         self.describe_every_s = describe_every_s
         self.target_fps = target_fps
-        self.desktop_context = desktop_context
+        self.pure_rgb_only = bool(pure_rgb_only)
+        self.desktop_context = None if self.pure_rgb_only else desktop_context
 
         self.stats = PipelineStats()
         self._latest = LatestFrame()
@@ -503,7 +505,7 @@ class ScreenVision:
         description = self.describer.describe(state, understanding, events)
         desktop = (
             self.desktop_context.snapshot()
-            if self.desktop_context is not None
+            if (not getattr(self, "pure_rgb_only", True) and self.desktop_context is not None)
             else {"status": "not_configured", "source": None}
         )
 

@@ -18,12 +18,28 @@ import os
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 from avcs.reasoning.contracts import (
     ActionIntent,
     ActionOp,
     System2Decision,
 )
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_local_endpoint(endpoint: Optional[str]) -> bool:
+    """Return True only when ``endpoint`` targets a local loopback host."""
+    raw = (endpoint or "").strip()
+    if not raw:
+        return False
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    return parsed.hostname.lower() in _LOOPBACK_HOSTS
 
 
 # Server-sent-event framing used by OpenAI-compatible streaming endpoints.
@@ -365,7 +381,8 @@ CRITICAL RULES:
 
         creds = resolve_llm_credentials(api_key=api_key, endpoint=endpoint, model=model)
         self.api_key = creds.api_key
-        self.endpoint = creds.endpoint.rstrip("/")
+        explicit_endpoint = (endpoint or "").strip()
+        self.endpoint = (explicit_endpoint or creds.endpoint).rstrip("/")
         self.model = creds.model
         self.credential_source = creds.source
 
@@ -523,6 +540,20 @@ CRITICAL RULES:
         ``stream=true`` or the connection drops mid-stream, so a caller can treat
         this generator exactly like a chunk iterator without special cases.
         """
+        if not _is_local_endpoint(self.endpoint):
+            raise RuntimeError(
+                "External cloud LLM endpoints are disabled in 100% self-contained local VLA mode."
+            )
+        return self._stream_step_iter(task, observation, history, step_index, system_prompt)
+
+    def _stream_step_iter(
+        self,
+        task,
+        observation,
+        history,
+        step_index=1,
+        system_prompt=None,
+    ):
         import json as _json
         import urllib.request
 
@@ -576,6 +607,11 @@ CRITICAL RULES:
         """Executes HTTP request to LLM provider with retry/backoff and token metrics."""
         import urllib.error
         import urllib.request
+
+        if not _is_local_endpoint(self.endpoint):
+            raise RuntimeError(
+                "External cloud LLM endpoints are disabled in 100% self-contained local VLA mode."
+            )
 
         url = f"{self.endpoint.rstrip('/')}/chat/completions"
         headers = {

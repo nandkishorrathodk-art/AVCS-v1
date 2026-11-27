@@ -83,7 +83,17 @@ class AceSession:
         cx, cy = int(coord[0]), int(coord[1])
         return any(abs(cx - bx) <= tolerance and abs(cy - by) <= tolerance for bx, by in self.blacklisted_coordinates)
 
-    def _match_action(self, step_action: Dict[str, Any], target_kind: str, target_coord: Any, target_keys: Any, target_text: Any) -> bool:
+    def _match_action(
+        self,
+        step_action: Dict[str, Any],
+        target_kind: str,
+        target_coord: Any,
+        target_keys: Any,
+        target_text: Any,
+        target_start_coord: Any = None,
+        target_end_coord: Any = None,
+        target_scroll_delta: Any = None,
+    ) -> bool:
         """Determines if a recorded step action matches the target parameters."""
         if step_action.get("kind") != target_kind:
             return False
@@ -94,6 +104,22 @@ class AceSession:
             dx = abs(step_coord[0] - target_coord[0])
             dy = abs(step_coord[1] - target_coord[1])
             if not (dx <= 5 and dy <= 5):
+                return False
+        if target_start_coord is not None:
+            step_start = step_action.get("start_coordinate")
+            if not step_start or len(step_start) < 2:
+                return False
+            if abs(step_start[0] - target_start_coord[0]) > 5 or abs(step_start[1] - target_start_coord[1]) > 5:
+                return False
+        if target_end_coord is not None:
+            step_end = step_action.get("end_coordinate")
+            if not step_end or len(step_end) < 2:
+                return False
+            if abs(step_end[0] - target_end_coord[0]) > 5 or abs(step_end[1] - target_end_coord[1]) > 5:
+                return False
+        if target_scroll_delta is not None:
+            step_scroll = step_action.get("scroll_delta")
+            if step_scroll is None or list(step_scroll) != list(target_scroll_delta):
                 return False
         if target_keys is not None:
             if step_action.get("keys") != target_keys:
@@ -116,16 +142,31 @@ class AceSession:
             target_coord = new_action.coordinate
             target_keys = new_action.keys
             target_text = new_action.text
+            target_start = new_action.start_coordinate
+            target_end = new_action.end_coordinate
+            target_scroll = new_action.scroll_delta
         else:
             last_act = self.steps[-1].action
             target_kind = last_act.get("kind")
             target_coord = last_act.get("coordinate")
             target_keys = last_act.get("keys")
             target_text = last_act.get("text")
+            target_start = last_act.get("start_coordinate")
+            target_end = last_act.get("end_coordinate")
+            target_scroll = last_act.get("scroll_delta")
 
         count = 0
         for step in reversed(self.steps):
-            if self._match_action(step.action, target_kind, target_coord, target_keys, target_text):
+            if self._match_action(
+                step.action,
+                target_kind,
+                target_coord,
+                target_keys,
+                target_text,
+                target_start_coord=target_start,
+                target_end_coord=target_end,
+                target_scroll_delta=target_scroll,
+            ):
                 count += 1
             else:
                 break
@@ -140,10 +181,22 @@ class AceSession:
         target_coord = action.coordinate
         target_keys = action.keys
         target_text = action.text
+        target_start = action.start_coordinate
+        target_end = action.end_coordinate
+        target_scroll = action.scroll_delta
 
         count = 0
         for step in recent:
-            if self._match_action(step.action, target_kind, target_coord, target_keys, target_text):
+            if self._match_action(
+                step.action,
+                target_kind,
+                target_coord,
+                target_keys,
+                target_text,
+                target_start_coord=target_start,
+                target_end_coord=target_end,
+                target_scroll_delta=target_scroll,
+            ):
                 count += 1
         return count
 

@@ -236,29 +236,38 @@ class TestCustomLLMClient(unittest.TestCase):
         self.assertEqual(client.extra_headers.get("X-Custom-Route"), "accelerated")
 
     def test_environment_variable_fallback(self):
-        os.environ["AVCS_ACE_ENDPOINT"] = "https://custom-gateway.internal/v1/chat/completions"
-        os.environ["AVCS_ACE_API_KEY"] = "key-from-env"
-        os.environ["AVCS_ACE_MODEL"] = "fable-5.5"
+        os.environ["AVCS_ACE_ENDPOINT"] = "http://127.0.0.1:8000/v1/chat/completions"
+        os.environ["AVCS_LOCAL_VAM_API_KEY"] = "key-from-env"
+        os.environ["AVCS_ACE_MODEL"] = "Qwen2.5-VL-3B-Instruct"
         os.environ["AVCS_ACE_EXTRA_HEADERS"] = json.dumps({"X-Organization": "ResearchLab"})
 
-        client = CustomLLMClient()
-        self.assertEqual(client.endpoint, "https://custom-gateway.internal/v1/chat/completions")
-        self.assertEqual(client.api_key, "key-from-env")
-        self.assertEqual(client.model, "fable-5.5")
-        self.assertEqual(client.extra_headers.get("X-Organization"), "ResearchLab")
+        try:
+            client = CustomLLMClient()
+            self.assertEqual(client.endpoint, "http://127.0.0.1:8000/v1/chat/completions")
+            self.assertEqual(client.api_key, "key-from-env")
+            self.assertEqual(client.model, "Qwen2.5-VL-3B-Instruct")
+            self.assertEqual(client.extra_headers.get("X-Organization"), "ResearchLab")
+        finally:
+            os.environ.pop("AVCS_LOCAL_VAM_API_KEY", None)
 
     def test_protocol_auto_detection(self):
-        # Anthropic
+        from avcs.runtime.client import AceClientError
+
+        # Cloud Anthropic/Gemini/external endpoints are quarantined
         c_anthropic = CustomLLMClient(endpoint="https://api.anthropic.com/v1/messages")
-        self.assertEqual(c_anthropic.protocol, "anthropic")
+        self.assertTrue(c_anthropic._cloud_quarantined)
+        with self.assertRaises(AceClientError):
+            c_anthropic.predict_action(b"fake", goal="test")
 
-        # Gemini
         c_gemini = CustomLLMClient(endpoint="https://generativelanguage.googleapis.com/v1beta/models")
-        self.assertEqual(c_gemini.protocol, "gemini")
+        self.assertTrue(c_gemini._cloud_quarantined)
+        with self.assertRaises(AceClientError):
+            c_gemini.predict_action(b"fake", goal="test")
 
-        # OpenAI compatible
-        c_openai = CustomLLMClient(endpoint="https://api.deepseek.com/v1/chat/completions")
-        self.assertEqual(c_openai.protocol, "openai")
+        # Local loopback OpenAI-compatible VLA server is permitted
+        c_local = CustomLLMClient(endpoint="http://127.0.0.1:8000/v1/chat/completions")
+        self.assertEqual(c_local.protocol, "openai")
+        self.assertFalse(c_local._cloud_quarantined)
 
     def test_image_encoding(self):
         client = CustomLLMClient()
@@ -288,18 +297,16 @@ class TestCustomLLMClient(unittest.TestCase):
         self.assertEqual(user_content[1]["image_url"]["url"], "data:image/webp;base64,AAAA")
 
     def test_anthropic_payload_structure(self):
-        client = CustomLLMClient(endpoint="https://api.anthropic.com/v1/messages", model="fable-5.5")
-        payload = client._build_payload(
-            b64_str="BBBB",
-            mime="image/png",
-            data_uri="data:image/png;base64,BBBB",
-            goal="Save document",
-            step_index=1,
-        )
-        self.assertEqual(payload["model"], "fable-5.5")
-        self.assertIn("system", payload)
-        self.assertEqual(payload["messages"][0]["content"][0]["type"], "image")
-        self.assertEqual(payload["messages"][0]["content"][0]["source"]["data"], "BBBB")
+        from avcs.runtime.client import AceClientError
+        client = CustomLLMClient(endpoint="https://api.anthropic.com/v1/messages", protocol="anthropic", model="fable-5.5")
+        with self.assertRaises(AceClientError):
+            client._build_payload(
+                b64_str="BBBB",
+                mime="image/png",
+                data_uri="data:image/png;base64,BBBB",
+                goal="Save document",
+                step_index=1,
+            )
 
     def test_parse_clean_json(self):
         client = CustomLLMClient()
@@ -416,18 +423,17 @@ class TestCustomLLMClient(unittest.TestCase):
         self.assertEqual(extracted, '{"kind": "wait", "duration": 1.5}')
 
     def test_groq_and_anthropic_auto_detection(self):
-        # Groq key auto-detection
+        # Cloud API keys in environment must NOT auto-route to external cloud endpoints
         os.environ["GROQ_API_KEY"] = "gsk_test12345"
         c_groq = CustomLLMClient()
-        self.assertIn("api.groq.com", c_groq.endpoint)
+        self.assertIn("127.0.0.1", c_groq.endpoint)
         self.assertEqual(c_groq.protocol, "openai")
         del os.environ["GROQ_API_KEY"]
 
-        # Anthropic key auto-detection
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test12345"
         c_ant = CustomLLMClient()
-        self.assertIn("api.anthropic.com", c_ant.endpoint)
-        self.assertEqual(c_ant.protocol, "anthropic")
+        self.assertIn("127.0.0.1", c_ant.endpoint)
+        self.assertEqual(c_ant.protocol, "openai")
         del os.environ["ANTHROPIC_API_KEY"]
 
     def test_truncated_json_coordinate_repair(self):
@@ -503,18 +509,10 @@ class TestCustomLLMClient(unittest.TestCase):
         self.assertEqual(client_env.max_tokens, 512)
         del os.environ["AVCS_ACE_MAX_TOKENS"]
 
-        # Payload uses max_tokens across protocols
-        c_anthropic = CustomLLMClient(endpoint="https://api.anthropic.com/v1/messages", max_tokens=1024)
-        payload_ant = c_anthropic._build_payload(b64_str="X", mime="image/webp", data_uri="data:", goal="test")
-        self.assertEqual(payload_ant["max_tokens"], 1024)
-
-        c_gemini = CustomLLMClient(endpoint="https://generativelanguage.googleapis.com/v1beta/models", max_tokens=1024)
-        payload_gem = c_gemini._build_payload(b64_str="X", mime="image/webp", data_uri="data:", goal="test")
-        self.assertEqual(payload_gem["generationConfig"]["maxOutputTokens"], 1024)
-
-        c_openai = CustomLLMClient(max_tokens=1024)
-        payload_oai = c_openai._build_payload(b64_str="X", mime="image/webp", data_uri="data:", goal="test")
-        self.assertEqual(payload_oai["max_tokens"], 1024)
+        # Payload uses max_tokens for local OpenAI-compatible VLA server
+        c_local = CustomLLMClient(max_tokens=1024)
+        payload_local = c_local._build_payload(b64_str="X", mime="image/webp", data_uri="data:", goal="test")
+        self.assertEqual(payload_local["max_tokens"], 1024)
 
     def test_prompt_stuck_warning(self):
         client = CustomLLMClient()
@@ -3763,7 +3761,7 @@ class TestPhase2LocalGrounderIntegrationP1(unittest.TestCase):
         mock_client.predict_action.assert_not_called()
 
     def test_gated_actuation_low_confidence_fallback(self):
-        # Low confidence < 0.75: falls back to Cloud LLM
+        # Low confidence < 0.75: must fail closed locally (no Cloud LLM fallback)
         mock_grounder = MagicMock()
         mock_prediction = MagicMock()
         mock_prediction.candidate_point_norm = (0.25, 0.5)
@@ -3787,10 +3785,10 @@ class TestPhase2LocalGrounderIntegrationP1(unittest.TestCase):
         obs = Observation(image_bytes=b"GIF89a" + b"\x00" * 20, width=1280, height=800, format="jpeg")
         action, latency_ms = agent.step(obs, goal="Launch application")
 
-        # Must fall back to Cloud LLM
-        mock_client.predict_action.assert_called_once()
-        self.assertEqual(action.kind, ActionKind.KEY)
-        self.assertEqual(action.keys, ["win"])
+        # Must fail closed with local WAIT (never call Cloud LLM)
+        mock_client.predict_action.assert_not_called()
+        self.assertEqual(action.kind, ActionKind.WAIT)
+        self.assertTrue((action.metadata or {}).get("fail_closed"))
 
     def test_shadow_mode_agreement_logging(self):
         mock_grounder = MagicMock()
@@ -4029,12 +4027,11 @@ class TestPhase2LocalGrounderIntegrationP1(unittest.TestCase):
         # Non-pointing goal "Press Enter"
         action, latency_ms = agent.step(obs, goal="Press Enter")
 
-        # Grounder predict must NOT have been called
+        # Grounder predict must NOT have been called; local fail-closed WAIT (no Cloud LLM fallback)
         mock_grounder.predict.assert_not_called()
-        # Fallback to Cloud LLM
-        mock_client.predict_action.assert_called_once()
-        self.assertEqual(action.kind, ActionKind.KEY)
-        self.assertEqual(action.keys, ["enter"])
+        mock_client.predict_action.assert_not_called()
+        self.assertEqual(action.kind, ActionKind.WAIT)
+        self.assertTrue((action.metadata or {}).get("fail_closed"))
 
     def test_gated_actuation_blacklisted_coordinate_falls_back_to_llm(self):
         mock_grounder = MagicMock()
@@ -4066,11 +4063,10 @@ class TestPhase2LocalGrounderIntegrationP1(unittest.TestCase):
             blacklisted_coordinates=[(300, 300)],
         )
 
-        # Because (300, 300) is blacklisted, it must NOT delegate direct action
-        # Instead, it must fall back to Cloud LLM for recovery!
-        mock_client.predict_action.assert_called_once()
-        self.assertEqual(action.kind, ActionKind.KEY)
-        self.assertEqual(action.keys, ["win"])
+        # Because (300, 300) is blacklisted, it must fail closed with WAIT (never call Cloud LLM)
+        mock_client.predict_action.assert_not_called()
+        self.assertEqual(action.kind, ActionKind.WAIT)
+        self.assertTrue((action.metadata or {}).get("blacklisted"))
 
 
 class TestPhase1ContractAndLifecycle(unittest.TestCase):

@@ -1,0 +1,45 @@
+# Phase 1 Evaluation & Gate 1 Configuration Schema
+# Mirrors the Ace Pure-RGB VLA Roadmap (Phase 1 / Gate 1)
+
+phase: "phase1_eval_harness"
+
+observation:
+  mode: "pure_rgb"
+  use_a11y_tree: false
+  use_dom: false
+  use_ocr: false
+  canonical_width: 1280
+  canonical_height: 800
+
+benchmarks:
+  showdown_clicks:
+    split: "dev"
+    data_path: "data/showdown-clicks-dev/data.csv"
+    tolerance_px: 15.0
+    bootstrap_resamples: 1000
+    bootstrap_seed: 42
+    max_samples: 557
+
+  screenspot_pro:
+    data_dir: "data/screenspot-pro"
+    tolerance_px: 15.0
+    small_icon_max_px: 24
+    smoke_samples: 30
+    resolutions:
+      - [1920, 1080]
+      - [2560, 1440]
+
+  osworld_verified:
+    manifest_dir: "data/osworld-verified"
+    observation_mode: "pure_rgb"
+    disable_a11y_tree: true
+    disable_dom: true
+    smoke_tasks: 30
+    max_steps_per_task: 15
+
+gate1:
+  output_leaderboard: "benchmarks/results/phase1_gate1_leaderboard.json"
+  require_zero_mock_errors: true
+  require_protocol_roundtrip: true
+  require_pure_rgb_lock: true
+  min_showdown_accuracy: 0.65

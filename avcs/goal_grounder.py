@@ -276,7 +276,18 @@ class GoalConditionedGrounder(nn.Module):
 
     def _mark_loaded_checkpoint(self, metadata: Dict[str, Any]) -> None:
         """Mark a model usable only after the checkpoint loader validates it."""
+        self._query_cache.clear()
         self._checkpoint_metadata = dict(metadata)
+
+    def train(self, mode: bool = True) -> "GoalConditionedGrounder":
+        """Invalidate cached eval query embeddings when switching train/eval mode."""
+        self._query_cache.clear()
+        return super().train(mode)
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False):
+        """Invalidate cached query embeddings whenever weights change."""
+        self._query_cache.clear()
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def get_query_embedding(self, query: str, device: torch.device) -> torch.Tensor:
         """Encodes or retrieves cached query embedding."""
@@ -286,14 +297,18 @@ class GoalConditionedGrounder(nn.Module):
         if len(clean_q.encode("utf-8")) > MAX_QUERY_BYTES:
             clean_q = clean_q.encode("utf-8")[:MAX_QUERY_BYTES].decode("utf-8", errors="ignore")
 
-        if clean_q in self._query_cache:
+        use_cache = not self.training and not torch.is_grad_enabled()
+        if use_cache and clean_q in self._query_cache:
             return self._query_cache[clean_q].to(device)
 
         tokens = encode_queries([clean_q]).to(device)
-        with torch.inference_mode():
+        if not use_cache:
+            return self.query_encoder(tokens)
+
+        with torch.no_grad():
             emb = self.query_encoder(tokens)
             if len(self._query_cache) < 256:
-                self._query_cache[clean_q] = emb.cpu()
+                self._query_cache[clean_q] = emb.detach().cpu()
             return emb
 
     def _forward_impl(
@@ -301,7 +316,12 @@ class GoalConditionedGrounder(nn.Module):
         image_or_feat: torch.Tensor,
         query: Union[torch.Tensor, str, Sequence[str]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        device = image_or_feat.device
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = image_or_feat.device
+        if image_or_feat.device != device:
+            image_or_feat = image_or_feat.to(device)
 
         # If input is image tensor [B, 3, H, W], pass through visual backbone
         if image_or_feat.shape[1] == 3:
@@ -344,7 +364,7 @@ class GoalConditionedGrounder(nn.Module):
 
         # FiLM Spatial Modulation
         scale, bias = self.query_modulation(query_emb).chunk(2, dim=-1)
-        scale = torch.tanh(scale).unsqueeze(-1).unsqueeze(-1)
+        scale = scale.unsqueeze(-1).unsqueeze(-1)
         bias = bias.unsqueeze(-1).unsqueeze(-1)
         modulated = feat * (1.0 + scale) + bias
 

@@ -4,8 +4,22 @@ Repository knowledge for agents working on Forge.
 
 ## What this repo is
 
-A small agentic LLM framework that trains end-to-end on CPU (4 cores, 15 GB,
-no GPU). The constraint is deliberate: it keeps every component measurable.
+A small agentic LLM framework and **100% self-contained, single-brain local VLA**
+desktop agent (`Qwen2.5-VL-3B` + `GUI-Actor` + `ParallelActionHeads`) with
+zero runtime dependency on external cloud LLMs.
+
+### Locked Architecture Invariants
+
+- **Pure-RGB Pixel Only:** Zero DOM, zero `a11y_tree`, zero external OCR, zero
+  Set-of-Marks hacks, and zero Win32 window-title scraping in inference/control.
+- **Single-Brain Local VLA (`<350ms` Loop):** Single forward pass
+  (`Qwen2.5-VL-3B` backbone + `GUI-Actor` patch pointer + `ParallelActionHeads`)
+  handling motor reflex and native local reasoning/dialogue with zero external
+  cloud LLM fallback (`OpenAI`, `Anthropic`, `Gemini`, `api.parthlabs.in`, or any
+  System 2 cloud planner are quarantined/disabled).
+- **Fail-Closed Capability Kernel:** No mouse/keyboard action can execute
+  without an explicit capability grant, finite (`not math.isnan`) calibrated
+  `peak_probability >= 0.75`, and local `WAIT`/`STOP` fallback on uncertainty.
 
 ## Setup and commands
 
@@ -316,10 +330,11 @@ Facts to keep straight:
 Pure-pixel visual awareness of the desktop. Read `docs/SCREEN_VISION.md`. The
 facts to keep straight:
 
-- AVCS System 1 is intended to run locally; System 2 may be a cloud LLM that
-  receives bounded text observations and returns high-level goals. Do not send
-  frames or visual embeddings to System 2. Follow the engineering and evidence
-  requirements in `docs/AVCS_ENGINEERING_RULES.md`.
+- AVCS runs as a **100% self-contained single-brain local VLA** (`Qwen2.5-VL-3B`
+  + `GUI-Actor` + `ParallelActionHeads`). External cloud LLMs (System 2 cloud
+  planners) are disabled at runtime; low-confidence or error states fail closed
+  locally (`WAIT`/`STOP`). Follow the engineering and evidence requirements in
+  `docs/AVCS_ENGINEERING_RULES.md`.
 
 - The **reflex layer** is non-generative (typed `SceneState`, no text model) and
   runs every captured frame. Measured full-tick p50 ~3.7 ms (reflex + model
@@ -651,11 +666,10 @@ Two honesty bugs in `--check`:
   `[CHECKS INCOMPLETE]`. Exit 0 means a checkpoint actually loaded.
 - Do not read `--check` exit 0 as a perception pass; it only means plumbing.
 
-Boundary rule (see `docs/AVCS_ENGINEERING_RULES.md`, "Do not send screen images
-to System 2"): `LLMBridge(vision_enabled=...)` defaulted to **True**, so a
-caller that passed only a goal silently shipped base64 foveal crops to the
-cloud endpoint. It now defaults to **False**; enabling image egress is an
-explicit opt-in.
+Boundary rule (see `docs/AVCS_ENGINEERING_RULES.md`): external cloud LLM egress
+is permanently disabled. `LLMBridge(vision_enabled=...)` defaults to **False**
+and routes all perception, action, and dialogue strictly through the local VLA
+engine without outbound HTTP requests to `api.parthlabs.in` or cloud APIs.
 
 Verified: `python3 -m avcs_sdk.run_live_agent --goal "..." --dry-run` now
 completes turn 1 (previously `AttributeError`), and

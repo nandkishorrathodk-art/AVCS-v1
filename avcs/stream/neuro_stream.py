@@ -129,7 +129,7 @@ class NeuroStreamBus:
         self._buffer: Deque[NeuroPacket] = collections.deque(maxlen=buffer_size)
         self._subscribers: Tuple[Callable[[NeuroPacket], None], ...] = ()
         self._packet_count = 0
-        self._last_tick_time = time.time()
+        self._last_tick_time: Optional[float] = None
         self._fps = 0.0
 
     def publish(self, packet: NeuroPacket) -> None:
@@ -137,18 +137,20 @@ class NeuroStreamBus:
             self._buffer.append(packet)
             self._packet_count += 1
             now = packet.timestamp
-            dt = now - self._last_tick_time
-            if dt > 0:
-                inst_fps = 1.0 / dt
-                self._fps = 0.9 * self._fps + 0.1 * inst_fps if self._fps > 0 else inst_fps
+            if self._last_tick_time is not None:
+                dt = now - self._last_tick_time
+                if dt > 0:
+                    inst_fps = 1.0 / dt
+                    self._fps = 0.9 * self._fps + 0.1 * inst_fps if self._fps > 0 else inst_fps
             self._last_tick_time = now
 
         # Non-blocking lock-free subscriber iteration under GIL (copy-on-write immutable tuple)
         for sub in self._subscribers:
             try:
                 sub(packet)
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger("avcs.stream.neuro_stream").debug("Subscriber callback error: %s", exc)
 
     def subscribe(self, callback: Callable[[NeuroPacket], None]) -> Callable[[], None]:
         with self._lock:
@@ -179,6 +181,7 @@ class NeuroStreamBus:
         with self._lock:
             self._buffer.clear()
             self._packet_count = 0
+            self._last_tick_time = None
             self._fps = 0.0
 
     def to_binary_stream(self, count: Optional[int] = None) -> bytes:
@@ -258,6 +261,7 @@ class RealTimeNeuroStreamer:
     def step_once(self) -> NeuroPacket:
         """Forces a single synchronous perception tick and broadcasts the resulting packet."""
         prev_seq = self._seq
+        prev_bus_count = self.bus.packet_count
         if hasattr(self.eye, "perceive_now"):
             state = self.eye.perceive_now()
         elif hasattr(self.eye, "observe"):
@@ -266,7 +270,7 @@ class RealTimeNeuroStreamer:
             raise NotImplementedError("eye must have perceive_now() or observe()")
 
         latest = self.bus.get_latest()
-        if latest is not None and self._seq > prev_seq:
+        if latest is not None and (self._seq > prev_seq or self.bus.packet_count > prev_bus_count):
             return latest
 
         self._seq += 1

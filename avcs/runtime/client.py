@@ -1,8 +1,9 @@
-"""Custom Frontier Cloud LLM Provider Client for the Ace-Control-Medium Architecture.
+"""Quarantined Local-Only LLM/VLA Client for the AVCS Single-Brain Architecture.
 
-Supports arbitrary frontier model endpoints (e.g. gpt-6-astra, fable-5.5, custom gateways),
-pure visual GUI prompt framing, direct action token decoding with zero CoT chatter,
-and fail-safe parsing with zero center-click heuristics.
+External frontier cloud API providers (OpenAI, Anthropic, Gemini, Groq, NVIDIA)
+have been quarantined and disabled. AVCS operates strictly as a 100% self-contained
+local VLA agent (`Qwen2.5-VL-3B` + `GUI-Actor` + `ParallelActionHeads`) with
+zero outbound cloud network traffic.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -22,6 +24,20 @@ except ImportError:
 from avcs.protocol.actions import Action, ActionKind, ActionAdapter
 
 logger = logging.getLogger("avcs.ace.client")
+
+_LOCAL_ONLY_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_local_endpoint(url: Optional[str]) -> bool:
+    """Return True only when ``url`` points to a local loopback host."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in ("http", "https", "ws", "wss") and host in _LOCAL_ONLY_HOSTS
 
 
 class AceClientError(Exception):
@@ -109,38 +125,37 @@ def repair_truncated_json(
         lambda m: f'{m.group(1)}, {fallback_y}]',
         text,
     )
-    # Pattern d: coordinate: [ (bracket opened with nothing inside, use history coord if available)
+    # Patterns d-g invent or complete full coordinates from history only when needed
     if has_history_coord:
+        # Pattern d: coordinate: [ (bracket opened with nothing inside)
         text = re.sub(
             r'((?:"|\')(?:coordinate|coords|point|position)(?:"|\')\s*:\s*\[)\s*$',
             f'"coordinate": [{fallback_x}, {fallback_y}]',
             text,
         )
-    # Pattern e: coordinate: (colon with nothing after, use history coord if available)
-    if has_history_coord:
+        # Pattern e: coordinate: (colon with nothing after)
         text = re.sub(
             r'((?:"|\')(?:coordinate|coords|point|position)(?:"|\')\s*:)\s*$',
             f'"coordinate": [{fallback_x}, {fallback_y}]',
             text,
         )
-    # Pattern f: partial key "coord... at end
-    if has_history_coord:
+        # Pattern f: partial key "coord... at end
         text = re.sub(
             r'(?:,\s*)?(?:"|\')coord\w*(?:"|\')?\s*:?\s*$',
             f', "coordinate": [{fallback_x}, {fallback_y}]',
             text,
         )
-    # Pattern g: "x": 260, "y": 800 (no closing brace) or "x": 260 (missing y)
-    text = re.sub(
-        r'((?:"|\')x(?:"|\')\s*:\s*-?\d+(?:\.\d+)?\s*,\s*(?:"|\')y(?:"|\')\s*:\s*)$',
-        lambda m: f'{m.group(1)}{fallback_y}',
-        text,
-    )
-    text = re.sub(
-        r'((?:"|\')x(?:"|\')\s*:\s*-?\d+(?:\.\d+)?)\s*$',
-        lambda m: f'{m.group(1)}, "y": {fallback_y}',
-        text,
-    )
+        # Pattern g: "x": 260, "y": (missing y) or "x": 260 (missing y)
+        text = re.sub(
+            r'((?:"|\')x(?:"|\')\s*:\s*-?\d+(?:\.\d+)?\s*,\s*(?:"|\')y(?:"|\')\s*:\s*)$',
+            lambda m: f'{m.group(1)}{fallback_y}',
+            text,
+        )
+        text = re.sub(
+            r'((?:"|\')x(?:"|\')\s*:\s*-?\d+(?:\.\d+)?)\s*$',
+            lambda m: f'{m.group(1)}, "y": {fallback_y}',
+            text,
+        )
     # Pattern h: Truncated float like "duration": 1. -> 1.0
     text = re.sub(r'(\d+\.)\s*$', r'\g<1>0', text)
 
@@ -204,7 +219,12 @@ def repair_truncated_json(
 
 
 class CustomLLMClient:
-    """Universal client for custom frontier cloud LLMs and OpenAI/Anthropic/Gemini gateways."""
+    """Quarantined local-only client for in-host OpenAI-compatible VLA servers.
+
+    External frontier cloud endpoints (OpenAI, Anthropic, Gemini, Groq, NVIDIA)
+    are quarantined and rejected at runtime to enforce 100% self-contained local
+    VLA operation.
+    """
 
     CANONICAL_WIDTH = 1280
     CANONICAL_HEIGHT = 800
@@ -220,70 +240,27 @@ class CustomLLMClient:
         max_tokens: Optional[int] = None,
     ) -> None:
         _load_dotenv_if_present()
-        # 1. Resolve API key with comprehensive provider fallbacks
-        self.api_key = (
-            api_key
-            or os.environ.get("AVCS_ACE_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("GEMINI_API_KEY")
-            or os.environ.get("GROQ_API_KEY")
-            or os.environ.get("AVCS_LLM_API_KEY")
-            or os.environ.get("NVIDIA_API_KEY")
-            or ""
-        )
+        self.api_key = api_key or os.environ.get("AVCS_LOCAL_VAM_API_KEY") or ""
 
-        # 2. Resolve Model name (frontier model default: gpt-6-astra or fable-5.5)
         self.model = (
             model
+            or os.environ.get("AVCS_LOCAL_VAM_MODEL")
             or os.environ.get("AVCS_ACE_MODEL")
-            or os.environ.get("AVCS_LLM_MODEL")
-            or "gpt-6-astra"
+            or "Qwen2.5-VL-3B-Instruct"
         )
 
-        # 3. Resolve Protocol: 'openai', 'anthropic', 'gemini'
-        explicit_protocol = protocol or os.environ.get("AVCS_ACE_PROTOCOL")
-        
-        # 4. Resolve endpoint
+        # External cloud protocols are quarantined; local VLA uses OpenAI-compatible schema.
+        explicit_protocol = (protocol or os.environ.get("AVCS_ACE_PROTOCOL") or "openai").lower()
+        self.protocol = "openai" if explicit_protocol in ("auto", "openai") else explicit_protocol
+
         raw_endpoint = (
             endpoint
+            or os.environ.get("AVCS_LOCAL_VAM_ENDPOINT")
             or os.environ.get("AVCS_ACE_ENDPOINT")
-            or os.environ.get("OPENAI_BASE_URL")
+            or "http://127.0.0.1:8000/v1/chat/completions"
         )
-
-        if not raw_endpoint:
-            # Auto-detect default endpoint from key signature or env
-            if os.environ.get("ANTHROPIC_API_KEY") or self.api_key.startswith("sk-ant-"):
-                raw_endpoint = "https://api.anthropic.com/v1/messages"
-                detected_protocol = "anthropic"
-            elif os.environ.get("GEMINI_API_KEY") or self.api_key.startswith("AIzaSy"):
-                raw_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-                detected_protocol = "gemini"
-            elif os.environ.get("GROQ_API_KEY") or self.api_key.startswith("gsk_"):
-                raw_endpoint = "https://api.groq.com/openai/v1/chat/completions"
-                detected_protocol = "openai"
-            elif os.environ.get("NVIDIA_API_KEY") or self.api_key.startswith("nvapi-"):
-                raw_endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
-                detected_protocol = "openai"
-            elif os.environ.get("AVCS_LLM_ENDPOINT"):
-                raw_endpoint = os.environ.get("AVCS_LLM_ENDPOINT")
-                detected_protocol = "openai"
-            else:
-                raw_endpoint = "https://api.openai.com/v1/chat/completions"
-                detected_protocol = "openai"
-        else:
-            detected_protocol = "auto"
-
-        self.protocol = (explicit_protocol or detected_protocol or "auto").lower()
-        if self.protocol == "auto":
-            if "anthropic.com" in raw_endpoint:
-                self.protocol = "anthropic"
-            elif "googleapis.com" in raw_endpoint:
-                self.protocol = "gemini"
-            else:
-                self.protocol = "openai"
-
         self.endpoint = self._normalize_endpoint(raw_endpoint)
+        self._cloud_quarantined = not is_local_endpoint(self.endpoint) or self.protocol != "openai"
 
         # 5. Extra headers
         self.extra_headers: Dict[str, str] = {}
@@ -321,34 +298,15 @@ class CustomLLMClient:
             self.session = None
 
     def _normalize_endpoint(self, url: str) -> str:
-        """Ensures endpoint points to the proper protocol route if only base URL is provided."""
+        """Ensures endpoint points to the local OpenAI-compatible VLA server route."""
         url = url.strip()
         if url.endswith("/"):
             url = url[:-1]
-
-        if self.protocol == "anthropic":
-            if url == "https://api.anthropic.com" or url.endswith("/v1"):
-                return f"{url}/messages" if url.endswith("/v1") else f"{url}/v1/messages"
-            if not url.endswith("/messages"):
-                return f"{url}/v1/messages" if not url.endswith("/v1") else f"{url}/messages"
-            return url
-        elif self.protocol == "gemini":
-            if ":generateContent" not in url:
-                if "/models" in url:
-                    return f"{url}/{self.model}:generateContent"
-                return f"{url}/models/{self.model}:generateContent"
-            return url
-        else:
-            # OpenAI-compatible
-            if url.endswith("/v1"):
-                return f"{url}/chat/completions"
-            if not url.endswith("/chat/completions") and not url.endswith("/messages") and ":generateContent" not in url:
-                if url.endswith("api.groq.com/openai"):
-                    return f"{url}/v1/chat/completions"
-                # If host only like http://localhost:8000 or http://localhost:11434
-                if url.count("/") <= 2:
-                    return f"{url}/v1/chat/completions"
-            return url
+        if url.endswith("/v1"):
+            return f"{url}/chat/completions"
+        if not url.endswith("/chat/completions") and url.count("/") <= 2:
+            return f"{url}/v1/chat/completions"
+        return url
 
     def encode_image(self, image_bytes: bytes, format: str = "webp") -> Tuple[str, str, str]:
         """Encodes raw image bytes into base64, mime type, and data URI."""
@@ -477,112 +435,41 @@ class CustomLLMClient:
         history: Optional[List[Dict[str, Any]]] = None,
         step_index: int = 1,
     ) -> Dict[str, Any]:
-        """Builds protocol-specific API payload."""
+        """Builds local OpenAI-compatible API payload (cloud frontier formats quarantined)."""
+        if self.protocol != "openai":
+            raise AceClientError(
+                f"External cloud protocol '{self.protocol}' is quarantined and disabled in 100% local VLA mode."
+            )
         system_prompt = self.build_system_prompt()
         user_prompt = self.build_user_prompt(goal, history, step_index)
 
-        if self.protocol == "anthropic":
-            return {
-                "model": self.model,
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": mime,
-                                    "data": b64_str,
-                                },
-                            },
-                            {"type": "text", "text": user_prompt},
-                        ],
-                    }
-                ],
-                "max_tokens": self.max_tokens,
-                "temperature": 0.0,
-            }
-        elif self.protocol == "gemini":
-            return {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": f"{system_prompt}\n\n{user_prompt}"},
-                            {"inlineData": {"mimeType": mime, "data": b64_str}},
-                        ],
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.0,
-                    "maxOutputTokens": self.max_tokens,
-                },
-            }
-        else:
-            # Default: OpenAI chat completions format (vLLM, LiteLLM, OpenRouter, frontier custom)
-            payload: Dict[str, Any] = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": data_uri, "detail": self.vision_detail},
-                            },
-                        ],
-                    },
-                ],
-                "temperature": 0.0,
-                "max_tokens": self.max_tokens,
-            }
-            if self.endpoint and "nvidia.com" in self.endpoint:
-                payload["reasoning_effort"] = "none"
-                payload["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "ActionSchema",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "kind": {"type": "string"},
-                                "coordinate": {
-                                    "type": "array",
-                                    "items": {"type": "number"},
-                                    "minItems": 2,
-                                    "maxItems": 2,
-                                },
-                                "text": {"type": "string"},
-                                "keys": {"type": "array", "items": {"type": "string"}},
-                                "reason": {"type": "string"},
-                            },
-                            "required": ["kind"],
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_uri, "detail": self.vision_detail},
                         },
-                    },
-                }
-            return payload
+                    ],
+                },
+            ],
+            "temperature": 0.0,
+            "max_tokens": self.max_tokens,
+        }
 
     def _build_headers(self) -> Dict[str, str]:
-        """Builds headers for the request."""
+        """Builds headers for local VLA server requests."""
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "AVCS-FrontierClient/1.0",
+            "User-Agent": "AVCS-LocalVLA/1.0",
         }
-        if self.protocol == "anthropic":
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-            headers["anthropic-version"] = "2023-06-01"
-        elif self.protocol == "gemini":
-            if self.api_key:
-                headers["x-goog-api-key"] = self.api_key
-        else:
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         headers.update(self.extra_headers)
         return headers
@@ -597,10 +484,11 @@ class CustomLLMClient:
         if not text:
             return Action(kind=ActionKind.WAIT, duration=0.5, reason="Empty LLM response received")
 
-        # Fast path: Check for AVCS ACT: grammar tokens directly
-        grammar_act = ActionAdapter.parse_grammar_token(text)
-        if grammar_act is not None:
-            return grammar_act
+        # Fast path: Check for AVCS ACT: grammar tokens only when response is not JSON
+        if not text.lstrip().startswith("{"):
+            grammar_act = ActionAdapter.parse_grammar_token(text)
+            if grammar_act is not None:
+                return grammar_act
 
         # Strip internal reasoning blocks from frontier reasoning models (<think>, <thought>, <reasoning>, <extra_thought>)
         for tag in ("think", "thought", "reasoning", "extra_thought"):
@@ -618,10 +506,11 @@ class CustomLLMClient:
                 else:
                     text = ""
 
-        # Re-check grammar token after stripping reasoning tags
-        grammar_act = ActionAdapter.parse_grammar_token(text)
-        if grammar_act is not None:
-            return grammar_act
+        # Re-check grammar token after stripping reasoning tags (only if not JSON)
+        if not text.lstrip().startswith("{"):
+            grammar_act = ActionAdapter.parse_grammar_token(text)
+            if grammar_act is not None:
+                return grammar_act
 
         # Strip markdown code blocks if present
         if "```" in text:
@@ -701,24 +590,29 @@ class CustomLLMClient:
             try:
                 data = json.loads(repaired)
             except Exception:
-                # Fallback 1: try single quote replacement if double quotes were omitted
+                # Fallback 1: try AST literal eval for Python dict syntax before blind quote swap
                 try:
-                    fixed = repaired.replace("'", '"')
-                    data = json.loads(fixed)
+                    import ast
+                    evaluated = ast.literal_eval(repaired)
+                    if isinstance(evaluated, dict):
+                        data = evaluated
                 except Exception:
-                    # Fallback 2: AST literal eval for Python dict syntax
+                    data = None
+                if data is None:
+                    # Fallback 2: single quote replacement only when double quotes are absent
                     try:
-                        import ast
-                        evaluated = ast.literal_eval(repaired)
-                        if isinstance(evaluated, dict):
-                            data = evaluated
-                    except Exception as e:
-                        logger.warning(f"Failed to parse action JSON: {text!r} - error: {e}")
-                        return Action(
-                            kind=ActionKind.WAIT,
-                            duration=0.5,
-                            reason=f"Unparseable action JSON fallback: {text[:60]}",
-                        )
+                        if '"' not in repaired:
+                            fixed = repaired.replace("'", '"')
+                            data = json.loads(fixed)
+                    except Exception:
+                        data = None
+                if data is None:
+                    logger.warning(f"Failed to parse action JSON: {text!r}")
+                    return Action(
+                        kind=ActionKind.WAIT,
+                        duration=0.5,
+                        reason=f"Unparseable action JSON fallback: {text[:60]}",
+                    )
 
         if not isinstance(data, dict):
             return Action(kind=ActionKind.WAIT, duration=0.5, reason="Parsed data is not a dict")
@@ -749,38 +643,24 @@ class CustomLLMClient:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """Text completion method for Cognitive Planner sub-goal decomposition and replanning."""
-        if not self.endpoint:
+        """Local-only completion helper; external cloud endpoints are quarantined."""
+        if not self.endpoint or not is_local_endpoint(self.endpoint) or self.protocol != "openai":
+            logger.warning(
+                f"CustomLLMClient.complete blocked non-local/quarantined endpoint: {self.endpoint!r}"
+            )
             return ""
 
         headers = self._build_headers()
         tokens = max_tokens or self.max_tokens
-
-        if self.protocol == "anthropic":
-            payload = {
-                "model": self.model,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
-                "max_tokens": tokens,
-                "temperature": temperature,
-            }
-        elif self.protocol == "gemini":
-            payload = {
-                "contents": [
-                    {"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}
-                ],
-                "generationConfig": {"temperature": temperature, "maxOutputTokens": tokens},
-            }
-        else:
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": temperature,
-                "max_tokens": tokens,
-            }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": temperature,
+            "max_tokens": tokens,
+        }
 
         try:
             if self.session is not None:
@@ -799,79 +679,48 @@ class CustomLLMClient:
             return ""
 
     def _extract_content_from_response(self, resp_json: Dict[str, Any]) -> str:
-        """Extracts text content string based on protocol with fallback for reasoning models."""
-        if self.protocol == "anthropic":
-            contents = resp_json.get("content", [])
-            texts = []
-            for c in contents:
-                if isinstance(c, dict) and c.get("type") == "text":
-                    texts.append(c.get("text", ""))
-                elif isinstance(c, dict) and c.get("type") == "tool_use":
-                    inp = c.get("input", {})
-                    name = c.get("name")
-                    if isinstance(inp, dict):
-                        inp_dict = dict(inp)
-                        if name and name != "computer" and "action" not in inp_dict and "kind" not in inp_dict:
-                            inp_dict["action"] = name
-                        texts.append(json.dumps(inp_dict))
-                    else:
-                        texts.append(str(inp))
-                elif isinstance(c, str):
-                    texts.append(c)
-            return "\n".join(texts).strip()
-        elif self.protocol == "gemini":
-            candidates = resp_json.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                texts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+        """Extracts text content string from local OpenAI-compatible VLA server responses."""
+        choices = resp_json.get("choices", [])
+        if not choices:
+            return ""
+        choice0 = choices[0] or {}
+        message = choice0.get("message", {}) or {}
+
+        # 1. Standard message content
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        elif isinstance(content, list):
+            texts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
+            if texts:
                 return "\n".join(texts).strip()
-            return ""
-        else:
-            # OpenAI-compatible (including Groq, OpenRouter, vLLM, DeepSeek, etc.)
-            choices = resp_json.get("choices", [])
-            if not choices:
-                return ""
-            choice0 = choices[0] or {}
-            message = choice0.get("message", {}) or {}
-            
-            # 1. Standard message content
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            elif isinstance(content, list):
-                # Multimodal content list format: [{"type": "text", "text": "..."}]
-                texts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
-                if texts:
-                    return "\n".join(texts).strip()
 
-            # Tool calls fallback
-            tool_calls = message.get("tool_calls") or []
-            if tool_calls and isinstance(tool_calls, list):
-                fn = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
-                args = fn.get("arguments", "")
-                fn_name = fn.get("name")
-                if args:
-                    try:
-                        parsed_args = json.loads(args)
-                        if isinstance(parsed_args, dict) and fn_name and "kind" not in parsed_args and "action" not in parsed_args:
-                            parsed_args["action"] = fn_name
-                            return json.dumps(parsed_args)
-                    except Exception:
-                        pass
-                    return str(args).strip()
+        # Tool calls fallback
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls and isinstance(tool_calls, list):
+            fn = tool_calls[0].get("function", {}) if isinstance(tool_calls[0], dict) else {}
+            args = fn.get("arguments", "")
+            fn_name = fn.get("name")
+            if args:
+                try:
+                    parsed_args = json.loads(args)
+                    if isinstance(parsed_args, dict) and fn_name and "kind" not in parsed_args and "action" not in parsed_args:
+                        parsed_args["action"] = fn_name
+                        return json.dumps(parsed_args)
+                except Exception:
+                    pass
+                return str(args).strip()
 
-            # 2. Reasoning models fallback (DeepSeek-R1, QwQ, o1 style)
-            for field in ("reasoning_content", "reasoning", "text"):
-                val = message.get(field)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
+        for field in ("reasoning_content", "reasoning", "text"):
+            val = message.get(field)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
 
-            # 3. Direct choice text fallback (completion endpoints)
-            direct_text = choice0.get("text")
-            if isinstance(direct_text, str) and direct_text.strip():
-                return direct_text.strip()
+        direct_text = choice0.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
 
-            return ""
+        return ""
 
     def predict_action(
         self,
@@ -881,7 +730,13 @@ class CustomLLMClient:
         step_index: int = 1,
         format: str = "webp",
     ) -> Tuple[Action, float]:
-        """Performs visual reasoning on the frame and returns the Action and latency in ms."""
+        """Local-only action prediction. External cloud LLM endpoints are quarantined and blocked."""
+        if not is_local_endpoint(self.endpoint) or self.protocol != "openai":
+            raise AceClientError(
+                f"External cloud LLM calls are disabled in 100% self-contained local VLA mode "
+                f"(blocked endpoint={self.endpoint!r}, protocol={self.protocol!r})."
+            )
+
         b64_str, mime, data_uri = self.encode_image(image_bytes, format=format)
         payload = self._build_payload(
             b64_str=b64_str,
