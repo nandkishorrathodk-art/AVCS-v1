@@ -960,3 +960,142 @@ def test_lora_linear_enable_and_out_of_place_fp16_backward():
     assert any(".lora_B." in k for k in saved_keys)
     assert not any("layers.0." in k for k in saved_keys)
 
+
+def test_frozen_prefix_and_visual_zero_activation_waste():
+    """Verifies visual tower & frozen prefix run in torch.no_grad() and boundary detaches cleanly."""
+    grad_flags = {"visual": [], "layers": []}
+
+    class ToyVisual(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(16, 16, bias=False)
+
+        def forward(self, img: torch.Tensor) -> torch.Tensor:
+            grad_flags["visual"].append(torch.is_grad_enabled())
+            return self.proj(img)
+
+    class ToyAttn(torch.nn.Module):
+        def __init__(self, dim: int = 16) -> None:
+            super().__init__()
+            self.q_proj = torch.nn.Linear(dim, dim, bias=False)
+            self.k_proj = torch.nn.Linear(dim, dim, bias=False)
+            self.v_proj = torch.nn.Linear(dim, dim, bias=False)
+            self.o_proj = torch.nn.Linear(dim, dim, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class ToyLayer(torch.nn.Module):
+        def __init__(self, idx: int, dim: int = 16) -> None:
+            super().__init__()
+            self.idx = idx
+            self.self_attn = ToyAttn(dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            grad_flags["layers"].append((self.idx, torch.is_grad_enabled(), x.requires_grad, x.grad_fn is not None))
+            return x + self.self_attn(x)
+
+    class ToyVLM(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.visual = ToyVisual()
+            self.model.language_model = torch.nn.Module()
+            self.model.language_model.layers = torch.nn.ModuleList([ToyLayer(i, 16) for i in range(4)])
+
+        def forward(self, img: torch.Tensor) -> torch.Tensor:
+            x = self.model.visual(img)
+            for layer in self.model.language_model.layers:
+                x = layer(x)
+            return x
+
+    vlm = ToyVLM().eval()
+    for p in vlm.parameters():
+        p.requires_grad = False
+
+    model = QwenGUIActorModel(dry_run=True, backbone_hidden_dim=16, pointer_hidden_dim=16, query_dim=16)
+    model.backbone = vlm
+    wrapped = model.enable_lora(lora_layers=2, r=4, lora_alpha=8.0)
+    assert wrapped == 8
+    model.train(True)
+
+    # Even when outer context has enable_grad(), visual & layers 0..1 must execute inside no_grad()
+    inp = torch.randn(1, 5, 16, requires_grad=True)
+    with torch.enable_grad():
+        out = vlm(inp)
+    loss = out.pow(2).sum()
+    loss.backward()
+
+    assert grad_flags["visual"] == [False]
+    # Layers 0 & 1 had grad disabled; boundary layer 2 & layer 3 ran under enable_grad()
+    # and detached entering layer 2 (grad_fn=False while requires_grad=True during forward, checkpoint replays during backward)
+    first_pass_layers = grad_flags["layers"][:4]
+    assert first_pass_layers[0][0] == 0 and first_pass_layers[0][1] is False
+    assert first_pass_layers[1][0] == 1 and first_pass_layers[1][1] is False
+    assert first_pass_layers[2][0] == 2 and first_pass_layers[2][1] is True
+    assert first_pass_layers[2][2] is True and first_pass_layers[2][3] is False
+    assert first_pass_layers[3][0] == 3 and first_pass_layers[3][1] is True
+    # Input image gradient must be zero/None because frozen prefix detached cleanly
+    assert inp.grad is None
+    assert vlm.model.visual.proj.weight.grad is None
+
+
+def test_extract_features_reraises_oom_without_heavy_fallback():
+    """Verifies extract_features re-raises torch.OutOfMemoryError instead of calling output_hidden_states=True."""
+    model = QwenGUIActorModel(dry_run=True, backbone_hidden_dim=16, pointer_hidden_dim=16, query_dim=16)
+
+    class OOMBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+            self.config = type("Cfg", (), {"image_token_id": 99})()
+            self.dtype = torch.float16
+            self.fallback_called = False
+            self.model = self._Inner()
+
+        class _Inner(torch.nn.Module):
+            def forward(self, **kwargs):
+                raise torch.OutOfMemoryError("Simulated CUDA OOM")
+
+        def forward(self, **kwargs):
+            self.fallback_called = True
+            raise AssertionError("Heavy fallback must not run after torch.OutOfMemoryError")
+
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.tokenizer = type("Tok", (), {"convert_tokens_to_ids": lambda self, s: 99})()
+
+        def apply_chat_template(self, m, tokenize=False, add_generation_prompt=True) -> str:
+            return "<|image_pad|>"
+
+        def __call__(self, text=None, images=None, padding=True, return_tensors="pt"):
+            return {
+                "input_ids": torch.tensor([[99, 10]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1]], dtype=torch.long),
+            }
+
+    oom_bb = OOMBackbone()
+    model.backbone = oom_bb
+    model.processor = DummyProcessor()
+
+    with pytest.raises(torch.OutOfMemoryError, match="Simulated CUDA OOM"):
+        model.extract_features(images=torch.zeros(1, 3, 64, 64), queries=["Click"])
+    assert oom_bb.fallback_called is False
+
+
+def test_eval_script_fail_closed_on_missing_checkpoint(tmp_path):
+    """Verifies eval_gui_actor_showdown refuses to evaluate missing checkpoint unless allow_untrained=True."""
+    eval_path = Path(repo_root) / "kaggle" / "eval_gui_actor_showdown.py"
+    eval_spec = importlib.util.spec_from_file_location("eval_gui_actor_showdown", eval_path)
+    eval_mod = importlib.util.module_from_spec(eval_spec)
+    eval_spec.loader.exec_module(eval_mod)
+
+    missing_ckpt = str(tmp_path / "does_not_exist.pt")
+    with pytest.raises(FileNotFoundError, match="Fail-closed eval gate"):
+        eval_mod.run_evaluation(
+            checkpoint_path=missing_ckpt,
+            cache_dir=str(tmp_path / "cache"),
+            output_path=str(tmp_path / "out.json"),
+        )
+
+

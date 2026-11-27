@@ -95,6 +95,7 @@ def run_evaluation(
     model_name: str = "avcs",
     backbone_dtype: str = "auto",
     max_pixels: int = 560 * 896,
+    allow_untrained: bool = False,
 ) -> Dict[str, Any]:
     print("=" * 80)
     print("  AVCS STEP 6.2: HELD-OUT BENCHMARK EVALUATION (showdown-clicks-dev)  ")
@@ -102,10 +103,18 @@ def run_evaluation(
     print(f"  {model_label}   ")
     print("=" * 80)
 
+    is_ms_gui_actor = "gui-actor" in model_name.lower() or "microsoft" in model_name.lower()
+    if not is_ms_gui_actor and not Path(checkpoint_path).exists() and not allow_untrained:
+        raise FileNotFoundError(
+            f"Fail-closed eval gate: checkpoint not found at '{checkpoint_path}'. "
+            "Refusing to evaluate un-finetuned weights (pass --allow-untrained to override)."
+        )
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Evaluation Device: {device}")
     res_mode = "Native Screen Resolution" if native_size else f"Desktop Canvas ({eval_w}x{eval_h})"
     print(f"Resolution Mode:   {res_mode}")
+    print(f"Max Visual Pixels: {max_pixels}")
     print(f"Sharpening Temp:   T = {temperature}")
 
     # 1. Download or load benchmark manifest
@@ -131,7 +140,6 @@ def run_evaluation(
     print(f"Loaded {total_samples} held-out evaluation samples.")
 
     # 2. Instantiate Model (AVCS QwenGUIActorModel or Microsoft GUI-Actor Baseline)
-    is_ms_gui_actor = "gui-actor" in model_name.lower() or "microsoft" in model_name.lower()
     ms_model = None
     ms_tokenizer = None
     ms_processor = None
@@ -746,6 +754,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.05, help="Attention sharpening temperature (default: 0.05)")
     parser.add_argument("--backbone-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision")
     parser.add_argument("--max-pixels", type=int, default=560 * 896, help="Max visual pixels for Qwen2.5-VL processor (default: 501760; 0=uncapped)")
+    parser.add_argument("--allow-untrained", action="store_true", help="Explicitly allow evaluating un-finetuned weights if --checkpoint is missing")
     args = parser.parse_args()
 
     use_native = False if args.resize_canvas else args.native_size
@@ -761,6 +770,7 @@ def main():
         model_name=args.model_name,
         backbone_dtype=args.backbone_dtype,
         max_pixels=args.max_pixels,
+        allow_untrained=args.allow_untrained,
     )
 
 

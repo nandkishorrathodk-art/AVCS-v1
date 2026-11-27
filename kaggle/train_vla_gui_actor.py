@@ -22,24 +22,29 @@ import argparse
 from collections import defaultdict
 import copy
 import datetime
+import functools
 import hashlib
 import io
 import json
 import logging
 import math
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as grad_checkpoint
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from PIL import Image
@@ -415,16 +420,31 @@ class QwenGUIActorModel(nn.Module):
                 if self.max_pixels > 0:
                     min_px = min(256 * 28 * 28, self.max_pixels)
                     try:
-                        self.processor = AutoProcessor.from_pretrained(
-                            model_id,
-                            size={"longest_edge": self.max_pixels, "shortest_edge": min_px},
-                        )
-                    except (TypeError, ValueError):
+                        # Pass max_pixels/min_pixels explicitly so HF preprocessor_config.json
+                        # defaults (e.g. max_pixels=12845056) cannot overwrite longest_edge.
                         self.processor = AutoProcessor.from_pretrained(
                             model_id,
                             max_pixels=self.max_pixels,
                             min_pixels=min_px,
                         )
+                    except (TypeError, ValueError):
+                        self.processor = AutoProcessor.from_pretrained(
+                            model_id,
+                            size={"longest_edge": self.max_pixels, "shortest_edge": min_px},
+                        )
+                    if hasattr(self.processor, "image_processor"):
+                        ip = self.processor.image_processor
+                        if hasattr(ip, "max_pixels"):
+                            ip.max_pixels = self.max_pixels
+                        if hasattr(ip, "min_pixels"):
+                            ip.min_pixels = min_px
+                        if hasattr(ip, "size") and isinstance(ip.size, dict):
+                            ip.size["longest_edge"] = self.max_pixels
+                            ip.size["shortest_edge"] = min_px
+                    logger.info(
+                        f"Configured image processor pixel budget: min_pixels={min_px}, max_pixels={self.max_pixels} "
+                        f"(size={getattr(getattr(self.processor, 'image_processor', None), 'size', None)})."
+                    )
                 else:
                     self.processor = AutoProcessor.from_pretrained(model_id)
                 # Strictly freeze all backbone parameters and lock eval mode
@@ -501,6 +521,93 @@ class QwenGUIActorModel(nn.Module):
                 return cur
         return None
 
+    @staticmethod
+    def _resolve_visual_modules(backbone: nn.Module) -> List[nn.Module]:
+        """Locate frozen vision tower module(s) across Qwen2.5-VL / test layouts."""
+        found: List[nn.Module] = []
+        seen_ids: set = set()
+        for path in (
+            ("model", "visual"),
+            ("visual",),
+            ("model", "vision_tower"),
+            ("vision_tower",),
+        ):
+            cur: Any = backbone
+            for attr in path:
+                cur = getattr(cur, attr, None)
+                if cur is None:
+                    break
+            if isinstance(cur, nn.Module) and id(cur) not in seen_ids:
+                seen_ids.add(id(cur))
+                found.append(cur)
+        return found
+
+    def _install_frozen_prefix_isolation(self, layers: Any, start_idx: int) -> None:
+        """Guarantees zero activation storage for frozen vision tower & decoder prefix.
+
+        - Vision tower & decoder layers 0..(start_idx - 1) execute inside torch.no_grad().
+        - Decoder layer `start_idx` detaches incoming hidden_states and enables requires_grad_(True).
+        - Trainable top-K decoder layers `start_idx..N-1` run via non-reentrant gradient checkpointing.
+        """
+        for vis_mod in self._resolve_visual_modules(self.backbone):
+            if not getattr(vis_mod, "_visual_no_grad_wrapped", False) and not any(
+                p.requires_grad for p in vis_mod.parameters()
+            ):
+                orig_vis_fwd = vis_mod.forward
+
+                @functools.wraps(orig_vis_fwd)
+                def _no_grad_visual_forward(*args: Any, _orig: Any = orig_vis_fwd, **kwargs: Any) -> Any:
+                    with torch.no_grad():
+                        return _orig(*args, **kwargs)
+
+                vis_mod.forward = _no_grad_visual_forward
+                setattr(vis_mod, "_visual_no_grad_wrapped", True)
+
+        for prefix_block in layers[:start_idx]:
+            if not getattr(prefix_block, "_frozen_prefix_no_grad", False) and not any(
+                p.requires_grad for p in prefix_block.parameters()
+            ):
+                orig_prefix_fwd = prefix_block.forward
+
+                @functools.wraps(orig_prefix_fwd)
+                def _no_grad_prefix_forward(*args: Any, _orig: Any = orig_prefix_fwd, **kwargs: Any) -> Any:
+                    with torch.no_grad():
+                        return _orig(*args, **kwargs)
+
+                prefix_block.forward = _no_grad_prefix_forward
+                setattr(prefix_block, "_frozen_prefix_no_grad", True)
+
+        for offset, lora_block in enumerate(layers[start_idx:]):
+            if getattr(lora_block, "_lora_ckpt_wrapped", False):
+                continue
+            orig_lora_fwd = lora_block.forward
+            is_boundary = (offset == 0)
+
+            @functools.wraps(orig_lora_fwd)
+            def _checkpointed_lora_forward(
+                *args: Any,
+                _orig: Any = orig_lora_fwd,
+                _boundary: bool = is_boundary,
+                **kwargs: Any,
+            ) -> Any:
+                if torch.is_grad_enabled():
+                    if _boundary:
+                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                            args = (args[0].detach().requires_grad_(True),) + args[1:]
+                        elif "hidden_states" in kwargs and isinstance(kwargs["hidden_states"], torch.Tensor):
+                            kwargs = dict(kwargs)
+                            kwargs["hidden_states"] = kwargs["hidden_states"].detach().requires_grad_(True)
+                    return grad_checkpoint.checkpoint(
+                        _orig,
+                        *args,
+                        use_reentrant=False,
+                        **kwargs,
+                    )
+                return _orig(*args, **kwargs)
+
+            lora_block.forward = _checkpointed_lora_forward
+            setattr(lora_block, "_lora_ckpt_wrapped", True)
+
     def enable_lora(
         self,
         lora_layers: int = 8,
@@ -521,7 +628,7 @@ class QwenGUIActorModel(nn.Module):
         start_idx = num_layers - n_target
         wrapped = 0
         for block in layers[start_idx:]:
-            for parent_name, parent_mod in list(block.named_modules()):
+            for _parent_name, parent_mod in list(block.named_modules()):
                 for attr_name in target_modules:
                     child = getattr(parent_mod, attr_name, None)
                     if isinstance(child, nn.Linear):
@@ -542,26 +649,12 @@ class QwenGUIActorModel(nn.Module):
             "r": int(r),
             "lora_alpha": float(lora_alpha),
         }
-        if hasattr(self.backbone, "enable_input_require_grads"):
-            try:
-                self.backbone.enable_input_require_grads()
-            except Exception:
-                pass
-        if hasattr(self.backbone, "gradient_checkpointing_enable"):
-            try:
-                self.backbone.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
-            except TypeError:
-                try:
-                    self.backbone.gradient_checkpointing_enable()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+        # Isolate vision tower + bottom frozen prefix under torch.no_grad() and run
+        # non-reentrant gradient checkpointing exclusively on the top-K LoRA layers.
+        self._install_frozen_prefix_isolation(layers=layers, start_idx=start_idx)
         logger.info(
             f"[LORA] Enabled rank-{r} LoRA on top {n_target}/{num_layers} decoder layers "
-            f"({wrapped} attention projections wrapped)."
+            f"({wrapped} attention projections wrapped; frozen prefix 0..{max(0, start_idx - 1)} & visual no_grad + top-{n_target} checkpointed)."
         )
         return wrapped
 
@@ -681,12 +774,22 @@ class QwenGUIActorModel(nn.Module):
                 batch_queries += ["Click the target UI element"] * (b - len(batch_queries))
 
         # 2. Build multimodal chat messages with explicit UI grounding instruction
+        min_px = min(256 * 28 * 28, self.max_pixels) if self.max_pixels > 0 else 0
         messages = [
             [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": img},
+                        (
+                            {
+                                "type": "image",
+                                "image": img,
+                                "min_pixels": min_px,
+                                "max_pixels": self.max_pixels,
+                            }
+                            if self.max_pixels > 0
+                            else {"type": "image", "image": img}
+                        ),
                         {"type": "text", "text": f"Locate and click the UI element matching: {q}"},
                     ],
                 }
@@ -724,7 +827,7 @@ class QwenGUIActorModel(nn.Module):
         if "pixel_values" in inputs and isinstance(inputs["pixel_values"], torch.Tensor):
             inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
 
-        # 5. Forward pass through backbone (no_grad when 100% frozen, enable_grad during LoRA training)
+        # 5. Forward pass through backbone (no_grad when 100% frozen; frozen prefix+visual stay no_grad during LoRA)
         has_trainable_lora = self.training and any(
             p.requires_grad for p in self.backbone.parameters()
         )
@@ -734,6 +837,8 @@ class QwenGUIActorModel(nn.Module):
                 try:
                     outputs = self.backbone.model(**inputs, use_cache=False, return_dict=True)
                     last_hidden = outputs.last_hidden_state
+                except torch.OutOfMemoryError:
+                    raise
                 except Exception:
                     outputs = self.backbone(**inputs, use_cache=False, output_hidden_states=True)
                     last_hidden = outputs.hidden_states[-1]
@@ -2125,6 +2230,8 @@ def run_ddp_training(
     max_pixels: int = 560 * 896,
     lora_layers: int = 0,
     lora_r: int = 16,
+    grad_accum_steps: int = 1,
+    micro_batch_size: int = 0,
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -2211,10 +2318,27 @@ def run_ddp_training(
         persistent_workers=(loader_workers > 0),
     )
 
+    effective_micro_bs = (
+        int(micro_batch_size)
+        if micro_batch_size and int(micro_batch_size) > 0
+        else (1 if (lora_layers > 0 and device.type == "cuda" and not is_dry_backbone) else min(batch_size, 2 if (device.type == "cuda" and not is_dry_backbone) else batch_size))
+    )
+    effective_micro_bs = max(1, min(int(batch_size), effective_micro_bs))
+    accum_batches = max(1, int(grad_accum_steps))
+    val_batch_size = max(1, effective_micro_bs)
+
+    if rank == 0:
+        print(
+            f"Optimization Schedule: batch_size={batch_size}, micro_batch_size={effective_micro_bs}, "
+            f"grad_accum_steps={accum_batches}, world_size={world_size} "
+            f"(effective global batch = {batch_size * accum_batches * world_size})",
+            flush=True,
+        )
+
     val_sampler = DistributedSampler(val_eval_dataset, num_replicas=world_size, rank=rank, shuffle=False) if (is_distributed and len(val_eval_dataset) > 0) else None
     val_dataloader = DataLoader(
         val_eval_dataset,
-        batch_size=batch_size,
+        batch_size=val_batch_size,
         shuffle=False,
         sampler=val_sampler,
         drop_last=False,
@@ -2231,7 +2355,8 @@ def run_ddp_training(
         param_groups.append({"params": lora_params, "lr": learning_rate * 0.25})
     trainable_params = head_params + lora_params
     optimizer = torch.optim.AdamW(param_groups, lr=learning_rate, weight_decay=1e-3)
-    total_optim_steps = max(1, epochs * max(1, len(dataloader)))
+    steps_per_epoch_optim = max(1, math.ceil(max(1, len(dataloader)) / accum_batches))
+    total_optim_steps = max(1, epochs * steps_per_epoch_optim)
     warmup_steps = max(1, min(20, total_optim_steps // 10))
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
@@ -2257,10 +2382,13 @@ def run_ddp_training(
 
     # 4. Training Loop
     model.train()
-    total_steps_per_epoch = len(dataloader)
+    total_batches_per_epoch = len(dataloader)
+    total_steps_per_epoch = max(1, math.ceil(max(1, total_batches_per_epoch) / accum_batches))
     for epoch in range(1, epochs + 1):
         if sampler is not None:
             sampler.set_epoch(epoch)
+        if epoch == 1 and device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
 
         epoch_loss = 0.0
         epoch_patch_ce = 0.0
@@ -2281,47 +2409,109 @@ def run_ddp_training(
         t0 = time.time()
         data_t0 = time.time()
 
-        for batch in dataloader:
+        optimizer.zero_grad()
+        acc_loss = 0.0
+        acc_patch_ce = 0.0
+        acc_coord_l1 = 0.0
+        acc_w_patch_ce = 0.0
+        acc_w_coord_l1 = 0.0
+        acc_w_coord_l2 = 0.0
+        acc_w_action = 0.0
+        acc_patch_acc = 0.0
+        acc_micro_cnt = 0
+        acc_ok_local = True
+        acc_overflow_any = False
+        acc_loss_finite_all = True
+
+        for batch_idx, batch in enumerate(dataloader):
             data_time = time.time() - data_t0
             images = batch["image"].to(device) if is_dry_backbone else batch["image"]
+            queries = batch.get("instruction")
             target_actions = batch["target_action"].to(device)
             target_coords = batch["target_coord"].to(device)
             target_bboxes = batch["target_bbox"].to(device)
 
-            optimizer.zero_grad()
-            outputs = model(images, queries=batch.get("instruction"))
-
-            # Compute Unified Multi-Task Loss with multi-positive bbox supervision
-            loss_dict = criterion(
-                model_out=outputs,
-                target_actions=target_actions,
-                target_coords=target_coords,
-                target_bboxes=target_bboxes,
+            b_len = target_actions.shape[0]
+            n_chunks = max(1, math.ceil(b_len / effective_micro_bs))
+            is_last_batch_in_window = ((batch_idx + 1) % accum_batches == 0) or (
+                (batch_idx + 1) == total_batches_per_epoch
             )
-            step_overflow = bool(outputs.get("backbone_overflow", False))
-            loss = loss_dict["loss"]
-            loss_finite = bool(torch.isfinite(loss).item())
-            step_ok_local = (not step_overflow) and loss_finite
+            win_start = (batch_idx // accum_batches) * accum_batches
+            win_end = min(total_batches_per_epoch, win_start + accum_batches)
+            batches_in_window = max(1, win_end - win_start)
+            loss_scale = 1.0 / float(max(1, batches_in_window * n_chunks))
 
-            # Always run backward through sanitized zeroed forward outputs on overflow
-            # (avoid IEEE 754 NaN * 0.0 = NaN while satisfying DDP graph tracking).
-            backward_loss = (
-                loss
-                if step_ok_local
-                else (
-                    (torch.nan_to_num(outputs["action_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
-                    + (torch.nan_to_num(outputs["target_coords"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
-                    + (torch.nan_to_num(outputs["attn_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+            for chunk_idx in range(n_chunks):
+                s = chunk_idx * effective_micro_bs
+                e = min(b_len, s + effective_micro_bs)
+                sub_images = images[s:e]
+                sub_queries = queries[s:e] if queries is not None else None
+                sub_actions = target_actions[s:e]
+                sub_coords = target_coords[s:e]
+                sub_bboxes = target_bboxes[s:e]
+
+                is_final_micro = is_last_batch_in_window and (chunk_idx == n_chunks - 1)
+                sync_ctx = (
+                    nullcontext()
+                    if (not is_distributed or is_final_micro)
+                    else model.no_sync()
                 )
-            )
-            backward_loss.backward()
+
+                with sync_ctx:
+                    outputs = model(sub_images, queries=sub_queries)
+                    loss_dict = criterion(
+                        model_out=outputs,
+                        target_actions=sub_actions,
+                        target_coords=sub_coords,
+                        target_bboxes=sub_bboxes,
+                    )
+                    step_overflow = bool(outputs.get("backbone_overflow", False))
+                    loss = loss_dict["loss"]
+                    loss_finite = bool(torch.isfinite(loss).item())
+                    micro_ok_local = (not step_overflow) and loss_finite
+
+                    # Always run backward through sanitized zeroed forward outputs on overflow
+                    # (avoid IEEE 754 NaN * 0.0 = NaN while satisfying DDP graph tracking).
+                    backward_loss = (
+                        loss * loss_scale
+                        if micro_ok_local
+                        else (
+                            (torch.nan_to_num(outputs["action_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+                            + (torch.nan_to_num(outputs["target_coords"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+                            + (torch.nan_to_num(outputs["attn_logits"], nan=0.0, posinf=0.0, neginf=0.0) * 0.0).sum()
+                        )
+                    )
+                    backward_loss.backward()
+
+                if micro_ok_local:
+                    acc_loss += loss.item()
+                    acc_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
+                    acc_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
+                    acc_w_patch_ce += loss_dict.get("weighted_patch_ce", torch.tensor(0.0)).item()
+                    acc_w_coord_l1 += loss_dict.get("weighted_coord_l1", torch.tensor(0.0)).item()
+                    acc_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
+                    acc_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
+                    acc_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+                    acc_micro_cnt += 1
+                else:
+                    acc_ok_local = False
+                    if step_overflow:
+                        acc_overflow_any = True
+                    if not loss_finite:
+                        acc_loss_finite_all = False
+
+                del outputs, loss_dict, loss, backward_loss, sub_images, sub_actions, sub_coords, sub_bboxes
+
+            if not is_last_batch_in_window:
+                data_t0 = time.time()
+                continue
 
             grad_finite = all(
                 torch.isfinite(p.grad).all().item()
                 for p in trainable_params
                 if p.grad is not None
             )
-            step_valid = 1 if (step_ok_local and grad_finite) else 0
+            step_valid = 1 if (acc_ok_local and grad_finite) else 0
             if is_distributed:
                 valid_t = torch.tensor([step_valid], device=device, dtype=torch.int32)
                 dist.all_reduce(valid_t, op=dist.ReduceOp.MIN)
@@ -2332,27 +2522,32 @@ def run_ddp_training(
                 optimizer.step()
                 scheduler.step()
 
-                epoch_loss += loss.item()
-                epoch_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
-                epoch_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
-                epoch_w_patch_ce += loss_dict.get("weighted_patch_ce", torch.tensor(0.0)).item()
-                epoch_w_coord_l1 += loss_dict.get("weighted_coord_l1", torch.tensor(0.0)).item()
-                epoch_w_coord_l2 += loss_dict.get("weighted_coord_l2", torch.tensor(0.0)).item()
-                epoch_w_action += loss_dict.get("weighted_action", torch.tensor(0.0)).item()
-                epoch_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
-                win_loss += loss.item()
-                win_patch_ce += loss_dict.get("loss_patch_ce", torch.tensor(0.0)).item()
-                win_coord_l1 += loss_dict.get("loss_coord_l1", torch.tensor(0.0)).item()
-                win_patch_acc += loss_dict.get("patch_top1_acc", torch.tensor(0.0)).item()
+                m_div = float(max(1, acc_micro_cnt))
+                step_loss = acc_loss / m_div
+                step_patch_ce = acc_patch_ce / m_div
+                step_coord_l1 = acc_coord_l1 / m_div
+                step_patch_acc = acc_patch_acc / m_div
+
+                epoch_loss += step_loss
+                epoch_patch_ce += step_patch_ce
+                epoch_coord_l1 += step_coord_l1
+                epoch_w_patch_ce += acc_w_patch_ce / m_div
+                epoch_w_coord_l1 += acc_w_coord_l1 / m_div
+                epoch_w_coord_l2 += acc_w_coord_l2 / m_div
+                epoch_w_action += acc_w_action / m_div
+                epoch_patch_acc += step_patch_acc
+                win_loss += step_loss
+                win_patch_ce += step_patch_ce
+                win_coord_l1 += step_coord_l1
+                win_patch_acc += step_patch_acc
                 win_steps += 1
                 valid_step_count += 1
             else:
-                optimizer.zero_grad()
                 nan_skip_count += 1
                 if rank == 0:
                     print(
                         f"[NAN-GUARD] Skipped step {step_count + 1} "
-                        f"(backbone_overflow={step_overflow}, loss_finite={loss_finite}, grad_finite={grad_finite}).",
+                        f"(backbone_overflow={acc_overflow_any}, loss_finite={acc_loss_finite_all}, grad_finite={grad_finite}).",
                         flush=True,
                     )
                     if nan_skip_count == 5 and backbone_dtype == "fp16":
@@ -2360,6 +2555,20 @@ def run_ddp_training(
                             "[NAN-GUARD] Frequent FP16 overflow detected on T4! Consider re-running with --backbone-dtype bf16.",
                             flush=True,
                         )
+
+            optimizer.zero_grad()
+            acc_loss = 0.0
+            acc_patch_ce = 0.0
+            acc_coord_l1 = 0.0
+            acc_w_patch_ce = 0.0
+            acc_w_coord_l1 = 0.0
+            acc_w_coord_l2 = 0.0
+            acc_w_action = 0.0
+            acc_patch_acc = 0.0
+            acc_micro_cnt = 0
+            acc_ok_local = True
+            acc_overflow_any = False
+            acc_loss_finite_all = True
 
             step_count += 1
 
@@ -2370,12 +2579,16 @@ def run_ddp_training(
                 ts = time.strftime("%H:%M:%S")
                 denom = max(1, valid_step_count)
                 w_denom = max(1, win_steps)
+                vram_suffix = ""
+                if device.type == "cuda":
+                    peak_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+                    vram_suffix = f" | Peak VRAM: {peak_gib:.2f} GiB"
                 print(
                     f"[{ts}] [Epoch {epoch}/{epochs} | Step {step_count}/{total_steps_per_epoch}] "
                     f"Loss: {win_loss / w_denom:.4f} (ep {epoch_loss / denom:.4f}) | "
                     f"Patch CE: {win_patch_ce / w_denom:.4f} (Acc: {(win_patch_acc / w_denom) * 100:.1f}%, ep {(epoch_patch_acc / denom) * 100:.1f}%) | "
                     f"Coord L1: {win_coord_l1 / w_denom:.4f} | "
-                    f"NaN_skips: {nan_skip_count} | {sec_per_step:.2f}s/step (data={data_time:.2f}s) | ETA: {eta_min:.1f}m",
+                    f"NaN_skips: {nan_skip_count} | {sec_per_step:.2f}s/step (data={data_time:.2f}s){vram_suffix} | ETA: {eta_min:.1f}m",
                     flush=True,
                 )
                 win_loss = 0.0
@@ -2539,6 +2752,8 @@ def main():
     parser = argparse.ArgumentParser(description="Kaggle Dual-T4 DDP Training for GUI-Actor on Frozen Qwen2.5-VL")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Per-GPU batch size")
+    parser.add_argument("--grad-accum-steps", type=int, default=1, help="Gradient accumulation steps across batches per optimizer update (default: 1)")
+    parser.add_argument("--micro-batch-size", type=int, default=0, help="Per-GPU forward/backward micro-batch size (0=auto: 1 for LoRA on CUDA, else batch-size)")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (default: 1e-3)")
     parser.add_argument("--save-dir", type=str, default="runs/checkpoints", help="Checkpoint save directory")
     parser.add_argument("--dry-run", action="store_true", help="Execute 5 mock steps on CPU for verification")
@@ -2655,6 +2870,8 @@ def main():
         max_pixels=args.max_pixels,
         lora_layers=(0 if args.dry_run else args.lora_layers),
         lora_r=args.lora_r,
+        grad_accum_steps=args.grad_accum_steps,
+        micro_batch_size=args.micro_batch_size,
     )
 
 
