@@ -1099,3 +1099,172 @@ def test_eval_script_fail_closed_on_missing_checkpoint(tmp_path):
         )
 
 
+def test_gui_actor_pointer_offset_zero_init_and_gelu_skew_stability():
+    """Verifies offset_mlp starts centered at zero under GELU-skewed features and keeps 3,978,386 params."""
+    from avcs.models.vla_cortex import GUIActorPatchPointer
+
+    ptr = GUIActorPatchPointer(patch_dim=512, query_dim=512, hidden_dim=512)
+    xs = (torch.arange(4, dtype=torch.float32) + 0.5) / 4.0
+    ys = (torch.arange(4, dtype=torch.float32) + 0.5) / 4.0
+    my, mx = torch.meshgrid(ys, xs, indexing="ij")
+    patch_coords = torch.stack([mx.flatten(), my.flatten()], dim=-1)
+
+    skewed_patches = torch.full((2, 16, 512), 12.0)
+    skewed_query = torch.full((2, 512), 12.0)
+    out = ptr(
+        query_input=skewed_query,
+        patch_tokens=skewed_patches,
+        patch_coords=patch_coords,
+        patch_stride=(0.25, 0.25),
+    )
+    assert torch.isfinite(out.delta).all()
+    assert torch.allclose(out.delta, torch.zeros_like(out.delta), atol=1e-6)
+    assert torch.allclose(out.subpixel_coords, patch_coords[out.patch_index], atol=1e-6)
+
+    dry_model = QwenGUIActorModel(dry_run=True, lora_layers=0)
+    assert dry_model.get_parameter_summary()["trainable_params"] == 3_978_386
+
+
+def test_unified_loss_subpixel_pos_mask_gating():
+    """Verifies subpixel Smooth-L1 loss is supervised ONLY when argmax hits positive target bbox."""
+    from avcs.models.vla_cortex import UnifiedMultiTaskLoss
+
+    criterion = UnifiedMultiTaskLoss(
+        weight_action=0.5,
+        weight_coord_l1=10.0,
+        weight_coord_l2=10.0,
+        weight_patch_ce=5.0,
+    )
+    b, k = 2, 4
+    patch_coords = torch.tensor([[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]])
+    target_coords = torch.tensor([[0.25, 0.25], [0.75, 0.75]])
+    target_bboxes = torch.tensor([[0.10, 0.10, 0.40, 0.40], [0.60, 0.60, 0.90, 0.90]])
+    target_actions = torch.tensor([0, 0], dtype=torch.long)
+
+    # Sample 0 argmax hits patch 0 (inside bbox 0); Sample 1 argmax hits patch 0 (OUTSIDE bbox 1)
+    attn_logits = torch.tensor([[10.0, 0.0, 0.0, 0.0], [10.0, 0.0, 0.0, 0.0]], requires_grad=True)
+    soft_xy = torch.tensor([[0.25, 0.25], [0.25, 0.25]], requires_grad=True)
+    sub_xy = torch.tensor([[0.30, 0.30], [0.99, 0.99]], requires_grad=True)
+    action_logits = torch.zeros(b, 10, requires_grad=True)
+
+    loss_dict = criterion(
+        {
+            "attn_logits": attn_logits,
+            "target_coords": soft_xy,
+            "subpixel_coords": sub_xy,
+            "patch_coords": patch_coords.unsqueeze(0).expand(b, -1, -1),
+            "action_logits": action_logits,
+        },
+        target_actions=target_actions,
+        target_coords=target_coords,
+        target_bboxes=target_bboxes,
+    )
+    assert abs(loss_dict["subpixel_pos_frac"].item() - 0.5) < 1e-6
+    component_sum = (
+        loss_dict["weighted_patch_ce"]
+        + loss_dict["weighted_coord_l1"]
+        + loss_dict["weighted_coord_l2"]
+        + loss_dict["weighted_action"]
+    )
+    assert torch.allclose(loss_dict["total_loss"], component_sum, atol=1e-6)
+    loss_dict["total_loss"].backward()
+    assert sub_xy.grad is not None
+    assert sub_xy.grad[0].abs().sum().item() > 0.0
+    assert torch.allclose(sub_xy.grad[1], torch.zeros_like(sub_xy.grad[1]), atol=1e-7)
+
+    # All-miss batch must keep zero gradient on sub_xy without NaNs
+    sub_xy_miss = torch.tensor([[0.99, 0.99], [0.10, 0.10]], requires_grad=True)
+    attn_miss = torch.tensor([[0.0, 0.0, 0.0, 10.0], [10.0, 0.0, 0.0, 0.0]])
+    loss_miss = criterion(
+        {
+            "attn_logits": attn_miss,
+            "target_coords": torch.zeros(b, 2),
+            "subpixel_coords": sub_xy_miss,
+            "patch_coords": patch_coords.unsqueeze(0).expand(b, -1, -1),
+            "action_logits": torch.zeros(b, 10),
+        },
+        target_actions=target_actions,
+        target_coords=target_coords,
+        target_bboxes=target_bboxes,
+    )
+    assert loss_miss["subpixel_pos_frac"].item() == 0.0
+    loss_miss["total_loss"].backward()
+    assert torch.isfinite(sub_xy_miss.grad).all()
+    assert torch.allclose(sub_xy_miss.grad, torch.zeros_like(sub_xy_miss.grad), atol=1e-7)
+
+
+def test_clean_provenance_and_os_atlas_archive_ingestion(tmp_path):
+    """Verifies DATA_PROVENANCE.yaml enforcement and OS-Atlas desktop zip+json ingestion."""
+    import io
+    import zipfile
+    from collections import defaultdict
+    from PIL import Image
+
+    GroundingDataset._validate_clean_provenance(("showlab/ShowUI-desktop", "OS-Copilot/OS-Atlas-data"))
+    with pytest.raises(ValueError, match="blocked"):
+        GroundingDataset._validate_clean_provenance(("agentsea/wave-ui",))
+    with pytest.raises(ValueError, match="not listed"):
+        GroundingDataset._validate_clean_provenance(("unknown/dataset",))
+
+    json_path = tmp_path / "macos_splited.json"
+    zip_path = tmp_path / "macos_images.zip"
+    records = [
+        {
+            "img_filename": "macos_app/window_01.png",
+            "elements": [
+                {"instruction": "Click Save button", "bbox": [0.1, 0.2, 0.3, 0.4], "data_type": "button"},
+                {"instruction": "Leakage showdown-clicks-dev item", "bbox": [0.5, 0.5, 0.6, 0.6], "data_type": "button"},
+            ],
+        }
+    ]
+    json_path.write_text(json.dumps(records), encoding="utf-8")
+
+    img_buf = io.BytesIO()
+    Image.new("RGB", (160, 100), color=(32, 64, 128)).save(img_buf, format="PNG")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("macos_app/window_01.png", img_buf.getvalue())
+
+    ds = GroundingDataset(dataset_source="synthetic", max_samples=2, allow_synthetic_fallback=True)
+    added = ds._ingest_os_atlas_desktop_archive(
+        json_path=json_path,
+        zip_path=zip_path,
+        split_name="macos",
+        max_to_add=10,
+        max_elements_per_image=5,
+        elements_per_img=defaultdict(int),
+    )
+    assert len(added) == 1
+    assert added[0]["instruction"] == "Click Save button"
+    assert abs(added[0]["target_xy"][0] - 0.2) < 1e-6
+    assert abs(added[0]["target_xy"][1] - 0.3) < 1e-6
+    assert added[0]["target_bbox"] == [0.1, 0.2, 0.3, 0.4]
+    assert ds.leakage_filtered_count >= 1
+
+
+def test_resume_checkpoint_restores_head_tensors(tmp_path):
+    """Verifies load_checkpoint_into_model restores head tensors and fails closed on missing files."""
+    load_ckpt = train_vla_module.load_checkpoint_into_model
+    with pytest.raises(FileNotFoundError, match="Resume checkpoint not found"):
+        load_ckpt(QwenGUIActorModel(dry_run=True), tmp_path / "missing.pt")
+
+    src_model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=64, query_dim=64, backbone_hidden_dim=64)
+    with torch.no_grad():
+        src_model.patch_proj[0].bias.fill_(0.42)
+    ckpt_path = tmp_path / "ckpt_epoch_3.pt"
+    torch.save(
+        {
+            "epoch": 3,
+            "model_state_dict": {k: v for k, v in src_model.state_dict().items() if not k.startswith("backbone.")},
+            "lora_config": None,
+        },
+        ckpt_path,
+    )
+
+    dst_model = QwenGUIActorModel(dry_run=True, pointer_hidden_dim=64, query_dim=64, backbone_hidden_dim=64)
+    meta = load_ckpt(dst_model, ckpt_path)
+    assert meta["epoch"] == 3
+    assert len(meta["head_missing"]) == 0
+    assert torch.allclose(dst_model.patch_proj[0].bias, torch.full_like(dst_model.patch_proj[0].bias, 0.42))
+
+
+

@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import zipfile
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -1115,7 +1116,7 @@ class GroundingDataset(Dataset):
                     self._ingest_golden_directory(p)
                 elif p.is_file() and p.suffix == ".jsonl":
                     self._ingest_jsonl(p, max_samples)
-        elif dataset_source in ("hf_showui", "mixed"):
+        elif dataset_source in ("hf_showui", "hf_desktop_clean", "mixed"):
             if dataset_source == "mixed":
                 for p_str in default_local_paths:
                     p = Path(p_str)
@@ -1128,27 +1129,33 @@ class GroundingDataset(Dataset):
                     elif p.is_file() and p.suffix == ".jsonl":
                         self._ingest_jsonl(p, max_samples)
 
-            target_hf = hf_samples if dataset_source == "hf_showui" else max(0, hf_samples - len(self.samples))
+            target_hf = hf_samples if dataset_source in ("hf_showui", "hf_desktop_clean") else max(0, hf_samples - len(self.samples))
             if stream_hf and target_hf > 0:
                 is_dist = dist.is_available() and dist.is_initialized()
                 env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
                 env_rank = dist.get_rank() if is_dist else int(os.environ.get("RANK", "0"))
+                cache_prefix = "cache_desktop_clean_v1" if dataset_source == "hf_desktop_clean" else "cache_stage1_v2"
                 cache_file = os.path.join(
                     self.cache_dir,
-                    f"cache_stage1_v2_{target_hf}_max{self.max_elements_per_image}.pt",
+                    f"{cache_prefix}_{target_hf}_max{self.max_elements_per_image}.pt",
                 )
                 done_sentinel = cache_file + ".done"
+                ingest_fn = (
+                    self._ingest_hf_desktop_clean
+                    if dataset_source == "hf_desktop_clean"
+                    else self._ingest_from_hf
+                )
 
                 if is_dist:
                     if env_rank == 0:
-                        self._ingest_from_hf(
+                        ingest_fn(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
                             cache_dir=self.cache_dir,
                         )
                     dist.barrier()
                     if env_rank != 0:
-                        self._ingest_from_hf(
+                        ingest_fn(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
                             cache_dir=self.cache_dir,
@@ -1158,7 +1165,7 @@ class GroundingDataset(Dataset):
                     if env_rank == 0:
                         if os.path.exists(done_sentinel) and not os.path.exists(cache_file):
                             os.remove(done_sentinel)
-                        self._ingest_from_hf(
+                        ingest_fn(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
                             cache_dir=self.cache_dir,
@@ -1175,13 +1182,13 @@ class GroundingDataset(Dataset):
                             if time.time() - wait_start > 7200:
                                 raise TimeoutError(f"Rank {env_rank} timed out waiting for cache sentinel {done_sentinel}")
                             time.sleep(2.0)
-                        self._ingest_from_hf(
+                        ingest_fn(
                             target_hf,
                             max_elements_per_image=self.max_elements_per_image,
                             cache_dir=self.cache_dir,
                         )
                 else:
-                    self._ingest_from_hf(
+                    ingest_fn(
                         target_hf,
                         max_elements_per_image=self.max_elements_per_image,
                         cache_dir=self.cache_dir,
@@ -1587,6 +1594,326 @@ class GroundingDataset(Dataset):
         except Exception as e:
             logger.warning(f"[HF-INGEST] Streaming from ShowUI/WaveUI failed ({e}).")
 
+    @staticmethod
+    def _validate_clean_provenance(
+        sources_to_check: Sequence[str],
+        provenance_path: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
+        """Fail-closed validation against DATA_PROVENANCE.yaml for hf_desktop_clean."""
+        manifest_path = Path(provenance_path) if provenance_path is not None else (Path(repo_root) / "DATA_PROVENANCE.yaml")
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Fail-closed provenance gate: missing DATA_PROVENANCE.yaml at {manifest_path}"
+            )
+        try:
+            import yaml
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except ImportError:
+            raise RuntimeError("PyYAML is required to validate DATA_PROVENANCE.yaml")
+
+        allowed = manifest.get("allowed_sources") or {}
+        blocked = manifest.get("blocked_sources") or {}
+        blocked_lower = {str(k).lower(): str(v.get("reason", "blocked")) if isinstance(v, dict) else "blocked" for k, v in blocked.items()}
+        allowed_map = {str(k).lower(): (k, v) for k, v in allowed.items() if isinstance(v, dict)}
+
+        for src in sources_to_check:
+            src_lower = str(src).strip().lower()
+            if src_lower in blocked_lower:
+                raise ValueError(
+                    f"Fail-closed provenance gate: '{src}' is explicitly blocked ({blocked_lower[src_lower]})."
+                )
+            if src_lower not in allowed_map:
+                raise ValueError(
+                    f"Fail-closed provenance gate: '{src}' is not listed in DATA_PROVENANCE.yaml allowed_sources."
+                )
+            _, meta = allowed_map[src_lower]
+            lic = str(meta.get("license", "")).strip()
+            if not meta.get("commercial_safe", False) or not lic or lic.lower() in ("mixed", "unknown") or "nc" in lic.lower():
+                raise ValueError(
+                    f"Fail-closed provenance gate: '{src}' does not carry a verified commercial-safe license (license={lic!r})."
+                )
+        return manifest
+
+    def _encode_pil_grounding_sample(
+        self,
+        rgb_img: Image.Image,
+        img_key: str,
+        instr: str,
+        raw_bbox: Optional[Sequence[float]],
+        raw_pt: Optional[Sequence[float]] = None,
+        jpeg_bytes: Optional[bytes] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Validate, normalize, and pack one clean PIL desktop grounding sample."""
+        w, h = rgb_img.size
+        if w <= 0 or h <= 0 or h > w * 1.15:
+            return None
+
+        clean_instr = str(instr or "").strip()
+        if len(clean_instr) < 3 or self._is_held_out_leakage(clean_instr) or self._is_held_out_leakage(img_key):
+            if self._is_held_out_leakage(clean_instr) or self._is_held_out_leakage(img_key):
+                self.leakage_filtered_count += 1
+            return None
+
+        if raw_bbox and len(raw_bbox) == 4:
+            vals = [float(v) for v in raw_bbox]
+            is_pixel = max(abs(v) for v in vals) > 1.5
+            b0 = max(0.0, min(1.0, vals[0] / max(w, 1) if is_pixel else vals[0]))
+            b1 = max(0.0, min(1.0, vals[1] / max(h, 1) if is_pixel else vals[1]))
+            b2 = max(0.0, min(1.0, vals[2] / max(w, 1) if is_pixel else vals[2]))
+            b3 = max(0.0, min(1.0, vals[3] / max(h, 1) if is_pixel else vals[3]))
+            x_min, x_max = min(b0, b2), max(b0, b2)
+            y_min, y_max = min(b1, b3), max(b1, b3)
+            if (x_max - x_min) <= 1e-4 or (y_max - y_min) <= 1e-4:
+                return None
+            cx, cy = (x_min + x_max) / 2.0, (y_min + y_max) / 2.0
+            bbox_norm = [x_min, y_min, x_max, y_max]
+        elif raw_pt and len(raw_pt) == 2:
+            pvals = [float(v) for v in raw_pt]
+            is_pixel = max(abs(v) for v in pvals) > 1.5
+            cx = max(0.0, min(1.0, pvals[0] / max(w, 1) if is_pixel else pvals[0]))
+            cy = max(0.0, min(1.0, pvals[1] / max(h, 1) if is_pixel else pvals[1]))
+            bbox_norm = [max(0.0, cx - 0.03), max(0.0, cy - 0.03), min(1.0, cx + 0.03), min(1.0, cy + 0.03)]
+        else:
+            return None
+
+        if jpeg_bytes is None:
+            pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+            buf = io.BytesIO()
+            pil_resized.save(buf, format="JPEG", quality=85)
+            jpeg_bytes = buf.getvalue()
+
+        return {
+            "instruction": clean_instr,
+            "action_idx": 0,
+            "target_xy": [min(1.0, max(0.0, cx)), min(1.0, max(0.0, cy))],
+            "target_bbox": bbox_norm,
+            "image_bytes": jpeg_bytes,
+            "image_path": None,
+            "image_id": img_key,
+        }
+
+    def _ingest_os_atlas_desktop_archive(
+        self,
+        json_path: Union[str, Path],
+        zip_path: Union[str, Path],
+        split_name: str,
+        max_to_add: int,
+        max_elements_per_image: int,
+        elements_per_img: Dict[str, int],
+    ) -> List[Dict[str, Any]]:
+        """Stream OS-Copilot/OS-Atlas-data desktop split from JSON annotations + ZipFile archive."""
+        import random
+
+        if max_to_add <= 0:
+            return []
+
+        with open(json_path, "r", encoding="utf-8") as jf:
+            records = json.load(jf)
+        if not isinstance(records, list):
+            return []
+
+        # Shuffle image records deterministically so a single run spans diverse apps cleanly.
+        records_copy = list(records)
+        random.Random(42).shuffle(records_copy)
+
+        out_samples: List[Dict[str, Any]] = []
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            name_map: Dict[str, str] = {}
+            base_map: Dict[str, str] = {}
+            for member in zf.namelist():
+                if member.endswith("/"):
+                    continue
+                norm_m = member.lstrip("./")
+                name_map[norm_m] = member
+                base_map.setdefault(os.path.basename(norm_m), member)
+
+            for rec in records_copy:
+                if len(out_samples) >= max_to_add:
+                    break
+                if not isinstance(rec, dict):
+                    continue
+                raw_fname = str(rec.get("img_filename") or "").strip().lstrip("./")
+                elements = rec.get("elements") or []
+                if not raw_fname or not isinstance(elements, list) or len(elements) == 0:
+                    continue
+                if self._is_held_out_leakage(raw_fname):
+                    self.leakage_filtered_count += 1
+                    continue
+
+                member_name = name_map.get(raw_fname) or base_map.get(os.path.basename(raw_fname))
+                if not member_name:
+                    continue
+
+                try:
+                    with zf.open(member_name) as img_f:
+                        raw_bytes = img_f.read()
+                    with Image.open(io.BytesIO(raw_bytes)) as raw_im:
+                        rgb_img = raw_im.convert("RGB")
+                except Exception:
+                    continue
+
+                w, h = rgb_img.size
+                if w <= 0 or h <= 0 or h > w * 1.15:
+                    continue
+
+                thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
+                img_hash = hashlib.md5(thumb).hexdigest()[:16]
+                img_key = f"OS-Copilot/OS-Atlas-data:{split_name}:{img_hash}"
+                if elements_per_img[img_key] >= max_elements_per_image:
+                    continue
+
+                # Encode resized JPEG once per screenshot, reuse across its capped elements
+                pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+                buf = io.BytesIO()
+                pil_resized.save(buf, format="JPEG", quality=85)
+                jpeg_bytes = buf.getvalue()
+
+                # Deterministic element sampling if screenshot has dozens of boxes
+                elem_list = list(elements)
+                if len(elem_list) > max_elements_per_image:
+                    random.Random(f"{img_hash}").shuffle(elem_list)
+
+                for el in elem_list:
+                    if len(out_samples) >= max_to_add or elements_per_img[img_key] >= max_elements_per_image:
+                        break
+                    if not isinstance(el, dict):
+                        continue
+                    instr = str(el.get("instruction") or "").strip()
+                    bbox = el.get("bbox")
+                    packed = self._encode_pil_grounding_sample(
+                        rgb_img=rgb_img,
+                        img_key=img_key,
+                        instr=instr,
+                        raw_bbox=bbox,
+                        jpeg_bytes=jpeg_bytes,
+                    )
+                    if packed is None:
+                        continue
+                    elements_per_img[img_key] += 1
+                    out_samples.append(packed)
+
+        return out_samples
+
+    def _ingest_hf_desktop_clean(
+        self,
+        max_samples: int,
+        max_elements_per_image: int = 12,
+        cache_dir: Optional[str] = None,
+    ) -> None:
+        """Ingest verified Apache-2.0 desktop corpus: showlab/ShowUI-desktop + OS-Copilot/OS-Atlas-data."""
+        cache_path = None
+        if cache_dir:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                cache_path = os.path.join(
+                    cache_dir,
+                    f"cache_desktop_clean_v1_{max_samples}_max{max_elements_per_image}.pt",
+                )
+                if os.path.exists(cache_path):
+                    logger.info(f"[HF-CLEAN-CACHE] Loading cached desktop corpus from {cache_path}...")
+                    cached_samples = torch.load(cache_path, weights_only=False)
+                    min_expected = min(max_samples, 500) if max_samples >= 2000 else 1
+                    if isinstance(cached_samples, list) and len(cached_samples) >= min_expected:
+                        self.samples.extend(cached_samples[:max_samples])
+                        logger.info(
+                            f"[HF-CLEAN-CACHE] Successfully loaded {len(self.samples)} clean desktop samples."
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"[HF-CLEAN-CACHE] Failed to read cache {cache_path}: {e}")
+
+        self._validate_clean_provenance(("showlab/ShowUI-desktop", "OS-Copilot/OS-Atlas-data"))
+
+        import random
+        elements_per_img: Dict[str, int] = defaultdict(int)
+        ingested: List[Dict[str, Any]] = []
+
+        # 1. Apache-2.0 ShowUI-desktop (~1,204 desktop grounding items)
+        try:
+            from datasets import load_dataset
+            print(f"[HF-CLEAN] Streaming showlab/ShowUI-desktop (target<={max_samples})...", flush=True)
+            ds = load_dataset("showlab/ShowUI-desktop", split="train", streaming=True)
+            for item in ds:
+                if len(ingested) >= max_samples:
+                    break
+                img = item.get("image") or item.get("img")
+                if img is None:
+                    continue
+                try:
+                    w, h = img.size
+                    if w <= 0 or h <= 0 or h > w * 1.15:
+                        continue
+                    rgb_img = img.convert("RGB")
+                    thumb = rgb_img.resize((32, 32), Image.Resampling.NEAREST).convert("L").tobytes()
+                    img_hash = hashlib.md5(thumb).hexdigest()[:16]
+                    img_key = f"showlab/ShowUI-desktop:{item.get('image_id') or img_hash}"
+                except Exception:
+                    continue
+                if elements_per_img[img_key] >= max_elements_per_image:
+                    continue
+                packed = self._encode_pil_grounding_sample(
+                    rgb_img=rgb_img,
+                    img_key=img_key,
+                    instr=str(item.get("instruction") or item.get("query") or ""),
+                    raw_bbox=item.get("bbox") or item.get("target_bbox"),
+                    raw_pt=item.get("point") or item.get("target_coord"),
+                )
+                if packed is not None:
+                    elements_per_img[img_key] += 1
+                    ingested.append(packed)
+            print(f"[HF-CLEAN] Finished showlab/ShowUI-desktop: +{len(ingested)} samples", flush=True)
+        except Exception as e:
+            logger.warning(f"[HF-CLEAN] showlab/ShowUI-desktop stream skipped/failed: {e}")
+
+        # 2. Apache-2.0 OS-Copilot/OS-Atlas-data desktop domain (macOS first, then Linux)
+        if len(ingested) < max_samples:
+            try:
+                from huggingface_hub import hf_hub_download
+                atlas_splits = (
+                    ("macos", "desktop_domain/macos_splited.json", "desktop_domain/macos_images.zip"),
+                    ("linux", "desktop_domain/linux_splited.json", "desktop_domain/linux_images.zip"),
+                )
+                for split_name, json_rel, zip_rel in atlas_splits:
+                    remaining = max_samples - len(ingested)
+                    if remaining <= 0:
+                        break
+                    print(f"[HF-CLEAN] Downloading OS-Atlas {split_name} desktop split (need {remaining} more)...", flush=True)
+                    json_local = hf_hub_download(
+                        repo_id="OS-Copilot/OS-Atlas-data",
+                        repo_type="dataset",
+                        filename=json_rel,
+                    )
+                    zip_local = hf_hub_download(
+                        repo_id="OS-Copilot/OS-Atlas-data",
+                        repo_type="dataset",
+                        filename=zip_rel,
+                    )
+                    added = self._ingest_os_atlas_desktop_archive(
+                        json_path=json_local,
+                        zip_path=zip_local,
+                        split_name=split_name,
+                        max_to_add=remaining,
+                        max_elements_per_image=max_elements_per_image,
+                        elements_per_img=elements_per_img,
+                    )
+                    ingested.extend(added)
+                    print(
+                        f"[HF-CLEAN] Finished OS-Atlas {split_name}: +{len(added)} samples "
+                        f"(total={len(ingested)}, unique_screens={len(elements_per_img)})",
+                        flush=True,
+                    )
+            except Exception as e:
+                logger.warning(f"[HF-CLEAN] OS-Copilot/OS-Atlas-data ingestion failed: {e}")
+
+        random.Random(42).shuffle(ingested)
+        self.samples.extend(ingested[:max_samples])
+        if cache_path and len(ingested) > 0:
+            try:
+                torch.save(ingested[:max_samples], cache_path)
+                logger.info(f"[HF-CLEAN-CACHE] Saved {len(ingested[:max_samples])} samples to {cache_path}.")
+            except Exception as ce:
+                logger.warning(f"[HF-CLEAN-CACHE] Failed to write cache {cache_path}: {ce}")
+
     def _generate_synthetic_samples(self, n: int) -> None:
         for i in range(n):
             cx = float(np.random.uniform(0.05, 0.95))
@@ -1922,6 +2249,7 @@ def run_overfit_sanity(
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     if getattr(model, "load_in_4bit", False):
         for name, child in model.named_children():
             if name != "backbone":
@@ -2206,6 +2534,52 @@ class RLVisualMotorTrainer:
 # 6. DDP Training Loop Entrypoint
 # --------------------------------------------------------------------------- #
 
+def load_checkpoint_into_model(
+    model: QwenGUIActorModel,
+    checkpoint_path: Union[str, Path],
+) -> Dict[str, Any]:
+    """Fail-closed checkpoint loader restoring head + LoRA adapter tensors into QwenGUIActorModel."""
+    ckpt_file = Path(checkpoint_path)
+    if not ckpt_file.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_file}")
+
+    ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"Invalid checkpoint payload in {ckpt_file}: expected dict, got {type(ckpt).__name__}")
+
+    ckpt_lora = ckpt.get("lora_config")
+    if isinstance(ckpt_lora, dict) and int(ckpt_lora.get("lora_layers", 0)) > 0:
+        if getattr(model, "lora_config", None) is None and model.backbone is not None and not isinstance(model.backbone, MockQwenBackbone):
+            model.enable_lora(
+                lora_layers=int(ckpt_lora["lora_layers"]),
+                r=int(ckpt_lora.get("r", 16)),
+                lora_alpha=float(ckpt_lora.get("lora_alpha", 32.0)),
+            )
+
+    raw_state = ckpt.get("model_state_dict", ckpt)
+    if not isinstance(raw_state, dict) or len(raw_state) == 0:
+        raise ValueError(f"Empty model_state_dict in checkpoint {ckpt_file}")
+
+    cleaned_state: Dict[str, Any] = {}
+    for k, v in raw_state.items():
+        clean_k = k[len("module."):] if k.startswith("module.") else k
+        cleaned_state[clean_k] = v
+
+    missing, unexpected = model.load_state_dict(cleaned_state, strict=False)
+    head_missing = [k for k in missing if not k.startswith("backbone.")]
+    logger.info(
+        f"[RESUME] Loaded {len(cleaned_state)} tensors from {ckpt_file} "
+        f"(epoch={ckpt.get('epoch', 0)}, head_missing={len(head_missing)}, unexpected={len(unexpected)})"
+    )
+    return {
+        "epoch": int(ckpt.get("epoch", 0)),
+        "loaded_tensors": len(cleaned_state),
+        "head_missing": head_missing,
+        "unexpected": unexpected,
+        "lora_config": ckpt_lora,
+    }
+
+
 def run_ddp_training(
     epochs: int = 5,
     batch_size: int = 8,
@@ -2232,6 +2606,7 @@ def run_ddp_training(
     lora_r: int = 16,
     grad_accum_steps: int = 1,
     micro_batch_size: int = 0,
+    resume_checkpoint: Optional[str] = None,
 ) -> None:
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
@@ -2281,6 +2656,17 @@ def run_ddp_training(
         lora_layers=lora_layers,
         lora_r=lora_r,
     )
+    resumed_epoch = 0
+    if resume_checkpoint:
+        resume_meta = load_checkpoint_into_model(model, resume_checkpoint)
+        resumed_epoch = int(resume_meta.get("epoch", 0))
+        if rank == 0:
+            print(
+                f"[RESUME] Restored {resume_meta['loaded_tensors']} tensors from {resume_checkpoint} "
+                f"(source_epoch={resumed_epoch}, head_missing={len(resume_meta['head_missing'])}, unexpected={len(resume_meta['unexpected'])})",
+                flush=True,
+            )
+
     if getattr(model, "load_in_4bit", False):
         for name, child in model.named_children():
             if name != "backbone":
@@ -2626,12 +3012,15 @@ def run_ddp_training(
             )
 
         # Distributed Held-Out Validation Evaluation at Epoch End (Capped at 200 samples; prevents NCCL timeout)
+        val_sharp_acc = 0.0
+        val_sub_acc = 0.0
         val_strict_acc = 0.0
         val_patch_acc = 0.0
         if val_dataloader is not None and len(val_dataloader) > 0 and not dry_run:
             unwrapped = model.module if hasattr(model, "module") else model
             unwrapped.eval()
-            local_hits = 0
+            local_sharp_hits = 0
+            local_sub_hits = 0
             local_patch_hits = 0
             local_total = 0
             local_loss_acc = 0.0
@@ -2654,11 +3043,19 @@ def run_ddp_training(
                     local_loss_acc += v_loss_dict["loss"].item()
                     local_batches += 1
 
-                    pred_coords = v_out["subpixel_coords"]
-                    b_cnt = pred_coords.shape[0]
+                    sub_coords = v_out["subpixel_coords"]
+                    v_logits = v_out.get("attn_logits")
+                    v_pcoords = v_out.get("patch_coords")
+                    if v_logits is not None and v_pcoords is not None:
+                        v_logits_2d = v_logits.squeeze(1) if (v_logits.dim() == 3 and v_logits.shape[1] == 1) else v_logits.view(v_logits.shape[0], -1)
+                        v_pcoords_3d = v_pcoords.unsqueeze(0).expand(v_logits_2d.shape[0], -1, -1) if v_pcoords.dim() == 2 else v_pcoords
+                        v_sharp_w = F.softmax(v_logits_2d / 0.05, dim=-1).unsqueeze(1)
+                        sharp_coords = torch.bmm(v_sharp_w, v_pcoords_3d).squeeze(1)
+                    else:
+                        sharp_coords = v_out["target_coords"]
 
+                    b_cnt = sub_coords.shape[0]
                     for b_i in range(b_cnt):
-                        px, py = pred_coords[b_i, 0].item(), pred_coords[b_i, 1].item()
                         bx1, by1, bx2, by2 = (
                             v_bboxes[b_i, 0].item(),
                             v_bboxes[b_i, 1].item(),
@@ -2667,45 +3064,55 @@ def run_ddp_training(
                         )
                         x_min, x_max = min(bx1, bx2), max(bx1, bx2)
                         y_min, y_max = min(by1, by2), max(by1, by2)
+                        spx, spy = sharp_coords[b_i, 0].item(), sharp_coords[b_i, 1].item()
+                        if (x_min <= spx <= x_max) and (y_min <= spy <= y_max):
+                            local_sharp_hits += 1
+                        px, py = sub_coords[b_i, 0].item(), sub_coords[b_i, 1].item()
                         if (x_min <= px <= x_max) and (y_min <= py <= y_max):
-                            local_hits += 1
+                            local_sub_hits += 1
 
                     local_patch_hits += int((v_loss_dict.get("patch_top1_acc", 0.0) * b_cnt).round().item())
                     local_total += b_cnt
 
             if is_distributed:
                 stats_tensor = torch.tensor(
-                    [local_hits, local_patch_hits, local_total, local_loss_acc, local_batches],
+                    [local_sharp_hits, local_sub_hits, local_patch_hits, local_total, local_loss_acc, local_batches],
                     device=device,
                     dtype=torch.float64,
                 )
                 dist.all_reduce(stats_tensor, op=dist.ReduceOp.SUM)
-                val_hits = int(stats_tensor[0].item())
-                val_patch_hits = int(stats_tensor[1].item())
-                val_total = int(stats_tensor[2].item())
-                val_loss_acc = stats_tensor[3].item()
-                val_batches_total = max(1, int(stats_tensor[4].item()))
+                val_sharp_hits = int(stats_tensor[0].item())
+                val_sub_hits = int(stats_tensor[1].item())
+                val_patch_hits = int(stats_tensor[2].item())
+                val_total = int(stats_tensor[3].item())
+                val_loss_acc = stats_tensor[4].item()
+                val_batches_total = max(1, int(stats_tensor[5].item()))
                 dist.barrier()
             else:
-                val_hits = local_hits
+                val_sharp_hits = local_sharp_hits
+                val_sub_hits = local_sub_hits
                 val_patch_hits = local_patch_hits
                 val_total = local_total
                 val_loss_acc = local_loss_acc
                 val_batches_total = max(1, local_batches)
 
-            val_strict_acc = val_hits / max(1, val_total)
+            val_sharp_acc = val_sharp_hits / max(1, val_total)
+            val_sub_acc = val_sub_hits / max(1, val_total)
+            val_strict_acc = max(val_sharp_acc, val_sub_acc)
             val_patch_acc = (val_patch_hits / max(1, val_total)) * 100.0
             avg_val_loss = val_loss_acc / val_batches_total
             if rank == 0:
                 print(
-                    f"[VAL] Epoch [{epoch}/{epochs}] Val Strict (0px) Acc: {val_strict_acc * 100:.2f}% "
-                    f"({val_hits}/{val_total}) | Val Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}",
+                    f"[VAL] Epoch [{resumed_epoch + epoch}/{resumed_epoch + epochs}] "
+                    f"Val Strict (0px) Acc: {val_sharp_acc * 100:.2f}% ({val_sharp_hits}/{val_total}) [Sharp T=0.05] | "
+                    f"Val Subpixel (0px): {val_sub_acc * 100:.2f}% ({val_sub_hits}/{val_total}) | "
+                    f"Val Patch Acc: {val_patch_acc:.1f}% | Val Loss: {avg_val_loss:.4f}",
                     flush=True,
                 )
             unwrapped.train()
 
             # Early Abortion Gate: Abort only if model exhibits zero convergence across patch & strict metrics
-            if epoch == 1 and val_strict_acc < 0.05 and val_patch_acc < 5.0 and not no_early_abort:
+            if resumed_epoch == 0 and epoch == 1 and val_strict_acc < 0.05 and val_patch_acc < 5.0 and not no_early_abort:
                 raise RuntimeError(
                     f"[EARLY-ABORTION-GATE] Epoch 1 validation strict accuracy ({val_strict_acc * 100:.2f}%) "
                     f"and patch accuracy ({val_patch_acc:.1f}%) are both below 5.0% threshold! "
@@ -2714,7 +3121,8 @@ def run_ddp_training(
 
         if rank == 0:
             # Save checkpoint (adapter heads + any trained LoRA weights)
-            ckpt_file = save_path / f"gui_actor_step6_2_epoch_{epoch}.pt"
+            global_epoch = resumed_epoch + epoch
+            ckpt_file = save_path / f"gui_actor_step6_2_epoch_{global_epoch}.pt"
             unwrapped = model.module if hasattr(model, "module") else model
             adapter_state = {
                 k: v
@@ -2722,11 +3130,15 @@ def run_ddp_training(
                 if (not k.startswith("backbone.") or ".lora_" in k)
             }
             torch.save({
-                "epoch": epoch,
+                "epoch": global_epoch,
+                "resumed_from_epoch": resumed_epoch,
                 "model_state_dict": adapter_state,
                 "lora_config": getattr(unwrapped, "lora_config", None),
                 "stats": stats,
                 "val_strict_acc": val_strict_acc,
+                "val_sharp_acc": val_sharp_acc,
+                "val_subpixel_acc": val_sub_acc,
+                "val_patch_acc": val_patch_acc,
             }, ckpt_file)
             print(f"Saved trainable adapter checkpoint to: {ckpt_file} ({len(adapter_state)} tensors)", flush=True)
 
@@ -2768,8 +3180,14 @@ def main():
         "--dataset-source",
         type=str,
         default="hf_showui",
-        choices=["hf_showui", "local", "mixed", "synthetic"],
-        help="Dataset source: 'hf_showui' (streams/caches showlab/ShowUI-desktop, default), 'local', 'mixed', or 'synthetic'",
+        choices=["hf_showui", "hf_desktop_clean", "local", "mixed", "synthetic"],
+        help="Dataset source: 'hf_showui', 'hf_desktop_clean' (Apache-2.0 ShowUI + OS-Atlas desktop), 'local', 'mixed', or 'synthetic'",
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default=None,
+        help="Optional path to a saved Stage-6.2 checkpoint (.pt) to restore heads + LoRA adapters before training",
     )
     parser.add_argument("--stream-hf", action="store_true", default=True, help="Stream real desktop samples from showlab/ShowUI-desktop (default: True)")
     parser.add_argument("--no-stream-hf", action="store_true", help="Disable Hugging Face streaming")
@@ -2872,6 +3290,7 @@ def main():
         lora_r=args.lora_r,
         grad_accum_steps=args.grad_accum_steps,
         micro_batch_size=args.micro_batch_size,
+        resume_checkpoint=args.resume_checkpoint,
     )
 
 

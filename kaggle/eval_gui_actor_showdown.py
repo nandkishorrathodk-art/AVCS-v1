@@ -588,7 +588,8 @@ def run_evaluation(
             sharp_py = float(sharp_norm_xy[1] * raw_h)
 
             # 3. Soft unsharpened centroid (T=1.0)
-            soft_norm_xy = out["target_coords"][0].cpu().numpy()
+            soft_weights = F.softmax(attn_logits / 1.0, dim=-1)
+            soft_norm_xy = torch.bmm(soft_weights, patch_coords).squeeze(1)[0].cpu().numpy()
             soft_px = float(soft_norm_xy[0] * raw_w)
             soft_py = float(soft_norm_xy[1] * raw_h)
 

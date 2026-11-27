@@ -743,6 +743,10 @@ class GUIActorPatchPointer(nn.Module):
             nn.Linear(hidden_dim, 2),
             nn.Tanh(),
         )
+        # Zero-init final offset projection so initial sub-patch delta starts at 0.0
+        # instead of saturating tanh under skewed GELU features (keeps param count exact).
+        nn.init.zeros_(self.offset_mlp[2].weight)
+        nn.init.zeros_(self.offset_mlp[2].bias)
 
     def forward(
         self,
@@ -785,6 +789,7 @@ class GUIActorPatchPointer(nn.Module):
         v_best = v_feat[torch.arange(b, device=device), best_idx]
 
         offset_input = torch.cat([0.5 * (ctx + v_best), q.squeeze(1)], dim=-1)
+        offset_input = F.layer_norm(offset_input, (offset_input.shape[-1],))
         delta = 0.5 * self.offset_mlp(offset_input)
 
         stride_tensor = patch_coords.new_tensor(patch_stride).view(1, 2)
@@ -2475,27 +2480,8 @@ class UnifiedMultiTaskLoss(nn.Module):
         # 1. Action type cross-entropy loss
         loss_act = F.cross_entropy(pred_act_logits, actual_target_act)
 
-        # 2. GUI-Actor Pointer coordinate loss (L1 + L2)
-        # Supervise both soft centroid and hard argmax+offset (subpixel_coords) when
-        # present so offset_mlp learns true sub-patch centering around best_coords
-        # instead of compensating for soft-centroid softmax blur.
-        if subpixel_xy is not None:
-            loss_coord_l1 = (
-                0.35 * F.l1_loss(pred_xy, actual_target_xy)
-                + 0.65 * F.l1_loss(subpixel_xy, actual_target_xy)
-            )
-            loss_coord_l2 = (
-                0.35 * F.mse_loss(pred_xy, actual_target_xy)
-                + 0.65 * F.mse_loss(subpixel_xy, actual_target_xy)
-            )
-        else:
-            loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
-            loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
-        weighted_coord_l1 = self.weight_coord_l1 * loss_coord_l1
-        weighted_coord_l2 = self.weight_coord_l2 * loss_coord_l2
-        loss_coord = weighted_coord_l1 + weighted_coord_l2
-
-        # 3. Patch Classification Cross-Entropy Loss (Direct supervision on patch cross-attention)
+        # 2 & 3. Pre-compute patch attention targets / positive-patch mask so offset_mlp
+        # is only supervised when argmax lands inside a ground-truth target bbox.
         loss_patch_ce = torch.tensor(0.0, device=actual_target_act.device)
         patch_top1_acc = torch.tensor(0.0, device=actual_target_act.device)
 
@@ -2508,7 +2494,8 @@ class UnifiedMultiTaskLoss(nn.Module):
             attn_logits = getattr(model_out, "attn_logits")
             patch_coords = getattr(model_out, "patch_coords", None)
 
-        if attn_logits is not None and self.weight_patch_ce > 0.0:
+        pos_mask = None
+        if attn_logits is not None:
             if attn_logits.dim() == 3 and attn_logits.shape[1] == 1:
                 attn_logits_2d = attn_logits.squeeze(1)
             else:
@@ -2545,11 +2532,12 @@ class UnifiedMultiTaskLoss(nn.Module):
                 bbox_probs = in_bbox.to(dtype=attn_logits_2d.dtype) / safe_num_pos
                 target_probs = torch.where(num_pos > 0, bbox_probs, nearest_one_hot)
 
-                loss_patch_ce = F.cross_entropy(attn_logits_2d, target_probs)
                 pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)
-                pred_hits = target_probs.gather(1, pred_patch_idx.unsqueeze(1)).squeeze(1) > 0
-                patch_top1_acc = pred_hits.float().mean()
-            else:
+                pos_mask = target_probs.gather(1, pred_patch_idx.unsqueeze(1)).squeeze(1) > 0
+                patch_top1_acc = pos_mask.float().mean()
+                if self.weight_patch_ce > 0.0:
+                    loss_patch_ce = F.cross_entropy(attn_logits_2d, target_probs)
+            elif self.weight_patch_ce > 0.0:
                 # Single nearest patch supervision fallback
                 if target_patch_idx is None and patch_coords_exp is not None and patch_coords_exp.shape[1] == k_patches:
                     target_exp = actual_target_xy.unsqueeze(1)
@@ -2560,6 +2548,50 @@ class UnifiedMultiTaskLoss(nn.Module):
                     loss_patch_ce = F.cross_entropy(attn_logits_2d, target_patch_idx)
                     pred_patch_idx = torch.argmax(attn_logits_2d, dim=-1)
                     patch_top1_acc = (pred_patch_idx == target_patch_idx).float().mean()
+
+        # 2. GUI-Actor Pointer coordinate loss (L1 + L2)
+        # Supervise soft centroid globally; when target_bboxes is available, gate
+        # subpixel_xy Smooth-L1/MSE strictly onto positive argmax patches so wrong
+        # patch selections never saturate offset_mlp into the patch corners.
+        loss_subpixel_gated = torch.tensor(0.0, device=actual_target_act.device)
+        subpixel_pos_frac = torch.tensor(1.0, device=actual_target_act.device)
+        if subpixel_xy is not None:
+            if pos_mask is not None:
+                subpixel_pos_frac = pos_mask.float().mean()
+                if pos_mask.any():
+                    loss_subpixel_gated = F.smooth_l1_loss(
+                        subpixel_xy[pos_mask], actual_target_xy[pos_mask], beta=0.01
+                    )
+                    loss_subpixel_l2 = F.mse_loss(
+                        subpixel_xy[pos_mask], actual_target_xy[pos_mask]
+                    )
+                else:
+                    loss_subpixel_gated = 0.0 * subpixel_xy.sum()
+                    loss_subpixel_l2 = 0.0 * subpixel_xy.sum()
+                loss_coord_l1 = (
+                    0.35 * F.l1_loss(pred_xy, actual_target_xy)
+                    + 0.65 * loss_subpixel_gated
+                )
+                loss_coord_l2 = (
+                    0.35 * F.mse_loss(pred_xy, actual_target_xy)
+                    + 0.65 * loss_subpixel_l2
+                )
+            else:
+                loss_subpixel_gated = F.l1_loss(subpixel_xy, actual_target_xy)
+                loss_coord_l1 = (
+                    0.35 * F.l1_loss(pred_xy, actual_target_xy)
+                    + 0.65 * loss_subpixel_gated
+                )
+                loss_coord_l2 = (
+                    0.35 * F.mse_loss(pred_xy, actual_target_xy)
+                    + 0.65 * F.mse_loss(subpixel_xy, actual_target_xy)
+                )
+        else:
+            loss_coord_l1 = F.l1_loss(pred_xy, actual_target_xy)
+            loss_coord_l2 = F.mse_loss(pred_xy, actual_target_xy)
+        weighted_coord_l1 = self.weight_coord_l1 * loss_coord_l1
+        weighted_coord_l2 = self.weight_coord_l2 * loss_coord_l2
+        loss_coord = weighted_coord_l1 + weighted_coord_l2
 
         weighted_act = self.weight_action * loss_act
         weighted_patch_ce = self.weight_patch_ce * loss_patch_ce
@@ -2608,6 +2640,8 @@ class UnifiedMultiTaskLoss(nn.Module):
             "weighted_patch_ce": weighted_patch_ce,
             "loss_scroll": loss_scroll,
             "loss_drag": loss_drag,
+            "loss_subpixel_gated": loss_subpixel_gated,
+            "subpixel_pos_frac": subpixel_pos_frac,
         }
 
 

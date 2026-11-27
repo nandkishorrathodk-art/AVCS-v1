@@ -1,0 +1,43 @@
+# AVCS Pure-RGB VLA Training Corpus Provenance Manifest
+# Enforced fail-closed by `--dataset-source hf_desktop_clean`.
+
+version: 1
+policy:
+  require_verified_commercial_safe_license: true
+  block_mixed_or_unknown_licenses: true
+  block_held_out_benchmarks: true
+
+allowed_sources:
+  showlab/ShowUI-desktop:
+    license: Apache-2.0
+    domain: desktop
+    commercial_safe: true
+    notes: "Curated desktop grounding corpus (Windows/macOS/Linux)"
+  OS-Copilot/OS-Atlas-data:
+    license: Apache-2.0
+    domain: desktop
+    commercial_safe: true
+    splits:
+      - desktop_domain/macos_splited.json
+      - desktop_domain/linux_splited.json
+    notes: "High-resolution desktop UI grounding annotations and archives"
+
+blocked_sources:
+  agentsea/wave-ui:
+    license: mixed
+    reason: "Excluded from hf_desktop_clean due to mixed upstream licensing and web skew"
+  OSU-NLP-Group/WaveUI:
+    license: mixed
+    reason: "Excluded from hf_desktop_clean due to mixed licensing"
+  WebLINX:
+    license: CC-BY-NC-SA-4.0
+    reason: "Non-commercial license prohibited in commercial weights"
+  ScaleCUA-Data:
+    license: unknown
+    reason: "Unstated upstream license; held pending legal audit"
+  generalagents/showdown-clicks:
+    license: MIT
+    reason: "Strictly held-out evaluation benchmark (zero leakage)"
+  xlang-ai/OSWorld-Verified:
+    license: Apache-2.0
+    reason: "Strictly held-out evaluation benchmark (zero leakage)"
