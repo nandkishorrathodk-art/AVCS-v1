@@ -140,7 +140,7 @@ class RecorderConfig:
     jpeg_quality: int = 85
     capture_size: Optional[Tuple[int, int]] = None  # optional (W, H) resize at encode
     ring_capacity: int = 128
-    min_drag_px: float = 12.0
+    min_drag_px: float = 25.0
     min_move_px: float = 24.0
     double_click_window_ns: int = 350_000_000
     idle_wait_interval_ns: int = 500_000_000
@@ -434,6 +434,15 @@ def _vk_to_label_and_char(vk_code: int, modifiers: Sequence[str]) -> Tuple[bool,
         VK_TAB: "tab",
         VK_BACK: "backspace",
         VK_F12: "f12",
+        0x5B: "win",
+        0x5C: "win",
+        0x2E: "delete",
+        0x24: "home",
+        0x23: "end",
+        0x25: "left",
+        0x26: "up",
+        0x27: "right",
+        0x28: "down",
     }
     if vk_code in special_names:
         key_name = special_names[vk_code]
@@ -448,9 +457,30 @@ def _vk_to_label_and_char(vk_code: int, modifiers: Sequence[str]) -> Tuple[bool,
         return False, "", ch
 
     if ord("0") <= vk_code <= ord("9"):
-        ch = chr(vk_code)
+        shift_digits = ")!@#$%^&*("
+        ch = shift_digits[vk_code - ord("0")] if "shift" in modifiers else chr(vk_code)
         if ctrl_or_alt:
-            return True, "+".join([*modifiers, ch]), ""
+            return True, "+".join([*modifiers, chr(vk_code)]), ""
+        return False, "", ch
+
+    oem_chars = {
+        0xBA: (";", ":"),
+        0xBB: ("=", "+"),
+        0xBC: (",", "<"),
+        0xBD: ("-", "_"),
+        0xBE: (".", ">"),
+        0xBF: ("/", "?"),
+        0xC0: ("`", "~"),
+        0xDB: ("[", "{"),
+        0xDC: ("\\", "|"),
+        0xDD: ("]", "}"),
+        0xDE: ("'", '"'),
+    }
+    if vk_code in oem_chars:
+        unshifted, shifted = oem_chars[vk_code]
+        ch = shifted if "shift" in modifiers else unshifted
+        if ctrl_or_alt:
+            return True, "+".join([*modifiers, unshifted]), ""
         return False, "", ch
 
     if vk_code == VK_SPACE and not ctrl_or_alt:
@@ -1116,7 +1146,7 @@ class ZeroLagWindowsRecorder:
         atomic_syncs = sorted(
             max(0, s.action_event_ns - s.frame_present_ns) / 1_000_000.0
             for s in raw_steps
-            if s.action_kind in (ACTION_LEFT_CLICK, ACTION_RIGHT_CLICK, ACTION_DOUBLE_CLICK, ACTION_SCROLL, ACTION_HOTKEY, ACTION_TYPE)
+            if s.action_kind in (ACTION_LEFT_CLICK, ACTION_RIGHT_CLICK, ACTION_DOUBLE_CLICK, ACTION_MOVE, ACTION_SCROLL, ACTION_HOTKEY, ACTION_TYPE)
         )
         atomic_p95_sync_ms = (
             atomic_syncs[int(0.95 * (len(atomic_syncs) - 1))] if atomic_syncs else 0.0
@@ -1147,7 +1177,17 @@ class ZeroLagWindowsRecorder:
         audit_files: List[str] = []
         if output_dir is not None and episodes:
             out_path = Path(output_dir)
-            shard_info = save_lerobot_v3_shards(episodes, out_path)
+            chunk0 = out_path / "data" / "chunk-000"
+            next_file_idx = 0
+            if chunk0.is_dir():
+                existing = list(chunk0.glob("file-*.parquet")) + list(chunk0.glob("file-*.jsonl"))
+                for ef in existing:
+                    try:
+                        idx_val = int(ef.stem.split("-")[1])
+                        next_file_idx = max(next_file_idx, idx_val + 1)
+                    except Exception:
+                        pass
+            shard_info = save_lerobot_v3_shards(episodes, out_path, start_file_index=next_file_idx)
             if render_audit:
                 audit_files = [
                     str(p)
@@ -1205,7 +1245,10 @@ class ZeroLagWindowsRecorder:
             pass
 
 
-def run_recorder_smoke_test(output_dir: Union[str, Path] = "runs/phase2_recorder_smoke") -> Dict[str, Any]:
+def run_recorder_smoke_test(
+    output_dir: Union[str, Path] = "runs/phase2_recorder_smoke",
+    episode_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Runs a deterministic end-to-end zero-lag recorder + Raw Input + LeRobot v3 smoke verification."""
     cfg = RecorderConfig(
         task_instruction="Open notepad and type test greeting",
@@ -1253,7 +1296,7 @@ def run_recorder_smoke_test(output_dir: Union[str, Path] = "runs/phase2_recorder
         res = rec.record_session(
             duration_s=1.0,
             output_dir=output_dir,
-            episode_id="smoke_win32_ep0",
+            episode_id=episode_id or f"smoke_win32_{uuid.uuid4().hex[:6]}",
             clean=True,
             render_audit=True,
         )

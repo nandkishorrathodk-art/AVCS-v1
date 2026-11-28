@@ -1304,6 +1304,7 @@ def save_lerobot_v3_shards(
     episodes: Sequence[Sequence[LeRobotV3TrajectoryEpisode]],
     root_dir: Union[str, Path],
     episodes_per_file: int = 100,
+    start_file_index: int = 0,
 ) -> Dict[str, Any]:
     """Serializes LeRobot v3.0 episodes into canonical chunk-XXX/file-XXX shards."""
     import base64
@@ -1335,7 +1336,7 @@ def save_lerobot_v3_shards(
                 rows.append(d)
                 total_rows += 1
 
-        file_idx = shard_idx // episodes_per_file
+        file_idx = int(start_file_index) + (shard_idx // episodes_per_file)
         if has_parquet:
             shard_path = chunk_dir / f"file-{file_idx:03d}.parquet"
             table = pa.Table.from_pylist(rows)

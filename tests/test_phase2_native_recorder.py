@@ -129,3 +129,19 @@ def test_native_recorder_linux_import_safety_and_backend_fallback(monkeypatch):
     frame = adp.grab()
     assert frame.shape == (200, 320, 3)
     adp.close()
+
+
+def test_win_key_mapping_and_non_overwriting_shards(tmp_path):
+    """Verifies Win-key/OEM mapping and auto-incrementing shard filenames without overwriting."""
+    from avcs.data.native_recorder import _vk_to_label_and_char
+
+    assert _vk_to_label_and_char(0x5B, ()) == (True, "win", "")
+    assert _vk_to_label_and_char(0xBE, ()) == (False, "", ".")
+
+    out_dir = tmp_path / "append_shards"
+    r1 = run_recorder_smoke_test(output_dir=out_dir, episode_id="ep_first")
+    r2 = run_recorder_smoke_test(output_dir=out_dir, episode_id="ep_second")
+    reloaded = load_lerobot_v3_shards(out_dir)
+    assert len(reloaded) == 2
+    assert r1["shard_info"]["shards"][0] != r2["shard_info"]["shards"][0]
+
