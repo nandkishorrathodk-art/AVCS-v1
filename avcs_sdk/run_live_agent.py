@@ -42,6 +42,7 @@ from .cognitive import (
     ObstacleType,
     WorkflowCoordinator,
 )
+from avcs.control.capability import CapabilityKernel, GroundingEvidence, MUTATING_OPS as KERNEL_MUTATING_OPS
 
 # Category tokens the eye stream actually emits. The scoring below used to test
 # for "text_like"/"graphic", which no producer emits, so those branches were
@@ -112,13 +113,19 @@ def resolve_semantic_target(
 def _resolve_screen_point(
     eye: EyeStream,
     elements: List[FovealElement],
-    coord: Optional[Tuple[int, int]],
+    coord: Optional[Tuple[float, float]],
     target_desc: Optional[str],
 ) -> Optional[Tuple[Tuple[int, int], Tuple[float, float], str]]:
     """Resolve canonical VLA coordinates or semantic foveal elements to screen pixels."""
     if coord is not None and len(coord) >= 2:
-        norm_x = max(0.0, min(1.0, float(coord[0]) / 1280.0))
-        norm_y = max(0.0, min(1.0, float(coord[1]) / 800.0))
+        cx, cy = float(coord[0]), float(coord[1])
+        if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0:
+            norm_x, norm_y = cx, cy
+        else:
+            ref_w = float(max(1, getattr(eye.geometry, "virtual_width", 1920)))
+            ref_h = float(max(1, getattr(eye.geometry, "virtual_height", 1080)))
+            norm_x = max(0.0, min(1.0, cx / ref_w))
+            norm_y = max(0.0, min(1.0, cy / ref_h))
         sx, sy = eye.geometry.to_screen(norm_x, norm_y)
         return (sx, sy), (norm_x, norm_y), f"vla_coord at ({norm_x:.2f}, {norm_y:.2f})"
 
@@ -130,13 +137,54 @@ def _resolve_screen_point(
     return None
 
 
-def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
+def _authorize_live_action(
+    kernel: CapabilityKernel,
+    *,
+    op: str,
+    query: Optional[str],
+    source: str,
+    peak_probability: float,
+    point_norm: Optional[Tuple[float, float]],
+    frame: Optional[object],
+) -> Tuple[bool, str]:
+    """Enforce fail-closed CapabilityKernel policy before any physical actuation."""
+    # Heuristic fallback never carries calibrated neural grounding confidence.
+    effective_peak = float(peak_probability) if source in ("local_vla", "llm") else 0.0
+    evidence = GroundingEvidence(
+        candidate_point_norm=point_norm,
+        peak_probability=effective_peak,
+        target_present=effective_peak >= kernel.min_peak_probability,
+        authorized=(source in ("local_vla", "llm")),
+        active_query=query,
+    )
+    decision = kernel.authorize(op=op, query=query, evidence=evidence, frame=frame)
+    return bool(decision.allowed), str(decision.reason)
+
+
+def run_agent(
+    goal: str,
+    max_turns: int = 10,
+    dry_run: bool = True,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    granted_ops: Optional[List[str]] = None,
+) -> None:
     print("\n[AVCS Agent] Initializing Autonomous Live Agent...")
     print(f"[Objective]: {goal}")
     if dry_run:
         print("[Safety Mode]: DRY-RUN active (Physical actuation bypassed). Corner breakout active.\n")
     else:
-        print("[Safety Mode]: LIVE ACTUATION active! Move cursor to any screen corner to abort.\n")
+        print("[Safety Mode]: LIVE ACTUATION active (CapabilityKernel gated). Move cursor to any screen corner to abort.\n")
+
+    active_grants = (
+        tuple(granted_ops)
+        if granted_ops is not None
+        else (tuple(KERNEL_MUTATING_OPS) if not dry_run else ())
+    )
+    capability_kernel = CapabilityKernel(
+        granted_ops=active_grants if not dry_run else (),
+        min_peak_probability=0.75,
+    )
 
     eye = EyeStream()
     fovea = FoveaReader()
@@ -259,6 +307,18 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
                     print(f"[Hand Motor] {act} at ({screen_x}, {screen_y}) targeting {desc}...")
 
                     if not dry_run:
+                        allowed, cap_reason = _authorize_live_action(
+                            capability_kernel,
+                            op=act,
+                            query=directive.target or step_desc,
+                            source=directive.source,
+                            peak_probability=float(getattr(directive, "confidence", 0.0)),
+                            point_norm=norm_pt,
+                            frame=eye_frame.raw_frame,
+                        )
+                        if not allowed:
+                            print(f"[CapabilityKernel] Refused {act}: {cap_reason}")
+                            continue
                         pre_frame = eye_frame.raw_frame
                         try:
                             if act in ("click", "left_click"):
@@ -307,6 +367,18 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
                     (ex, ey), end_norm, end_desc = end_res
                     print(f"[Hand Motor] Dragging from ({sx}, {sy}) [{start_desc}] to ({ex}, {ey}) [{end_desc}]...")
                     if not dry_run:
+                        allowed, cap_reason = _authorize_live_action(
+                            capability_kernel,
+                            op="drag",
+                            query=directive.target or step_desc,
+                            source=directive.source,
+                            peak_probability=float(getattr(directive, "confidence", 0.0)),
+                            point_norm=end_norm,
+                            frame=eye_frame.raw_frame,
+                        )
+                        if not allowed:
+                            print(f"[CapabilityKernel] Refused drag: {cap_reason}")
+                            continue
                         pre_frame = eye_frame.raw_frame
                         try:
                             success = motor.drag(sx, sy, ex, ey)
@@ -335,6 +407,18 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
                 sx, sy = resolved[0] if resolved is not None else (None, None)
                 print(f"[Hand Motor] Scrolling wheel delta={delta}" + (f" at ({sx}, {sy})" if sx is not None else ""))
                 if not dry_run:
+                    allowed, cap_reason = _authorize_live_action(
+                        capability_kernel,
+                        op="scroll",
+                        query=directive.target or step_desc,
+                        source=directive.source,
+                        peak_probability=float(getattr(directive, "confidence", 0.0)),
+                        point_norm=None,
+                        frame=eye_frame.raw_frame,
+                    )
+                    if not allowed:
+                        print(f"[CapabilityKernel] Refused scroll: {cap_reason}")
+                        continue
                     try:
                         success = motor.scroll(delta, x=sx, y=sy)
                         if success:
@@ -352,6 +436,18 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
                 if keys:
                     print(f"[Hand Motor] Sending key/hotkey: {keys}")
                     if not dry_run:
+                        allowed, cap_reason = _authorize_live_action(
+                            capability_kernel,
+                            op="hotkey" if len(keys) > 1 else "press_key",
+                            query="+".join(keys),
+                            source=directive.source,
+                            peak_probability=float(getattr(directive, "confidence", 0.0)),
+                            point_norm=None,
+                            frame=eye_frame.raw_frame,
+                        )
+                        if not allowed:
+                            print(f"[CapabilityKernel] Refused {act}: {cap_reason}")
+                            continue
                         try:
                             if len(keys) == 1:
                                 motor.key(keys[0])
@@ -369,6 +465,18 @@ def run_agent(goal: str, max_turns: int = 10, dry_run: bool = True, api_key: Opt
             elif act in ("type", "type_text") and directive.text:
                 print(f"[Hand Motor] Typing text: '{directive.text}'")
                 if not dry_run:
+                    allowed, cap_reason = _authorize_live_action(
+                        capability_kernel,
+                        op="type_text",
+                        query=directive.target or step_desc,
+                        source=directive.source,
+                        peak_probability=float(getattr(directive, "confidence", 0.0)),
+                        point_norm=None,
+                        frame=eye_frame.raw_frame,
+                    )
+                    if not allowed:
+                        print(f"[CapabilityKernel] Refused type_text: {cap_reason}")
+                        continue
                     try:
                         motor.type_text(directive.text)
                         last_action = f"typed '{directive.text}'"
@@ -481,8 +589,8 @@ def main() -> None:
     parser.add_argument("--goal", type=str, default="Inspect screen and summarize active window state", help="Goal for the agent")
     parser.add_argument("--monitor", action="store_true", help="Run live commentary monitor")
     parser.add_argument("--seconds", type=int, default=8, help="Duration for monitor mode")
-    parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks and keyboard typing (simulation mode)")
-    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing (default: active)")
+    parser.add_argument("--dry-run", action="store_true", help="Bypass physical mouse clicks and keyboard typing (simulation mode; default)")
+    parser.add_argument("--live", action="store_true", help="Authorize live physical Win32 mouse clicks and keyboard typing (default: disabled)")
     parser.add_argument("--api-key", type=str, default=None, help="Authentication key for encrypted .avcs model vault")
     parser.add_argument("--base-url", type=str, default=None, help="Custom LLM API Base URL")
     args = parser.parse_args()
@@ -495,7 +603,7 @@ def main() -> None:
     elif args.monitor:
         run_monitor(args.seconds, api_key=args.api_key)
     else:
-        is_dry_run = bool(args.dry_run and not args.live)
+        is_dry_run = bool(args.dry_run or not args.live)
         run_agent(args.goal, dry_run=is_dry_run, api_key=args.api_key, base_url=args.base_url)
 
 

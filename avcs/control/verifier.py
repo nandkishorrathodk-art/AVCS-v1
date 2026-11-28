@@ -192,15 +192,8 @@ class VisualRippleVerifier:
                     pre_window = w
             except Exception:
                 pass
-        try:
-            import win32gui
-            fg = win32gui.GetForegroundWindow()
-            if fg:
-                t = win32gui.GetWindowText(fg)
-                if t:
-                    pre_window = t
-        except Exception:
-            pass
+        # pure-RGB invariant: no Win32 GetWindowText title scraping
+        # Pre-action window title captured via driver only (above).
 
         # Wait settlement period for UI animations to trigger
         if settle_ms > 0:
@@ -218,15 +211,7 @@ class VisualRippleVerifier:
                     post_window = w
             except Exception:
                 pass
-        try:
-            import win32gui
-            fg = win32gui.GetForegroundWindow()
-            if fg:
-                t = win32gui.GetWindowText(fg)
-                if t:
-                    post_window = t
-        except Exception:
-            pass
+        # pure-RGB invariant: no Win32 GetWindowText title scraping outside driver
 
         foreground_window_changed = bool(
             pre_window is not None

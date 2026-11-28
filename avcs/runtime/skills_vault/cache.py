@@ -215,7 +215,7 @@ class UIStateAnchor:
         """Factory method constructing a UIStateAnchor capturing live desktop state."""
         title = None
         proc = None
-        if verifier is not None:
+        if verifier is not None and not getattr(verifier, "pure_rgb_only", True):
             title = verifier.get_active_window_title() or None
             proc = verifier.get_foreground_process_name() or None
         v_hash = None

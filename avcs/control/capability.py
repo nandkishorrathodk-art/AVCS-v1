@@ -36,12 +36,18 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
-# Mutating operations. Everything not listed is treated as observing and needs
-# no capability grant.
+# Mutating operations. Unknown ops are NOT silently allowed; only operations
+# in OBSERVING_OPS bypass capability grants.
 MUTATING_OPS = frozenset({
-    "click", "double_click", "right_click", "drag",
-    "type", "type_text", "press_key", "scroll",
+    "click", "left_click", "double_click", "triple_click", "right_click",
+    "middle_click", "drag", "left_click_drag", "drag_start", "mouse_move",
+    "type", "type_text", "press_key", "hotkey", "press_hotkey", "key", "scroll",
     "launch_app", "read_file", "list_dir",
+})
+
+OBSERVING_OPS = frozenset({
+    "observe", "observe_target", "finish", "stop", "wait", "ask_user",
+    "read_screen", "screenshot", "list", "stat", "scan", "abort",
 })
 
 # Mutating ops that need a *grounded point*: they aim at a specific place on
@@ -55,7 +61,10 @@ MUTATING_OPS = frozenset({
 # `launch_app` / `read_file` / `list_dir` are also non-grounded: they are named
 # by argument (an app or a path), not located by pixels. Their containment is a
 # separate check (`path_roots` / `allowed_apps`), not the grounding floor.
-POINT_OPS = frozenset({"click", "double_click", "right_click", "drag"})
+POINT_OPS = frozenset({
+    "click", "left_click", "double_click", "triple_click", "right_click",
+    "middle_click", "drag", "left_click_drag", "drag_start", "mouse_move",
+})
 
 
 @dataclass(frozen=True)
@@ -179,9 +188,9 @@ class CapabilityKernel:
     # Policy inspection
     # ------------------------------------------------------------------ #
     def is_granted(self, op: str) -> bool:
-        """Observing ops are always allowed; mutating ops need an explicit grant."""
+        """Observing ops need no grant; mutating and unknown ops require explicit grant."""
         clean = (op or "").strip().lower()
-        if clean not in MUTATING_OPS:
+        if clean in OBSERVING_OPS:
             return True
         return clean in self.granted_ops
 
@@ -216,7 +225,7 @@ class CapabilityKernel:
         # the grounding checks on them was a bug: it made a plain "look at the
         # screen" step fail with "grounder produced no candidate point", which
         # reads as a denied click for an action that was never a click.
-        if clean_op not in MUTATING_OPS:
+        if clean_op in OBSERVING_OPS:
             return CapabilityDecision(
                 allowed=True,
                 reason=f"observing op '{clean_op}' needs no capability grant",
@@ -225,6 +234,17 @@ class CapabilityKernel:
                 confidence=1.0,
                 floor=0.0,
                 margin=1.0,
+            )
+
+        if clean_op not in MUTATING_OPS and clean_op not in self.granted_ops:
+            return CapabilityDecision(
+                allowed=False,
+                reason=f"unknown op '{clean_op}' denied (fail-closed)",
+                op=clean_op,
+                query=query,
+                confidence=0.0,
+                floor=self.min_peak_probability,
+                margin=-self.min_peak_probability,
             )
 
         if not self.is_granted(clean_op):
@@ -268,6 +288,9 @@ class CapabilityKernel:
                     margin=1.0,
                 )
 
+        raw_peak = float(evidence.peak_probability)
+        safe_peak = raw_peak if math.isfinite(raw_peak) else 0.0
+
         if not self.allow_degenerate_frames and frame is not None:
             degenerate, why = frame_is_degenerate(frame)
             if degenerate:
@@ -276,9 +299,9 @@ class CapabilityKernel:
                     reason=f"refusing to ground on a degenerate frame: {why}",
                     op=clean_op,
                     query=query,
-                    confidence=float(evidence.peak_probability),
+                    confidence=safe_peak,
                     floor=self.min_peak_probability,
-                    margin=float(evidence.peak_probability) - self.min_peak_probability,
+                    margin=safe_peak - self.min_peak_probability,
                 )
 
         # Validate that the candidate coordinate is finite and in [0, 1]
@@ -291,9 +314,9 @@ class CapabilityKernel:
                     reason=f"candidate coordinate ({cx}, {cy}) is out of bounds or non-finite",
                     op=clean_op,
                     query=query,
-                    confidence=float(evidence.peak_probability) if math.isfinite(evidence.peak_probability) else 0.0,
+                    confidence=safe_peak,
                     floor=self.min_peak_probability,
-                    margin=0.0,
+                    margin=-self.min_peak_probability,
                 )
 
         if evidence.candidate_point_norm is None:
@@ -302,9 +325,9 @@ class CapabilityKernel:
                 reason="grounder produced no candidate point",
                 op=clean_op,
                 query=query,
-                confidence=float(evidence.peak_probability),
+                confidence=safe_peak,
                 floor=self.min_peak_probability,
-                margin=float(evidence.peak_probability) - self.min_peak_probability,
+                margin=safe_peak - self.min_peak_probability,
             )
 
         peak = float(evidence.peak_probability)

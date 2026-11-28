@@ -199,6 +199,7 @@ class LLMCommand:
     end_coordinate: Optional[Tuple[int, int]] = None
     keys: Optional[List[str]] = None
     scroll_delta: Optional[Tuple[int, int]] = None
+    confidence: float = 0.0
 
 
 class LLMBridge:
@@ -324,6 +325,11 @@ class LLMBridge:
                         if res.get("target") is not None
                         else (user_goal if mapped in _POINTER_COMMANDS else None)
                     )
+                    raw_conf = res.get("peak_probability", res.get("confidence", 0.0))
+                    try:
+                        conf_val = float(raw_conf) if raw_conf is not None and np.isfinite(float(raw_conf)) else 0.0
+                    except (TypeError, ValueError):
+                        conf_val = 0.0
                     return LLMCommand(
                         action=mapped,
                         target=target_val,
@@ -335,6 +341,7 @@ class LLMBridge:
                         end_coordinate=end_coord,
                         keys=keys,
                         scroll_delta=scroll_delta,
+                        confidence=conf_val,
                     )
             except Exception:
                 pass
@@ -357,6 +364,7 @@ class LLMBridge:
                     end_coordinate=_coerce_coord(getattr(act_obj, "end_coordinate", None)),
                     keys=_coerce_keys(getattr(act_obj, "keys", None)),
                     scroll_delta=_coerce_scroll_delta(getattr(act_obj, "scroll_delta", None)),
+                    confidence=float(getattr(act_obj, "confidence", 0.0) or 0.0),
                 )
             except Exception:
                 pass
@@ -389,6 +397,7 @@ class LLMBridge:
             end_coordinate=_coerce_coord(data.get("end_coordinate")),
             keys=_coerce_keys(data.get("keys")),
             scroll_delta=_coerce_scroll_delta(data.get("scroll_delta")),
+            confidence=float(data.get("peak_probability", data.get("confidence", 0.0)) or 0.0),
         )
 
     # ------------------------------------------------------------------ #

@@ -414,8 +414,8 @@ class FastVLAInferenceEngine:
             norm_xy = target_coords[0].detach().cpu().float().numpy().tolist()
             nx = float(np.clip(norm_xy[0], 0.0, 1.0)) if math.isfinite(norm_xy[0]) else 0.5
             ny = float(np.clip(norm_xy[1], 0.0, 1.0)) if math.isfinite(norm_xy[1]) else 0.5
-            pixel_x = int(round(nx * canvas_w))
-            pixel_y = int(round(ny * canvas_h))
+            pixel_x = min(int(round(nx * canvas_w)), canvas_w - 1)
+            pixel_y = min(int(round(ny * canvas_h)), canvas_h - 1)
             coord = [pixel_x, pixel_y]
         else:
             nx, ny = 0.5, 0.5

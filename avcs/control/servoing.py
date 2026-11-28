@@ -594,14 +594,7 @@ class NeuromuscularServoingController:
         active_win = None
         if hasattr(self.driver, "get_foreground_window"):
             active_win = self.driver.get_foreground_window()
-        elif sys.platform == "win32":
-            try:
-                import win32gui
-                hwnd = win32gui.GetForegroundWindow()
-                if hwnd:
-                    active_win = win32gui.GetWindowText(hwnd)
-            except Exception:
-                pass
+        # pure-RGB invariant: no Win32 GetWindowText title scraping outside driver
 
         if foreground_app is not None:
             if active_win is None or foreground_app.lower() not in active_win.lower():

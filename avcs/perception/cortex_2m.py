@@ -178,7 +178,13 @@ class AffordanceHead2M(nn.Module):
 
         hotspots: List[Tuple[float, float, str, float]] = []
         for c in range(1, num_c):  # Skip 0 (static background)
-            class_map = probs[c]
+            # Clear 1-cell border ring before peak selection (prevents spurious
+            # border-ring hotspots from padding artifacts on bright/saturated frames).
+            class_map = probs[c].clone()
+            class_map[0, :] = 0.0
+            class_map[-1, :] = 0.0
+            class_map[:, 0] = 0.0
+            class_map[:, -1] = 0.0
             max_val = float(torch.max(class_map))
             if max_val >= threshold:
                 flat_idx = int(torch.argmax(class_map))

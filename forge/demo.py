@@ -87,15 +87,15 @@ def main() -> None:
         print(f"  last  10 steps : {sum(acc_log[-10:]) / 10:.3f}")
 
     section("5. TEXT GENERATION")
-    from forge.tokenizer import TOKENIZER
+    from forge.tokenizer import EOS, TOKENIZER
     import torch
 
     prompts = ["def add(a, b):", '{"agent": "security", "action":']
     model.eval()
     for p in prompts:
         ids = torch.tensor([TOKENIZER.encode(p, add_bos=True)])
-        out = model.generate(ids, max_new_tokens=60, temperature=0.8, top_k=30)
-        text = TOKENIZER.decode(out[0].tolist())
+        out = model.generate(ids, max_new_tokens=60, temperature=0.8, top_k=30, eos_id=EOS)
+        text = TOKENIZER.decode(out[0, ids.shape[1]:].tolist())
         print(f"\n  prompt : {p!r}")
         print(f"  output : {text[:220]!r}")
 

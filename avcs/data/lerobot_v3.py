@@ -949,13 +949,21 @@ class LeRobotV3Dataset(Dataset):
         return len(self._flattened_steps)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # Clamped indexing mitigating Issue #3513
-        safe_idx = QADoctor.patch_lerobot_3513([idx], len(self._flattened_steps))[0]
-        step = self._flattened_steps[safe_idx]
+        total = len(self._flattened_steps)
+        if idx < 0 or idx >= total:
+            raise IndexError(f"index {idx} out of range for dataset of length {total}")
+        step = self._flattened_steps[idx]
 
         target_h, target_w = self.target_size
         if step.image_tensor is not None:
             image_t = step.image_tensor
+            if image_t.ndim == 3 and tuple(image_t.shape[1:]) != (target_h, target_w):
+                image_t = torch.nn.functional.interpolate(
+                    image_t.unsqueeze(0).float(),
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
         elif step.image_bytes:
             try:
                 import io

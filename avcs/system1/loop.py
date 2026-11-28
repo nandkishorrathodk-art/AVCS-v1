@@ -182,7 +182,7 @@ class OneModelLoop:
         kernel: Optional[CapabilityKernel] = None,
         image_size: Optional[int] = None,
         hand: Optional[Hand] = None,
-        presence_floor: float = 0.5,
+        presence_floor: float = 0.75,
         delta_threshold: float = 0.015,
     ) -> None:
         self.model = model
@@ -191,6 +191,11 @@ class OneModelLoop:
         self.hand = hand or VirtualHand(1920, 1080)
         self.presence_floor = float(presence_floor)
         self.delta_threshold = float(delta_threshold)
+        self._ripple_verifier = VisualRippleVerifier(
+            eye=None,
+            driver=object(),
+            ripple_radius=self.ripple_radius,
+        )
 
     @torch.no_grad()
     def step(
@@ -222,17 +227,37 @@ class OneModelLoop:
         clicked: Optional[tuple[int, int]] = None
         delta: Optional[float] = None
         verified: Optional[bool] = None
+        note = ""
 
         if not decision.allowed:
             note = f"gate refused: {decision.reason}"
         elif action not in MUTATING_OPS:
             note = f"non-mutating op '{action}'; nothing actuated"
         else:
-            clicked = self.hand.click(*point)
+            if action in ("click", "double_click"):
+                if action == "double_click":
+                    try:
+                        clicked = self.hand.click(*point, double=True)
+                    except TypeError:
+                        clicked = self.hand.click(*point)
+                else:
+                    clicked = self.hand.click(*point)
+            elif action in ("type", "type_text") and hasattr(self.hand, "type_text"):
+                self.hand.type_text(query)
+                note = f"typed query '{query}'"
+            elif action == "scroll" and hasattr(self.hand, "scroll"):
+                self.hand.scroll(-120)
+                note = "scrolled"
+            elif action == "press_key" and hasattr(self.hand, "press_key"):
+                self.hand.press_key(query)
+                note = f"pressed key '{query}'"
+            else:
+                clicked = self.hand.click(*point)
+
             if post_frame is not None:
                 delta = float(
-                    VisualRippleVerifier.calculate_local_photometric_delta(
-                        self, point, gray, to_luma(post_frame)
+                    self._ripple_verifier.calculate_local_photometric_delta(
+                        point, gray, to_luma(post_frame)
                     )
                 )
                 verified = delta >= self.delta_threshold
@@ -241,7 +266,7 @@ class OneModelLoop:
                     if verified
                     else "no visual change at target"
                 )
-            else:
+            elif not note:
                 note = "clicked (no post-frame to verify)"
 
         return LoopStep(

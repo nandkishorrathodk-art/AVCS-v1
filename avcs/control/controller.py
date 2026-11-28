@@ -741,21 +741,14 @@ class AVCSController:
         """
         t0 = time.perf_counter()
 
-        # 1. Condition A: OS / Window State Check
+        # 1. Condition A: OS / Window State Check (strictly via pure-RGB-aware motor driver)
         os_verified = True
         active_win = None
         if hasattr(self.motor_driver, "get_foreground_window"):
             active_win = self.motor_driver.get_foreground_window()
-        elif sys.platform == "win32" and not self.force_virtual_motor:
-            try:
-                import win32gui
-                hwnd = win32gui.GetForegroundWindow()
-                if hwnd:
-                    active_win = win32gui.GetWindowText(hwnd)
-            except Exception:
-                pass
 
-        if foreground_app is not None:
+        pure_rgb_only = bool(getattr(self.motor_driver, "pure_rgb_only", True))
+        if foreground_app is not None and not pure_rgb_only:
             if active_win is None or foreground_app.lower() not in active_win.lower():
                 os_verified = False
 
@@ -888,14 +881,6 @@ class AVCSController:
             active_win = None
             if hasattr(self.motor_driver, "get_foreground_window"):
                 active_win = self.motor_driver.get_foreground_window()
-            elif sys.platform == "win32" and not self.force_virtual_motor:
-                try:
-                    import win32gui
-                    hwnd = win32gui.GetForegroundWindow()
-                    if hwnd:
-                        active_win = win32gui.GetWindowText(hwnd)
-                except Exception:
-                    pass
             active_str = (active_win or foreground_app or "").lower()
             is_terminal = any(term in active_str for term in ["terminal", "powershell", "cmd", "bash", "zsh"])
             if is_terminal:
@@ -958,10 +943,11 @@ class AVCSController:
             )
         )
 
+        action_ok = True if not verify_action else verified
         return ActionResult(
             action="type_text",
-            target_query=target_field or "current_focus",
-            success=verified,
+            target_query=target_field or field or "current_focus",
+            success=action_ok,
             verified=verified,
             message=status_msg,
             latency_ms=dt_ms,

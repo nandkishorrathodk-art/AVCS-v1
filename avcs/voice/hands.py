@@ -14,14 +14,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Callable, Optional
 
-# Ops that change machine state; everything else is free to observe. Kept in
-# sync with `avcs.control.capability.MUTATING_OPS`; a test asserts the two sets
-# are equal, so a new op cannot be added to one and forgotten in the other.
-MUTATING_OPS = frozenset({
-    "click", "double_click", "right_click", "drag",
-    "type", "type_text", "press_key", "scroll",
-    "launch_app", "read_file", "list_dir",
-})
+from avcs.control.capability import MUTATING_OPS
 
 
 @dataclasses.dataclass
@@ -163,6 +156,12 @@ def dispatch(
     clean = (op or "").strip().lower()
     if clean == "type":
         clean = "type_text"
+    elif clean == "left_click":
+        clean = "click"
+    elif clean == "left_click_drag":
+        clean = "drag"
+    elif clean in ("hotkey", "press_hotkey", "key"):
+        clean = "press_key"
 
     if clean == "right_click":
         if point is None:

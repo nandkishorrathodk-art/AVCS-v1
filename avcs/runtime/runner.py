@@ -174,9 +174,11 @@ class DualStageVerifier:
         self,
         computer: Optional[WindowsComputer] = None,
         cortex_gate: Optional[VisualCortexGate] = None,
+        pure_rgb_only: bool = False,
     ) -> None:
         self.computer = computer
         self.cortex_gate = cortex_gate
+        self.pure_rgb_only = bool(pure_rgb_only)
         self.user32 = getattr(ctypes.windll, "user32", None) if sys.platform == "win32" else None
 
     def verify_physical(
@@ -464,9 +466,14 @@ class DualStageVerifier:
         """Instantaneous single-pass semantic state check."""
         if t0 is None:
             t0 = time.perf_counter()
-        fg_title = self.get_active_window_title()
-        fg_proc = self.get_foreground_process_name()
-        all_titles = self.get_all_window_titles()
+        if self.pure_rgb_only:
+            fg_title = ""
+            fg_proc = ""
+            all_titles = []
+        else:
+            fg_title = self.get_active_window_title()
+            fg_proc = self.get_foreground_process_name()
+            all_titles = self.get_all_window_titles()
         if fg_title and fg_title not in all_titles:
             all_titles.append(fg_title)
 
@@ -548,7 +555,7 @@ class DualStageVerifier:
                     )
 
             # Check visible window processes as fallback (must own a visible uncloaked window)
-            vis_procs = self.get_visible_window_processes()
+            vis_procs = [] if self.pure_rgb_only else self.get_visible_window_processes()
             for app in apps:
                 app_clean = app.strip().lower()
                 if not app_clean or app_clean in ("the", "a", "an", "window", "app"):
@@ -614,7 +621,7 @@ class DualStageVerifier:
         synthesizes expert recovery actions.
         """
         # 1. Popup Interrupt Check
-        fg_title = self.get_active_window_title().lower()
+        fg_title = "" if self.pure_rgb_only else self.get_active_window_title().lower()
         popup_detected = has_popup or any(
             token in fg_title for token in ("alert", "dialog", "warning", "popup", "confirm", "uac")
         )
@@ -900,7 +907,11 @@ class AceRunner:
         else:
             self.cortex_gate = VisualCortexGate(source="synthetic")
 
-        self.verifier = verifier or DualStageVerifier(computer=self.computer, cortex_gate=self.cortex_gate)
+        self.verifier = verifier or DualStageVerifier(
+            computer=self.computer,
+            cortex_gate=self.cortex_gate,
+            pure_rgb_only=self.pure_rgb_only,
+        )
         if self.cortex_gate is not None and getattr(self.verifier, "cortex_gate", None) is None:
             self.verifier.cortex_gate = self.cortex_gate
         self.trajectory_logger = trajectory_logger or TrajectoryLogger()
