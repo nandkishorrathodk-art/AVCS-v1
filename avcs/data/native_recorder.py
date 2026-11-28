@@ -1357,10 +1357,10 @@ def main() -> None:
             rec.close()
         qa = res["qa_report"]
         print(
-            f"Recording saved -> {args.output} | backend={res['capture_backend']} | "
-            f"capture_fps={res['capture_fps']:.1f} | raw_events={res['raw_events_received']} | "
-            f"cleaned_steps={res['cleaned_step_count']} | pass_rate={qa['pass_rate']:.2f} | "
-            f"atomic_p95_sync={res['atomic_p95_sync_ms']:.2f}ms"
+            f"Recording saved -> {args.output} | format={res['shard_info'].get('format', 'unknown')} | "
+            f"backend={res['capture_backend']} | capture_fps={res['capture_fps']:.1f} | "
+            f"raw_events={res['raw_events_received']} | cleaned_steps={res['cleaned_step_count']} | "
+            f"pass_rate={qa['pass_rate']:.2f} | atomic_p95_sync={res['atomic_p95_sync_ms']:.2f}ms"
         )
         return
 

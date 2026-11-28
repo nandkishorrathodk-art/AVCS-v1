@@ -145,3 +145,19 @@ def test_win_key_mapping_and_non_overwriting_shards(tmp_path):
     assert len(reloaded) == 2
     assert r1["shard_info"]["shards"][0] != r2["shard_info"]["shards"][0]
 
+    # Verify true LeRobot v3.0 parquet+mp4 separation when cv2 & pyarrow are available
+    try:
+        import pyarrow.parquet as pq
+        import cv2  # noqa: F401
+    except Exception:
+        return
+
+    assert r1["shard_info"]["format"] == "parquet+mp4"
+    assert len(r1["shard_info"]["videos"]) == 1
+    assert Path(r1["shard_info"]["videos"][0]).is_file()
+    tbl = pq.read_table(r1["shard_info"]["shards"][0])
+    assert "image_b64" not in tbl.column_names
+    assert "video_relpath" in tbl.column_names
+    assert all(len(step.image_bytes) > 0 for step in reloaded[0])
+
+

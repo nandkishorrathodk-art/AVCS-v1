@@ -1305,9 +1305,17 @@ def save_lerobot_v3_shards(
     root_dir: Union[str, Path],
     episodes_per_file: int = 100,
     start_file_index: int = 0,
+    video_mp4: bool = True,
+    video_fps: float = 30.0,
 ) -> Dict[str, Any]:
-    """Serializes LeRobot v3.0 episodes into canonical chunk-XXX/file-XXX shards."""
+    """Serializes LeRobot v3.0 episodes into chunk-XXX/file-XXX.parquet + optional MP4 video shards.
+
+    When `video_mp4=True` and OpenCV (`cv2`) is installed, step frames are encoded into
+    `videos/chunk-000/<episode_id>.mp4` (`mp4v`, zero B-frames) and Parquet rows store
+    integer `video_frame_index` + `video_relpath` without embedding base64 image blobs.
+    """
     import base64
+    import io
 
     root = Path(root_dir)
     data_dir = root / "data"
@@ -1321,6 +1329,58 @@ def save_lerobot_v3_shards(
     except Exception:
         has_parquet = False
 
+    has_cv2 = False
+    if video_mp4:
+        try:
+            import cv2  # type: ignore[import-not-found]
+            has_cv2 = hasattr(cv2, "VideoWriter")
+        except Exception:
+            has_cv2 = False
+
+    ep_video_relpaths: Dict[str, str] = {}
+    video_files: List[str] = []
+    if has_cv2:
+        videos_dir = root / "videos" / "chunk-000"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        for ep_idx, ep in enumerate(episodes):
+            if not ep:
+                continue
+            ep_id = ep[0].episode_id or f"episode_{ep_idx:04d}"
+            frames_bgr: List[np.ndarray] = []
+            for step in ep:
+                arr_rgb: Optional[np.ndarray] = None
+                if step.image_bytes:
+                    with Image.open(io.BytesIO(step.image_bytes)) as pil_im:
+                        arr_rgb = np.array(pil_im.convert("RGB"), dtype=np.uint8)
+                elif step.image_tensor is not None:
+                    arr_rgb = (
+                        step.image_tensor.detach().cpu().clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0
+                    ).astype(np.uint8)
+                if arr_rgb is not None:
+                    frames_bgr.append(arr_rgb[:, :, ::-1])
+
+            if len(frames_bgr) == len(ep) and len(frames_bgr) > 0:
+                h, w = frames_bgr[0].shape[:2]
+                rel_vid = f"videos/chunk-000/{ep_id}.mp4"
+                abs_vid = root / rel_vid
+                vw = cv2.VideoWriter(
+                    str(abs_vid),
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    float(max(1.0, video_fps)),
+                    (int(w), int(h)),
+                )
+                if vw.isOpened():
+                    for f_idx, fr in enumerate(frames_bgr):
+                        if fr.shape[1] != w or fr.shape[0] != h:
+                            fr = cv2.resize(fr, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
+                        vw.write(fr)
+                        ep[f_idx].video_frame_index = f_idx
+                    vw.release()
+                    ep_video_relpaths[ep_id] = rel_vid
+                    video_files.append(str(abs_vid))
+                else:
+                    vw.release()
+
     shard_files: List[str] = []
     total_rows = 0
     for shard_idx in range(0, max(1, len(episodes)), episodes_per_file):
@@ -1332,7 +1392,11 @@ def save_lerobot_v3_shards(
             for step in ep:
                 d = step.to_dict()
                 raw_b = d.pop("image_bytes", b"")
-                d["image_b64"] = base64.b64encode(raw_b).decode("ascii") if raw_b else ""
+                vid_rel = ep_video_relpaths.get(step.episode_id, "")
+                if vid_rel:
+                    d["video_relpath"] = vid_rel
+                else:
+                    d["image_b64"] = base64.b64encode(raw_b).decode("ascii") if raw_b else ""
                 rows.append(d)
                 total_rows += 1
 
@@ -1349,18 +1413,24 @@ def save_lerobot_v3_shards(
         shard_files.append(str(shard_path))
 
     return {
-        "format": "parquet" if has_parquet else "jsonl",
+        "format": "parquet+mp4" if (has_parquet and video_files) else ("parquet" if has_parquet else "jsonl"),
         "shards": shard_files,
+        "videos": video_files,
         "episode_count": len(episodes),
         "total_rows": total_rows,
     }
 
 
-def load_lerobot_v3_shards(root_dir: Union[str, Path]) -> List[List[LeRobotV3TrajectoryEpisode]]:
-    """Loads LeRobot v3.0 chunked Parquet or JSONL shards back into grouped episodes."""
+def load_lerobot_v3_shards(
+    root_dir: Union[str, Path],
+    decode_video_frames: bool = True,
+) -> List[List[LeRobotV3TrajectoryEpisode]]:
+    """Loads LeRobot v3.0 chunked Parquet/MP4 or JSONL shards back into grouped episodes."""
     import base64
+    import io
 
-    data_dir = Path(root_dir) / "data"
+    root = Path(root_dir)
+    data_dir = root / "data"
     parquet_files = sorted(data_dir.rglob("*.parquet"))
     jsonl_files = sorted(data_dir.rglob("*.jsonl"))
 
@@ -1377,11 +1447,41 @@ def load_lerobot_v3_shards(root_dir: Union[str, Path]) -> List[List[LeRobotV3Tra
                     if line.strip():
                         rows.append(json.loads(line))
 
+    video_frame_cache: Dict[str, List[bytes]] = {}
+    if decode_video_frames and any(row.get("video_relpath") for row in rows):
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            for rel in {str(row.get("video_relpath") or "") for row in rows if row.get("video_relpath")}:
+                vid_path = root / rel
+                if not vid_path.is_file():
+                    continue
+                cap = cv2.VideoCapture(str(vid_path))
+                frames_jpg: List[bytes] = []
+                while True:
+                    ok, frame_bgr = cap.read()
+                    if not ok:
+                        break
+                    pil_rgb = Image.fromarray(frame_bgr[:, :, ::-1], mode="RGB")
+                    buf = io.BytesIO()
+                    pil_rgb.save(buf, format="JPEG", quality=85)
+                    frames_jpg.append(buf.getvalue())
+                cap.release()
+                video_frame_cache[rel] = frames_jpg
+        except Exception:
+            pass
+
     grouped: Dict[str, List[LeRobotV3TrajectoryEpisode]] = {}
     for row in rows:
+        vid_rel = str(row.pop("video_relpath", "") or "")
         b64 = row.pop("image_b64", "")
         if b64:
             row["image_bytes"] = base64.b64decode(b64)
+        elif vid_rel and vid_rel in video_frame_cache:
+            cached_list = video_frame_cache[vid_rel]
+            if cached_list:
+                f_idx = QADoctor.patch_lerobot_3513([int(row.get("video_frame_index", 0))], len(cached_list))[0]
+                row["image_bytes"] = cached_list[f_idx]
         ep_step = LeRobotV3TrajectoryEpisode.from_dict(row)
         grouped.setdefault(ep_step.episode_id, []).append(ep_step)
     return list(grouped.values())
