@@ -55,6 +55,10 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
+from avcs.models.gui_actor_singlepass import (
+    MSGUIActorSinglePassVLA,
+    preserve_aspect_resize,
+)
 from avcs.models.vla_cortex import (
     ACTION_VOCAB_10,
     GUIActorPatchPointer,
@@ -1070,12 +1074,14 @@ class GroundingDataset(Dataset):
         max_elements_per_image: int = 5,
         dataset_source: str = "hf_showui",
         cache_dir: Optional[str] = None,
+        preserve_aspect: bool = False,
     ) -> None:
         self.target_size = target_size
         self.allow_synthetic_fallback = allow_synthetic_fallback
         self.max_elements_per_image = max_elements_per_image
         self.dataset_source = dataset_source
         self.cache_dir = cache_dir or os.path.join(repo_root, "data", "cache")
+        self.preserve_aspect = bool(preserve_aspect)
         self.samples: List[Dict[str, Any]] = []
         self.leakage_filtered_count = 0
 
@@ -1752,9 +1758,12 @@ class GroundingDataset(Dataset):
             return None
 
         if jpeg_bytes is None:
-            pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+            if getattr(self, "preserve_aspect", False):
+                pil_resized = preserve_aspect_resize(rgb_img, max_w=self.target_size[1], max_h=self.target_size[0])
+            else:
+                pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
             buf = io.BytesIO()
-            pil_resized.save(buf, format="JPEG", quality=85)
+            pil_resized.save(buf, format="JPEG", quality=88)
             jpeg_bytes = buf.getvalue()
 
         return {
@@ -1838,9 +1847,12 @@ class GroundingDataset(Dataset):
                     continue
 
                 # Encode resized JPEG once per screenshot, reuse across its capped elements
-                pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
+                if getattr(self, "preserve_aspect", False):
+                    pil_resized = preserve_aspect_resize(rgb_img, max_w=self.target_size[1], max_h=self.target_size[0])
+                else:
+                    pil_resized = rgb_img.resize((self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR)
                 buf = io.BytesIO()
-                pil_resized.save(buf, format="JPEG", quality=85)
+                pil_resized.save(buf, format="JPEG", quality=88)
                 jpeg_bytes = buf.getvalue()
 
                 # Deterministic element sampling if screenshot has dozens of boxes
@@ -2073,7 +2085,9 @@ class GroundingDataset(Dataset):
         if img_tensor is None and img_bytes is not None:
             try:
                 pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                if pil_img.size != (self.target_size[1], self.target_size[0]):
+                if getattr(self, "preserve_aspect", False):
+                    pil_img = preserve_aspect_resize(pil_img, max_w=self.target_size[1], max_h=self.target_size[0])
+                elif pil_img.size != (self.target_size[1], self.target_size[0]):
                     pil_img = pil_img.resize(
                         (self.target_size[1], self.target_size[0]), Image.Resampling.BILINEAR
                     )
@@ -2682,7 +2696,18 @@ def run_ddp_training(
     grad_accum_steps: int = 1,
     micro_batch_size: int = 0,
     resume_checkpoint: Optional[str] = None,
+    model_backend: str = "custom",
+    preserve_aspect: Optional[bool] = None,
 ) -> None:
+    use_preserve_aspect = (
+        bool(preserve_aspect)
+        if preserve_aspect is not None
+        else (model_backend == "gui_actor_3b" and int(batch_size) == 1)
+    )
+    if int(batch_size) > 1 and use_preserve_aspect:
+        logger.warning("preserve_aspect requires batch_size=1 for PyTorch default collation; falling back to uniform target_size.")
+        use_preserve_aspect = False
+
     # 1. Ingest & cache dataset BEFORE initializing NCCL / DDP so long HF streams never hit NCCL timeouts
     full_dataset = GroundingDataset(
         dataset_paths=dataset_paths,
@@ -2694,6 +2719,7 @@ def run_ddp_training(
         max_elements_per_image=max_elements_per_image,
         dataset_source=dataset_source,
         cache_dir=cache_dir,
+        preserve_aspect=use_preserve_aspect,
     )
     train_dataset, val_dataset = full_dataset.split_train_val(val_ratio=0.10)
     if max_train_samples is not None and len(train_dataset) > max_train_samples:
@@ -2719,18 +2745,28 @@ def run_ddp_training(
 
     device = torch.device(f"cuda:{local_rank}" if (torch.cuda.is_available() and not dry_run) else "cpu")
 
-    # 2. Initialize Model with 512-dim widened projections (+ optional top-N LoRA)
-    model = QwenGUIActorModel(
-        dry_run=dry_run,
-        pointer_hidden_dim=512,
-        query_dim=512,
-        backbone_dtype=backbone_dtype,
-        max_pixels=max_pixels,
-        use_token_pruning=use_token_pruning,
-        use_rolling_kv=use_rolling_kv,
-        lora_layers=lora_layers,
-        lora_r=lora_r,
-    )
+    # 2. Initialize Model (custom QwenGUIActorModel or 0-generate GUI-Actor-3B + ParallelActionHeads)
+    if model_backend == "gui_actor_3b":
+        model: nn.Module = MSGUIActorSinglePassVLA(
+            dry_run=dry_run,
+            max_pixels=max_pixels,
+            backbone_dtype=backbone_dtype,
+            lora_layers=lora_layers,
+            lora_r=lora_r,
+            train_pointer_head=True,
+        )
+    else:
+        model = QwenGUIActorModel(
+            dry_run=dry_run,
+            pointer_hidden_dim=512,
+            query_dim=512,
+            backbone_dtype=backbone_dtype,
+            max_pixels=max_pixels,
+            use_token_pruning=use_token_pruning,
+            use_rolling_kv=use_rolling_kv,
+            lora_layers=lora_layers,
+            lora_r=lora_r,
+        )
     resumed_epoch = 0
     if resume_checkpoint:
         resume_meta = load_checkpoint_into_model(model, resume_checkpoint)
@@ -3202,11 +3238,12 @@ def run_ddp_training(
             adapter_state = {
                 k: v
                 for k, v in unwrapped.state_dict().items()
-                if (not k.startswith("backbone.") or ".lora_" in k)
+                if (not k.startswith("backbone.") or ".lora_" in k or "multi_patch_pointer_head." in k)
             }
             torch.save({
                 "epoch": global_epoch,
                 "resumed_from_epoch": resumed_epoch,
+                "model_backend": model_backend,
                 "model_state_dict": adapter_state,
                 "lora_config": getattr(unwrapped, "lora_config", None),
                 "stats": stats,
@@ -3281,6 +3318,14 @@ def main():
     parser.add_argument("--dataset-paths", nargs="*", default=None, help="Explicit dataset JSONL / directory paths")
     parser.add_argument("--enable-token-pruning", action="store_true", help="Enable ShowUI token pruner (PAUSED by default)")
     parser.add_argument("--enable-rolling-kv", action="store_true", help="Enable rolling KV memory (PAUSED by default)")
+    parser.add_argument(
+        "--model-backend",
+        type=str,
+        default="custom",
+        choices=["custom", "gui_actor_3b"],
+        help="Model architecture: 'custom' (Qwen2.5-VL + external GUIActorPatchPointer) or 'gui_actor_3b' (0-generate MS GUI-Actor-3B + ParallelActionHeads)",
+    )
+    parser.add_argument("--preserve-aspect", action="store_true", help="Preserve native image aspect ratio (requires batch_size=1)")
     args = parser.parse_args()
 
     # 0. Pre-cache dataset only mode (CPU-only, zero GPU/DDP overhead)
@@ -3366,6 +3411,8 @@ def main():
         grad_accum_steps=args.grad_accum_steps,
         micro_batch_size=args.micro_batch_size,
         resume_checkpoint=args.resume_checkpoint,
+        model_backend=args.model_backend,
+        preserve_aspect=(True if args.preserve_aspect else None),
     )
 
 

@@ -96,14 +96,19 @@ def run_evaluation(
     backbone_dtype: str = "auto",
     max_pixels: int = 560 * 896,
     allow_untrained: bool = False,
+    legacy_ms_generate: bool = False,
 ) -> Dict[str, Any]:
     print("=" * 80)
     print("  AVCS STEP 6.2: HELD-OUT BENCHMARK EVALUATION (showdown-clicks-dev)  ")
-    model_label = f"Reference Baseline: {model_name}" if "gui-actor" in model_name.lower() or "microsoft" in model_name.lower() else "Model: Qwen2.5-VL-3B + GUIActorPatchPointer"
+    is_ms_gui_actor = "gui-actor" in model_name.lower() or "microsoft" in model_name.lower()
+    if is_ms_gui_actor:
+        mode_tag = "legacy generate()" if legacy_ms_generate else "0-generate single-pass"
+        model_label = f"GUI-Actor-3B ({model_name}, {mode_tag})"
+    else:
+        model_label = "Model: Qwen2.5-VL-3B + GUIActorPatchPointer"
     print(f"  {model_label}   ")
     print("=" * 80)
 
-    is_ms_gui_actor = "gui-actor" in model_name.lower() or "microsoft" in model_name.lower()
     if not is_ms_gui_actor and not Path(checkpoint_path).exists() and not allow_untrained:
         raise FileNotFoundError(
             f"Fail-closed eval gate: checkpoint not found at '{checkpoint_path}'. "
@@ -144,9 +149,11 @@ def run_evaluation(
     ms_tokenizer = None
     ms_processor = None
     model = None
+    ms_generate_calls = 0
+    use_legacy_ms_gen = bool(is_ms_gui_actor and legacy_ms_generate)
 
-    if is_ms_gui_actor:
-        print(f"\n[BENCHMARK] Loading Microsoft Reference Baseline: {model_name}...")
+    if use_legacy_ms_gen:
+        print(f"\n[BENCHMARK] Loading Microsoft Reference Baseline (legacy generate): {model_name}...")
         # Patch transformers.trainer.ALL_LAYERNORM_LAYERS if missing on newer transformers versions
         try:
             import transformers.trainer
@@ -463,6 +470,30 @@ def run_evaluation(
                 kwargs["past_key_values"] = kwargs.pop("cache")
             return orig_forward(*args, **kwargs)
         ms_model.forward = safe_forward
+    elif is_ms_gui_actor:
+        from avcs.models.gui_actor_singlepass import MSGUIActorSinglePassVLA
+
+        print(f"Initializing MSGUIActorSinglePassVLA (0-generate single-pass): {model_name} on {device}...")
+        model = MSGUIActorSinglePassVLA(
+            model_name=model_name,
+            max_pixels=max_pixels,
+            backbone_dtype=backbone_dtype,
+            dry_run=not torch.cuda.is_available(),
+        ).to(device).eval()
+        ckpt_file = Path(checkpoint_path) if checkpoint_path else None
+        if ckpt_file is not None and ckpt_file.is_file():
+            raw_ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+            if isinstance(raw_ckpt, dict) and raw_ckpt.get("model_backend") == "gui_actor_3b":
+                from train_vla_gui_actor import load_checkpoint_into_model
+
+                meta = load_checkpoint_into_model(model, ckpt_file)
+                print(f"Restored MSGUIActorSinglePassVLA checkpoint ({meta['loaded_tensors']} tensors).")
+            else:
+                print(
+                    f"[BENCHMARK] Ignoring default/incompatible checkpoint {ckpt_file} "
+                    f"(model_backend={raw_ckpt.get('model_backend') if isinstance(raw_ckpt, dict) else None}); "
+                    "running pretrained GUI-Actor-3B single-pass."
+                )
     else:
         print(f"Initializing QwenGUIActorModel on {device}...")
         model = QwenGUIActorModel(
@@ -543,7 +574,7 @@ def run_evaluation(
             model_img = pil_img
 
         t0 = time.perf_counter()
-        if is_ms_gui_actor:
+        if use_legacy_ms_gen:
             img_entry: Dict[str, Any] = {"type": "image", "image": model_img}
             if max_pixels > 0:
                 img_entry["min_pixels"] = min(256 * 28 * 28, int(max_pixels))
@@ -713,7 +744,7 @@ def run_evaluation(
         "checkpoint": model_name if is_ms_gui_actor else str(checkpoint_path),
         "max_pixels": int(max_pixels),
         "inference_mode": (
-            ("single_pass_pointer" if ms_generate_calls == 0 else f"generate_calls_{ms_generate_calls}")
+            (f"generate_calls_{ms_generate_calls}" if use_legacy_ms_gen else "single_pass_pointer_0_gen")
             if is_ms_gui_actor
             else "single_pass_pointer"
         ),
@@ -792,6 +823,7 @@ def main():
     parser.add_argument("--backbone-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"], help="Frozen Qwen2.5-VL backbone precision")
     parser.add_argument("--max-pixels", type=int, default=560 * 896, help="Max visual pixels for Qwen2.5-VL processor (default: 501760; 0=uncapped)")
     parser.add_argument("--allow-untrained", action="store_true", help="Explicitly allow evaluating un-finetuned weights if --checkpoint is missing")
+    parser.add_argument("--legacy-ms-generate", action="store_true", help="Use upstream gui_actor.inference(use_placeholder=True) generate() wrapper instead of 0-generate single-pass")
     args = parser.parse_args()
 
     use_native = False if args.resize_canvas else args.native_size
@@ -808,6 +840,7 @@ def main():
         backbone_dtype=args.backbone_dtype,
         max_pixels=args.max_pixels,
         allow_untrained=args.allow_untrained,
+        legacy_ms_generate=args.legacy_ms_generate,
     )
 
 

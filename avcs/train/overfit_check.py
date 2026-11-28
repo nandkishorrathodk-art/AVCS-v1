@@ -210,6 +210,7 @@ def run_phase3_overfit_check(
     dataset_paths: Sequence[Union[str, Path]],
     *,
     checkpoint_path: Optional[str] = None,
+    model_backend: str = "custom",
     dry_run: bool = False,
     steps: int = 80,
     lr: float = 1e-3,
@@ -225,6 +226,7 @@ def run_phase3_overfit_check(
     train_mod = _load_train_vla_module()
     QwenGUIActorModel = train_mod.QwenGUIActorModel
     load_checkpoint_into_model = train_mod.load_checkpoint_into_model
+    from avcs.models.gui_actor_singlepass import MSGUIActorSinglePassVLA
 
     coverage = audit_recorded_coverage(dataset_paths, min_dpi_scale=min_dpi_scale)
     episodes = coverage["episodes"]
@@ -244,7 +246,16 @@ def run_phase3_overfit_check(
     use_dry = bool(dry_run or not torch.cuda.is_available())
     device = torch.device("cuda" if (torch.cuda.is_available() and not use_dry) else "cpu")
 
-    if use_dry:
+    if model_backend == "gui_actor_3b":
+        model = MSGUIActorSinglePassVLA(
+            dry_run=use_dry,
+            max_pixels=1003520,
+            lora_layers=0 if use_dry else 8,
+            train_pointer_head=True,
+        )
+        if checkpoint_path and not use_dry:
+            load_checkpoint_into_model(model, checkpoint_path)
+    elif use_dry:
         model = QwenGUIActorModel(
             dry_run=True,
             backbone_hidden_dim=512,
@@ -402,6 +413,7 @@ def run_phase3_overfit_check(
 
     report = {
         "phase": "phase3_gate3_overfit_check",
+        "model_backend": model_backend,
         "dry_run": use_dry,
         "checkpoint": checkpoint_path,
         "class_balanced": bool(class_balanced),
@@ -450,7 +462,8 @@ def main() -> None:
             "runs/recordings/demo_19",
         ],
     )
-    parser.add_argument("--checkpoint", type=str, default=None, help="Optional epoch_3.pt checkpoint for CUDA Gate 3")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint for CUDA Gate 3")
+    parser.add_argument("--model-backend", type=str, default="custom", choices=["custom", "gui_actor_3b"])
     parser.add_argument("--dry-run", action="store_true", help="Run CPU dry-run verification using mock backbone")
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -464,6 +477,7 @@ def main() -> None:
     res = run_phase3_overfit_check(
         args.dataset_paths,
         checkpoint_path=args.checkpoint,
+        model_backend=args.model_backend,
         dry_run=args.dry_run,
         steps=args.steps,
         lr=args.lr,
