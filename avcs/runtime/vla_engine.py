@@ -57,6 +57,13 @@ class FastVLAInferenceEngine:
         enable_cuda_graphs: bool = False,
         max_history_steps: int = 16,
         canonical_resolution: Tuple[int, int] = (400, 640),
+        checkpoint_path: Optional[str] = None,
+        dry_run: bool = True,
+        max_pixels: int = 560 * 896,
+        coord_strategy: str = "sharpened",
+        temperature: float = 0.05,
+        min_peak_probability: float = 0.75,
+        fail_closed_wait: bool = False,
     ) -> None:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -68,6 +75,12 @@ class FastVLAInferenceEngine:
         self.enable_cuda_graphs = enable_cuda_graphs and torch.cuda.is_available()
         self.max_history_steps = max_history_steps
         self.canonical_resolution = canonical_resolution
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_loaded = False
+        self.coord_strategy = (coord_strategy or "sharpened").strip().lower()
+        self.temperature = float(temperature)
+        self.min_peak_probability = float(min_peak_probability)
+        self.fail_closed_wait = bool(fail_closed_wait)
 
         self.session_memories: OrderedDict[str, RollingMemoryState] = OrderedDict()
         self._memory_lock = threading.Lock()
@@ -81,14 +94,24 @@ class FastVLAInferenceEngine:
         if model is not None:
             self.model = model
         else:
-            self.model = self._build_default_model()
+            self.model = self._build_default_model(
+                dry_run=dry_run,
+                max_pixels=max_pixels,
+                checkpoint_path=checkpoint_path,
+            )
 
-        self.model.to(self.device)
+        is_qwen_actor = hasattr(self.model, "extract_features") and hasattr(self.model, "patch_proj")
+        if getattr(self.model, "load_in_4bit", False):
+            for m_name, child in self.model.named_children():
+                if m_name != "backbone":
+                    child.to(self.device)
+        else:
+            self.model.to(self.device)
         self.model.eval()
 
-        # Precision handling
+        # Precision handling: keep QwenGUIActorModel adapter heads in FP32 while backbone uses auto FP16/BF16
         if self.device.type == "cuda":
-            if self.precision in ("fp16", "half"):
+            if self.precision in ("fp16", "half") and not is_qwen_actor:
                 self.model = self.model.half()
             elif self.precision in ("fp8", "e4m3"):
                 self._apply_fp8_quantization()
@@ -107,7 +130,7 @@ class FastVLAInferenceEngine:
             if enable_rolling_kv
             else None
         )
-        if self.device.type == "cuda" and self.precision in ("fp16", "half"):
+        if self.device.type == "cuda" and self.precision in ("fp16", "half") and not is_qwen_actor:
             if self.pruner is not None:
                 self.pruner = self.pruner.half()
             if self.memory is not None:
@@ -116,32 +139,83 @@ class FastVLAInferenceEngine:
         logger.info(
             f"FastVLAInferenceEngine initialized on {self.device} (precision={self.precision}, "
             f"token_pruning={self.enable_token_pruning}, rolling_kv={self.enable_rolling_kv}, "
-            f"cuda_graphs={self.enable_cuda_graphs})"
+            f"cuda_graphs={self.enable_cuda_graphs}, ckpt_loaded={self.checkpoint_loaded})"
         )
 
-    def _build_default_model(self) -> nn.Module:
-        """Constructs a high-performance default GUI-Actor model with 512-dim widened heads."""
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        *,
+        device: Optional[str] = None,
+        precision: str = "fp16",
+        dry_run: bool = False,
+        max_pixels: int = 560 * 896,
+        enable_token_pruning: bool = False,
+        target_token_budget: int = 400,
+        enable_rolling_kv: bool = True,
+        coord_strategy: str = "sharpened",
+        temperature: float = 0.05,
+        min_peak_probability: float = 0.75,
+        fail_closed_wait: bool = True,
+    ) -> "FastVLAInferenceEngine":
+        """Constructs a production FastVLAInferenceEngine from a trained Step-6.2 LoRA/head checkpoint."""
+        return cls(
+            device=device,
+            precision=precision,
+            dry_run=dry_run,
+            max_pixels=max_pixels,
+            checkpoint_path=checkpoint_path,
+            enable_token_pruning=enable_token_pruning,
+            target_token_budget=target_token_budget,
+            enable_rolling_kv=enable_rolling_kv,
+            coord_strategy=coord_strategy,
+            temperature=temperature,
+            min_peak_probability=min_peak_probability,
+            fail_closed_wait=fail_closed_wait,
+        )
+
+    def _build_default_model(
+        self,
+        *,
+        dry_run: bool = True,
+        max_pixels: int = 560 * 896,
+        checkpoint_path: Optional[str] = None,
+    ) -> nn.Module:
+        """Constructs GUI-Actor model with 512-dim widened heads and optional trained checkpoint."""
+        from pathlib import Path
+        import importlib.util
+
+        if checkpoint_path is not None and not Path(checkpoint_path).is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
         try:
-            from pathlib import Path
-            import importlib.util
             train_script = Path(__file__).resolve().parent.parent.parent / "kaggle" / "train_vla_gui_actor.py"
             if train_script.exists():
-                spec = importlib.util.spec_from_file_location("train_vla_gui_actor", train_script)
+                spec = importlib.util.spec_from_file_location("avcs_kaggle_train_vla_gui_actor", train_script)
+                assert spec is not None and spec.loader is not None
                 mod = importlib.util.module_from_spec(spec)
-                sys.modules["train_vla_gui_actor"] = mod
+                sys.modules[spec.name] = mod
                 spec.loader.exec_module(mod)
-                return mod.QwenGUIActorModel(
-                    dry_run=True,
+                model = mod.QwenGUIActorModel(
+                    dry_run=dry_run,
                     pointer_hidden_dim=512,
                     query_dim=512,
+                    max_pixels=max_pixels,
+                    use_token_pruning=self.enable_token_pruning,
+                    target_token_budget=self.target_token_budget,
+                    use_rolling_kv=self.enable_rolling_kv,
+                    max_history_steps=self.max_history_steps,
                 )
-            from kaggle.train_vla_gui_actor import QwenGUIActorModel
-            return QwenGUIActorModel(
-                dry_run=True,
-                pointer_hidden_dim=512,
-                query_dim=512,
-            )
-        except Exception:
+                if checkpoint_path is not None:
+                    mod.load_checkpoint_into_model(model, checkpoint_path)
+                    self.checkpoint_loaded = True
+                return model
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            if checkpoint_path is not None:
+                raise RuntimeError(f"Failed to load QwenGUIActorModel checkpoint {checkpoint_path}: {exc}") from exc
             # Standalone fallback model
             class StandaloneFastModel(nn.Module):
                 def __init__(self):
@@ -282,20 +356,22 @@ class FastVLAInferenceEngine:
                 except TypeError:
                     out = self.model(tensor)
 
-        # 5. Extract predicted discrete action and continuous coordinates (dict or dataclass)
+        # 5. Extract predicted discrete action, calibrated peak_probability, and coordinates
         if isinstance(out, dict):
             action_names = out.get("action_names") or out.get("action_types")
             action_logits = out.get("action_logits")
-            target_coords = out.get("subpixel_coords")
-            if target_coords is None:
-                target_coords = out.get("target_coords")
+            attn_logits = out.get("attn_logits")
+            patch_coords = out.get("patch_coords")
+            subpixel_coords = out.get("subpixel_coords")
+            soft_coords = out.get("target_coords")
             single_action_type = out.get("action_type")
         else:
             action_names = getattr(out, "action_types", None) or getattr(out, "action_names", None)
             action_logits = getattr(out, "action_logits", None)
-            target_coords = getattr(out, "subpixel_coords", None)
-            if target_coords is None:
-                target_coords = getattr(out, "target_coords", None)
+            attn_logits = getattr(out, "attn_logits", None)
+            patch_coords = getattr(out, "patch_coords", None)
+            subpixel_coords = getattr(out, "subpixel_coords", None)
+            soft_coords = getattr(out, "target_coords", None)
             single_action_type = getattr(out, "action_type", None)
 
         if action_names and len(action_names) > 0:
@@ -308,13 +384,41 @@ class FastVLAInferenceEngine:
         else:
             act_name = "left_click"
 
+        peak_probability = 1.0
+        sharpened_coords = None
+        if attn_logits is not None:
+            logits_2d = attn_logits.squeeze(1) if (attn_logits.dim() == 3 and attn_logits.shape[1] == 1) else attn_logits.view(attn_logits.shape[0], -1)
+            probs = F.softmax(logits_2d.float() / max(self.temperature, 1e-4), dim=-1)
+            peak_probability = float(probs[0].max().item())
+            if patch_coords is not None:
+                pcoords_3d = patch_coords.unsqueeze(0).expand(logits_2d.shape[0], -1, -1) if patch_coords.dim() == 2 else patch_coords
+                sharpened_coords = torch.bmm(probs.unsqueeze(1), pcoords_3d.float()).squeeze(1)
+
+        if self.coord_strategy == "subpixel" and subpixel_coords is not None:
+            target_coords = subpixel_coords
+        elif self.coord_strategy == "sharpened" and sharpened_coords is not None:
+            target_coords = sharpened_coords
+        else:
+            target_coords = sharpened_coords if sharpened_coords is not None else (subpixel_coords if subpixel_coords is not None else soft_coords)
+
+        # Fail-closed capability kernel safety check on point actions
+        point_ops = {"left_click", "right_click", "double_click", "drag"}
+        authorized = math.isfinite(peak_probability) and (
+            (act_name not in point_ops) or (peak_probability >= self.min_peak_probability)
+        )
+        if self.fail_closed_wait and not authorized:
+            act_name = "wait"
+
         # Coordinates normalized [0, 1] mapped to canvas pixels
         if target_coords is not None:
-            norm_xy = target_coords[0].detach().cpu().numpy().tolist()
-            pixel_x = int(round(np.clip(norm_xy[0], 0.0, 1.0) * canvas_w))
-            pixel_y = int(round(np.clip(norm_xy[1], 0.0, 1.0) * canvas_h))
+            norm_xy = target_coords[0].detach().cpu().float().numpy().tolist()
+            nx = float(np.clip(norm_xy[0], 0.0, 1.0)) if math.isfinite(norm_xy[0]) else 0.5
+            ny = float(np.clip(norm_xy[1], 0.0, 1.0)) if math.isfinite(norm_xy[1]) else 0.5
+            pixel_x = int(round(nx * canvas_w))
+            pixel_y = int(round(ny * canvas_h))
             coord = [pixel_x, pixel_y]
         else:
+            nx, ny = 0.5, 0.5
             coord = [canvas_w // 2, canvas_h // 2]
 
         dt_ms = (time.perf_counter() - t0) * 1000.0
@@ -324,6 +428,11 @@ class FastVLAInferenceEngine:
         return {
             "action": act_name,
             "coordinate": coord,
+            "normalized_xy": [round(nx, 6), round(ny, 6)],
+            "peak_probability": round(peak_probability, 6) if math.isfinite(peak_probability) else 0.0,
+            "authorized": authorized,
+            "coord_strategy": self.coord_strategy,
+            "checkpoint_loaded": self.checkpoint_loaded,
             "raw_response": raw_response,
             "latency_ms": round(dt_ms, 2),
             "token_count": self.target_token_budget if self.enable_token_pruning else (gh * gw),

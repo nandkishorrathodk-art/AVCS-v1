@@ -417,6 +417,82 @@ class TestDeploymentSpecAndTensorRT(unittest.TestCase):
         self.assertTrue(summary["within_10_8ms_capture_envelope"])
         self.assertFalse(summary["token_pruning_wired"])
 
+    def test_fast_vla_engine_from_checkpoint_dry_run_and_missing_fail_closed(self):
+        """Verifies from_checkpoint loads head tensors cleanly and fails closed on missing files."""
+        import tempfile
+        import torch
+
+        with self.assertRaises(FileNotFoundError):
+            FastVLAInferenceEngine.from_checkpoint("non_existent_checkpoint_xyz.pt", dry_run=True)
+
+        base = FastVLAInferenceEngine(precision="fp32", dry_run=True)
+        with torch.no_grad():
+            base.model.patch_proj[0].bias.fill_(0.25)
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            ckpt_p = os.path.join(tmpd, "test_ckpt.pt")
+            torch.save(
+                {
+                    "epoch": 3,
+                    "model_state_dict": {k: v for k, v in base.model.state_dict().items() if not k.startswith("backbone.")},
+                    "lora_config": None,
+                },
+                ckpt_p,
+            )
+            loaded = FastVLAInferenceEngine.from_checkpoint(ckpt_p, precision="fp32", dry_run=True)
+            self.assertTrue(loaded.checkpoint_loaded)
+            self.assertTrue(torch.allclose(loaded.model.patch_proj[0].bias, torch.full_like(loaded.model.patch_proj[0].bias, 0.25)))
+            res = loaded.act(np.zeros((200, 320, 3), dtype=np.uint8), instruction="Click Save")
+            self.assertTrue(res["checkpoint_loaded"])
+            self.assertIn("peak_probability", res)
+            self.assertIn("authorized", res)
+            self.assertIn("normalized_xy", res)
+
+    def test_fast_vla_engine_fail_closed_wait_on_low_peak_probability(self):
+        """Verifies fail_closed_wait forces 'wait' and authorized=False when peak_probability < 0.75."""
+        import torch
+
+        class ToyConfidentModel(torch.nn.Module):
+            def __init__(self, confident: bool) -> None:
+                super().__init__()
+                self.confident = confident
+
+            def forward(self, images, **kwargs):
+                b = images.shape[0]
+                logits = torch.zeros(b, 16)
+                if self.confident:
+                    logits[:, 5] = 20.0
+                pcoords = torch.rand(16, 2)
+                act_logits = torch.tensor([[10.0] + [-10.0] * 9] * b)
+                return {
+                    "action_logits": act_logits,
+                    "attn_logits": logits,
+                    "patch_coords": pcoords,
+                    "subpixel_coords": torch.tensor([[0.25, 0.25]] * b),
+                }
+
+        low_eng = FastVLAInferenceEngine(
+            model=ToyConfidentModel(confident=False),
+            precision="fp32",
+            fail_closed_wait=True,
+            min_peak_probability=0.75,
+        )
+        res_low = low_eng.act(np.zeros((100, 100, 3), dtype=np.uint8), instruction="Click X")
+        self.assertEqual(res_low["action"], "wait")
+        self.assertFalse(res_low["authorized"])
+        self.assertLess(res_low["peak_probability"], 0.75)
+
+        hi_eng = FastVLAInferenceEngine(
+            model=ToyConfidentModel(confident=True),
+            precision="fp32",
+            fail_closed_wait=True,
+            min_peak_probability=0.75,
+        )
+        res_hi = hi_eng.act(np.zeros((100, 100, 3), dtype=np.uint8), instruction="Click X")
+        self.assertEqual(res_hi["action"], "left_click")
+        self.assertTrue(res_hi["authorized"])
+        self.assertGreaterEqual(res_hi["peak_probability"], 0.75)
+
 
 if __name__ == "__main__":
     unittest.main()
