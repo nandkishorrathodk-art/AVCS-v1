@@ -2435,6 +2435,7 @@ class UnifiedMultiTaskLoss(nn.Module):
         pred_coords: Optional[torch.Tensor] = None,
         target_patch_idx: Optional[torch.Tensor] = None,
         target_bboxes: Optional[torch.Tensor] = None,
+        action_class_weights: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         # Support structured output (PureRGBVLAOutput or dict) and raw tensor calling signatures
         subpixel_xy = None
@@ -2477,8 +2478,13 @@ class UnifiedMultiTaskLoss(nn.Module):
         if actual_target_act is None or actual_target_xy is None:
             raise ValueError("target_actions and target_coords must be provided")
 
-        # 1. Action type cross-entropy loss
-        loss_act = F.cross_entropy(pred_act_logits, actual_target_act)
+        # 1. Action type cross-entropy loss (optional class-balanced weights)
+        ce_weight = (
+            action_class_weights.to(device=pred_act_logits.device, dtype=pred_act_logits.dtype)
+            if action_class_weights is not None
+            else None
+        )
+        loss_act = F.cross_entropy(pred_act_logits, actual_target_act, weight=ce_weight)
 
         # 2 & 3. Pre-compute patch attention targets / positive-patch mask so offset_mlp
         # is only supervised when argmax lands inside a ground-truth target bbox.

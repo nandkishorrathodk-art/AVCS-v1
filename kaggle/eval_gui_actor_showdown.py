@@ -321,6 +321,18 @@ def run_evaluation(
 
         ms_processor = AutoProcessor.from_pretrained(model_name)
         ms_tokenizer = ms_processor.tokenizer
+        if max_pixels > 0:
+            min_px = min(256 * 28 * 28, int(max_pixels))
+            ip = getattr(ms_processor, "image_processor", None)
+            if ip is not None:
+                if hasattr(ip, "min_pixels"):
+                    ip.min_pixels = min_px
+                if hasattr(ip, "max_pixels"):
+                    ip.max_pixels = int(max_pixels)
+                if hasattr(ip, "size") and isinstance(ip.size, dict):
+                    ip.size["shortest_edge"] = min_px
+                    ip.size["longest_edge"] = int(max_pixels)
+            print(f"[BENCHMARK] Configured MS GUI-Actor pixel budget: min_pixels={min_px}, max_pixels={max_pixels}")
 
         # Wrap ms_processor to strip mm_token_type_ids (causes ValueError in generate)
         orig_proc_call = ms_processor.__call__
@@ -429,17 +441,23 @@ def run_evaluation(
         # Bypass _validate_model_kwargs to allow all multimodal arguments (pixel_values, image_grid_thw, etc.)
         ms_model._validate_model_kwargs = lambda model_kwargs: None
 
+        ms_generate_calls = 0
         orig_generate = ms_model.generate
         @functools.wraps(orig_generate)
         def safe_generate(*args, **kwargs):
+            nonlocal ms_generate_calls
+            ms_generate_calls += 1
             kwargs.pop("mm_token_type_ids", None)
             return orig_generate(*args, **kwargs)
         ms_model.generate = safe_generate
 
+        ms_forward_calls = 0
         orig_forward = ms_model.forward
         orig_fwd_params = set(inspect.signature(orig_forward).parameters.keys())
         @functools.wraps(orig_forward)
         def safe_forward(*args, **kwargs):
+            nonlocal ms_forward_calls
+            ms_forward_calls += 1
             kwargs.pop("mm_token_type_ids", None)
             if "cache" in kwargs and "cache" not in orig_fwd_params and "past_key_values" in orig_fwd_params:
                 kwargs["past_key_values"] = kwargs.pop("cache")
@@ -526,6 +544,10 @@ def run_evaluation(
 
         t0 = time.perf_counter()
         if is_ms_gui_actor:
+            img_entry: Dict[str, Any] = {"type": "image", "image": model_img}
+            if max_pixels > 0:
+                img_entry["min_pixels"] = min(256 * 28 * 28, int(max_pixels))
+                img_entry["max_pixels"] = int(max_pixels)
             conversation = [
                 {
                     "role": "system",
@@ -545,15 +567,23 @@ def run_evaluation(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": model_img},
+                        img_entry,
                         {"type": "text", "text": instruction},
                     ],
                 },
             ]
+            gen_before, fwd_before = ms_generate_calls, ms_forward_calls
             pred = ms_inference(conversation, ms_model, ms_tokenizer, ms_processor, use_placeholder=True, topk=1)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             infer_ms = (time.perf_counter() - t0) * 1000.0
+            if idx == 0:
+                print(
+                    f"[BENCHMARK] MS GUI-Actor sample 0 call telemetry: "
+                    f"generate_calls={ms_generate_calls - gen_before}, "
+                    f"forward_calls={ms_forward_calls - fwd_before} "
+                    f"(use_placeholder=True)"
+                )
             if pred and isinstance(pred.get("topk_points"), list) and len(pred["topk_points"]) > 0:
                 px_norm, py_norm = pred["topk_points"][0]
             else:
@@ -681,6 +711,12 @@ def run_evaluation(
         "benchmark": "generalagents/showdown-clicks-dev",
         "model_name": model_name,
         "checkpoint": model_name if is_ms_gui_actor else str(checkpoint_path),
+        "max_pixels": int(max_pixels),
+        "inference_mode": (
+            ("single_pass_pointer" if ms_generate_calls == 0 else f"generate_calls_{ms_generate_calls}")
+            if is_ms_gui_actor
+            else "single_pass_pointer"
+        ),
         "total_samples": evaluated_count,
         "elapsed_seconds": round(elapsed_sec, 2),
         "resolution": {
