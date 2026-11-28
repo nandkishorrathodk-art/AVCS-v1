@@ -570,6 +570,29 @@ class Win32RawInputListener:
         class RAWINPUT(ctypes.Structure):
             _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUT_UNION)]
 
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        user32.RegisterClassExW.argtypes = [ctypes.c_void_p]
+        user32.RegisterClassExW.restype = wintypes.ATOM
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+        ]
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        user32.DestroyWindow.restype = wintypes.BOOL
+        user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        user32.UnregisterClassW.restype = wintypes.BOOL
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.GetMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        user32.GetMessageW.restype = wintypes.BOOL
+        user32.TranslateMessage.argtypes = [ctypes.c_void_p]
+        user32.TranslateMessage.restype = wintypes.BOOL
+        user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+        user32.DispatchMessageW.restype = LRESULT
+        user32.PostQuitMessage.argtypes = [ctypes.c_int]
         user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
         user32.DefWindowProcW.restype = LRESULT
         user32.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(wintypes.UINT), wintypes.UINT]
@@ -590,10 +613,11 @@ class Win32RawInputListener:
                 now_ns = time.perf_counter_ns()
                 sz = wintypes.UINT(0)
                 hdr_sz = ctypes.sizeof(RAWINPUTHEADER)
-                user32.GetRawInputData(lparam, RID_INPUT, None, ctypes.byref(sz), hdr_sz)
+                h_raw = ctypes.c_void_p(int(lparam) & 0xFFFFFFFFFFFFFFFF)
+                user32.GetRawInputData(h_raw, RID_INPUT, None, ctypes.byref(sz), hdr_sz)
                 if sz.value > 0:
                     buf = (ctypes.c_ubyte * sz.value)()
-                    copied = user32.GetRawInputData(lparam, RID_INPUT, buf, ctypes.byref(sz), hdr_sz)
+                    copied = user32.GetRawInputData(h_raw, RID_INPUT, buf, ctypes.byref(sz), hdr_sz)
                     if copied > 0:
                         raw = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
                         if raw.header.dwType == RIM_TYPEMOUSE:
@@ -680,9 +704,10 @@ class Win32RawInputListener:
         devices[0] = RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd)  # Mouse
         devices[1] = RAWINPUTDEVICE(0x01, 0x06, RIDEV_INPUTSINK, hwnd)  # Keyboard
         if not user32.RegisterRawInputDevices(devices, 2, ctypes.sizeof(RAWINPUTDEVICE)):
+            err_code = ctypes.get_last_error()
             user32.DestroyWindow(hwnd)
             user32.UnregisterClassW(cls_name, h_inst)
-            self._error = OSError("RegisterRawInputDevices failed.")
+            self._error = OSError(f"RegisterRawInputDevices failed (err={err_code}).")
             self._ready_event.set()
             return
 
@@ -1043,11 +1068,13 @@ class ZeroLagWindowsRecorder:
         start_ns = time.perf_counter_ns()
         last_activity_ns = start_ns
         stop_requested = False
+        raw_events_received = 0
 
         try:
             while time.perf_counter_ns() < end_ns and not stop_requested:
                 try:
                     ev = self.event_queue.get(timeout=0.02)
+                    raw_events_received += 1
                     step = assembler.process_event(ev)
                     last_activity_ns = ev.event_ns
                     if step is not None and on_step is not None:
@@ -1138,6 +1165,7 @@ class ZeroLagWindowsRecorder:
                 "frames_captured": self._frames_captured,
                 "capture_fps": round(capture_fps, 2),
                 "atomic_p95_sync_ms": round(atomic_p95_sync_ms, 3),
+                "raw_events_received": raw_events_received,
                 "raw_step_count": len(raw_steps),
                 "cleaned_step_count": len(curated_steps),
                 "dropped_unsynced_events": assembler.dropped_unsynced_events,
@@ -1153,6 +1181,7 @@ class ZeroLagWindowsRecorder:
             "frames_captured": self._frames_captured,
             "capture_fps": round(capture_fps, 2),
             "atomic_p95_sync_ms": round(atomic_p95_sync_ms, 3),
+            "raw_events_received": raw_events_received,
             "raw_step_count": len(raw_steps),
             "cleaned_step_count": len(curated_steps),
             "dropped_unsynced_events": assembler.dropped_unsynced_events,
@@ -1286,8 +1315,9 @@ def main() -> None:
         qa = res["qa_report"]
         print(
             f"Recording saved -> {args.output} | backend={res['capture_backend']} | "
+            f"capture_fps={res['capture_fps']:.1f} | raw_events={res['raw_events_received']} | "
             f"cleaned_steps={res['cleaned_step_count']} | pass_rate={qa['pass_rate']:.2f} | "
-            f"p95_sync_error_ms={qa['p95_sync_error_ms']:.2f}ms"
+            f"atomic_p95_sync={res['atomic_p95_sync_ms']:.2f}ms"
         )
         return
 
