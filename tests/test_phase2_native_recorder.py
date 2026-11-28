@@ -194,5 +194,50 @@ def test_enable_windows_dpi_awareness_linux_safe(monkeypatch):
     assert _enable_windows_dpi_awareness() == 1.0
 
 
+def test_click_hold_and_typing_burst_preserve_pre_action_onset_sync():
+    """Ensures long mouse holds & >300ms typing bursts do not inflate QADoctor sync error."""
+    from avcs.data.lerobot_v3 import TrajectoryCleaner
+
+    ring = PreActionFrameRingBuffer(capacity=16)
+    base = 1_000_000_000
+    ring.push_frame(np.full((64, 64, 3), 20, dtype=np.uint8), present_ns=base)
+    ring.push_frame(np.full((64, 64, 3), 40, dtype=np.uint8), present_ns=base + 300_000_000)
+
+    cfg = RecorderConfig(task_instruction="Hold click then type", min_drag_px=25.0)
+    geo = DisplayGeometry(0, 0, 1000, 500, 1.0, True)
+    asm = RawInputActionAssembler(episode_id="ep_onset", geometry=geo, ring_buffer=ring, config=cfg)
+
+    # 1. Human holds left mouse button for 230ms (left_down @ +3ms, left_up @ +233ms)
+    asm.process_event(RawInputEvent(base + 3_000_000, "left_down", screen_xy=(100, 100)))
+    asm.process_event(RawInputEvent(base + 233_000_000, "left_up", screen_xy=(101, 100)))
+
+    # 2. Multi-char typing burst spanning 600ms total (<200ms between consecutive keys)
+    for k_idx, ch in enumerate("hello"):
+        asm.process_event(
+            RawInputEvent(base + 303_000_000 + k_idx * 150_000_000, "key_down", vk_code=ord(ch.upper()), char=ch)
+        )
+
+    cleaned = TrajectoryCleaner.clean_trajectory(asm.steps)
+    assert [s.action_kind for s in cleaned] == [ACTION_LEFT_CLICK, ACTION_TYPE]
+    assert cleaned[1].typed_text == "hello"
+
+    qa_strict = QADoctor.validate_episode(cleaned, max_p95_sync_error_ms=5.0)
+    assert qa_strict["valid"], f"Expected strict <5ms sync pass, got: {qa_strict}"
+    assert qa_strict["sync_within_5ms"] is True
+    assert qa_strict["p95_sync_error_ms"] < 5.0
+
+    # Verify QADoctor catches real >5ms sync violations when enforced
+    stale_ring = PreActionFrameRingBuffer(capacity=8)
+    stale_ring.push_frame(np.full((64, 64, 3), 20, dtype=np.uint8), present_ns=base)
+    stale_asm = RawInputActionAssembler(episode_id="ep_stale", geometry=geo, ring_buffer=stale_ring, config=cfg)
+    stale_asm.process_event(RawInputEvent(base + 40_000_000, "right_down", screen_xy=(100, 100)))
+    qa_honest = QADoctor.validate_episode(stale_asm.steps)
+    assert qa_honest["sync_within_5ms"] is False
+    qa_enforced = QADoctor.validate_episode(stale_asm.steps, max_p95_sync_error_ms=5.0)
+    assert qa_enforced["valid"] is False
+    assert any("exceeds 5.00ms budget" in msg for msg in qa_enforced["issues"])
+
+
+
 
 

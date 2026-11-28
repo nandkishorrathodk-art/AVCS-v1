@@ -487,18 +487,22 @@ class TrajectoryCleaner:
         if not steps:
             return []
         cleaned: List[LeRobotV3TrajectoryEpisode] = []
+        last_burst_key_ns: Optional[int] = None
         for step in steps:
             if step.action_kind == 7 and cleaned and cleaned[-1].action_kind == 7:  # TYPE
                 prev = cleaned[-1]
-                time_delta = step.action_event_ns - prev.action_event_ns
+                ref_ns = last_burst_key_ns if last_burst_key_ns is not None else prev.action_event_ns
+                time_delta = step.action_event_ns - ref_ns
                 if 0 <= time_delta <= max_keystroke_gap_ns:
                     merged_text = prev.typed_text + step.typed_text
+                    last_burst_key_ns = step.action_event_ns
                     cleaned[-1] = LeRobotV3TrajectoryEpisode(
                         episode_id=prev.episode_id,
                         step_index=prev.step_index,
                         video_frame_index=prev.video_frame_index,
                         frame_present_ns=prev.frame_present_ns,
-                        action_event_ns=step.action_event_ns,
+                        # Preserve burst onset so pre-action frame sync stays aligned to when typing began
+                        action_event_ns=prev.action_event_ns,
                         screen_width=prev.screen_width,
                         screen_height=prev.screen_height,
                         dpi_scale=prev.dpi_scale,
@@ -519,6 +523,7 @@ class TrajectoryCleaner:
                         task_success=bool(prev.task_success and step.task_success),
                     )
                     continue
+            last_burst_key_ns = step.action_event_ns if step.action_kind == 7 else None
             cleaned.append(step)
         return cleaned
 
@@ -578,19 +583,23 @@ class TrajectoryCleaner:
         if not steps:
             return []
         cleaned: List[LeRobotV3TrajectoryEpisode] = []
+        last_burst_scroll_ns: Optional[int] = None
         for step in steps:
             if step.action_kind == 5 and cleaned and cleaned[-1].action_kind == 5:
                 prev = cleaned[-1]
-                time_delta = step.action_event_ns - prev.action_event_ns
+                ref_ns = last_burst_scroll_ns if last_burst_scroll_ns is not None else prev.action_event_ns
+                time_delta = step.action_event_ns - ref_ns
                 if 0 <= time_delta <= max_scroll_gap_ns:
                     dx = prev.scroll_delta[0] + step.scroll_delta[0]
                     dy = prev.scroll_delta[1] + step.scroll_delta[1]
+                    last_burst_scroll_ns = step.action_event_ns
                     cleaned[-1] = LeRobotV3TrajectoryEpisode(
                         episode_id=prev.episode_id,
                         step_index=prev.step_index,
                         video_frame_index=prev.video_frame_index,
                         frame_present_ns=prev.frame_present_ns,
-                        action_event_ns=step.action_event_ns,
+                        # Preserve burst onset so pre-action frame sync matches scroll initiation
+                        action_event_ns=prev.action_event_ns,
                         screen_width=prev.screen_width,
                         screen_height=prev.screen_height,
                         dpi_scale=prev.dpi_scale,
@@ -611,6 +620,7 @@ class TrajectoryCleaner:
                         task_success=prev.task_success and step.task_success,
                     )
                     continue
+            last_burst_scroll_ns = step.action_event_ns if step.action_kind == 5 else None
             cleaned.append(step)
         return cleaned
 
@@ -712,13 +722,26 @@ class QADoctor:
     """
 
     @staticmethod
-    def validate_episode(steps: List[LeRobotV3TrajectoryEpisode]) -> Dict[str, Any]:
+    def validate_episode(
+        steps: List[LeRobotV3TrajectoryEpisode],
+        *,
+        sync_target_ms: float = 5.0,
+        max_p95_sync_error_ms: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Audits an episode against the Phase 2 contract."""
         issues: List[str] = []
         if not steps:
-            return {"valid": False, "issues": ["Empty episode"], "p95_sync_error_ms": 0.0}
+            return {
+                "valid": False,
+                "issues": ["Empty episode"],
+                "p95_sync_error_ms": 0.0,
+                "non_wait_p95_sync_error_ms": 0.0,
+                "sync_target_ms": float(sync_target_ms),
+                "sync_within_5ms": False,
+            }
 
         sync_errors_ns: List[int] = []
+        non_wait_sync_errors_ns: List[int] = []
         prev_present_ns = 0
         prev_event_ns = 0
 
@@ -728,7 +751,10 @@ class QADoctor:
             diff = step.action_event_ns - step.frame_present_ns
             if diff < min_margin:
                 issues.append(f"Step {idx}: frame-to-event margin violation: {diff}ns < {min_margin}ns (post-action leakage risk)")
-            sync_errors_ns.append(max(0, diff))
+            clamped_diff = max(0, diff)
+            sync_errors_ns.append(clamped_diff)
+            if step.action_kind != 8:
+                non_wait_sync_errors_ns.append(clamped_diff)
 
             # 2. Monotonic clock check
             if idx > 0:
@@ -754,38 +780,69 @@ class QADoctor:
             sorted_errs = sorted(sync_errors_ns)
             p95_sync_error_ms = sorted_errs[int(0.95 * (len(sorted_errs) - 1))] / 1_000_000.0
 
+        non_wait_p95_sync_error_ms = 0.0
+        if non_wait_sync_errors_ns:
+            sorted_nw = sorted(non_wait_sync_errors_ns)
+            non_wait_p95_sync_error_ms = sorted_nw[int(0.95 * (len(sorted_nw) - 1))] / 1_000_000.0
+
+        if max_p95_sync_error_ms is not None and p95_sync_error_ms > float(max_p95_sync_error_ms):
+            issues.append(
+                f"Episode P95 sync error {p95_sync_error_ms:.2f}ms exceeds {float(max_p95_sync_error_ms):.2f}ms budget"
+            )
+
         return {
             "valid": len(issues) == 0,
             "step_count": len(steps),
             "issues": issues,
             "p95_sync_error_ms": p95_sync_error_ms,
+            "non_wait_p95_sync_error_ms": non_wait_p95_sync_error_ms,
+            "sync_target_ms": float(sync_target_ms),
+            "sync_within_5ms": bool(p95_sync_error_ms < float(sync_target_ms)),
         }
 
     @staticmethod
-    def audit_dataset(dataset_episodes: List[List[LeRobotV3TrajectoryEpisode]]) -> Dict[str, Any]:
+    def audit_dataset(
+        dataset_episodes: List[List[LeRobotV3TrajectoryEpisode]],
+        *,
+        sync_target_ms: float = 5.0,
+        max_p95_sync_error_ms: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Audits an entire collection of demonstration episodes."""
         total = len(dataset_episodes)
         passed = 0
         all_issues: Dict[int, List[str]] = {}
         all_step_sync_errors_ns: List[int] = []
+        non_wait_step_sync_errors_ns: List[int] = []
 
         for i, ep in enumerate(dataset_episodes):
-            report = QADoctor.validate_episode(ep)
+            report = QADoctor.validate_episode(
+                ep,
+                sync_target_ms=sync_target_ms,
+                max_p95_sync_error_ms=max_p95_sync_error_ms,
+            )
             if report["valid"]:
                 passed += 1
             else:
                 all_issues[i] = report["issues"]
             for step in ep:
-                all_step_sync_errors_ns.append(max(0, step.action_event_ns - step.frame_present_ns))
+                err_ns = max(0, step.action_event_ns - step.frame_present_ns)
+                all_step_sync_errors_ns.append(err_ns)
+                if step.action_kind != 8:
+                    non_wait_step_sync_errors_ns.append(err_ns)
 
         sorted_errs = sorted(all_step_sync_errors_ns)
         p95_global = (sorted_errs[int(0.95 * (len(sorted_errs) - 1))] / 1_000_000.0) if sorted_errs else 0.0
+        sorted_nw = sorted(non_wait_step_sync_errors_ns)
+        nw_p95_global = (sorted_nw[int(0.95 * (len(sorted_nw) - 1))] / 1_000_000.0) if sorted_nw else 0.0
 
         return {
             "total_episodes": total,
             "passed_episodes": passed,
             "pass_rate": passed / max(1, total),
             "p95_sync_error_ms": p95_global,
+            "non_wait_p95_sync_error_ms": nw_p95_global,
+            "sync_target_ms": float(sync_target_ms),
+            "sync_within_5ms": bool(p95_global < float(sync_target_ms)),
             "corrupted_episodes": total - passed,
             "quarantined_issues": all_issues,
         }

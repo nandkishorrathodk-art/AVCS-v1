@@ -264,8 +264,11 @@ class _WGCCaptureAdapter(BaseCaptureAdapter):
 
     def __init__(self) -> None:
         self._latest: Optional[np.ndarray] = None
+        self._latest_ns: int = 0
+        self._frame_seq: int = 0
         self._lock = threading.Lock()
         self._event = threading.Event()
+        self._new_frame_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._control: Any = None
         self._geo: Optional[DisplayGeometry] = None
@@ -278,13 +281,17 @@ class _WGCCaptureAdapter(BaseCaptureAdapter):
 
         @capture.event
         def on_frame_arrived(frame: Frame, capture_control: InternalCaptureControl) -> None:
+            captured_ns = time.perf_counter_ns()
             self._control = capture_control
             buf = np.asarray(frame.convert_to_bgr().frame_buffer, dtype=np.uint8)[:, :, 2::-1].copy()
             with self._lock:
                 self._latest = buf
+                self._latest_ns = captured_ns
+                self._frame_seq += 1
                 if self._geo is None:
                     self._geo = DisplayGeometry(0, 0, buf.shape[1], buf.shape[0], dpi_scale, True)
             self._event.set()
+            self._new_frame_event.set()
 
         @capture.event
         def on_closed() -> None:
@@ -299,6 +306,18 @@ class _WGCCaptureAdapter(BaseCaptureAdapter):
         if self._geo is None:
             raise RuntimeError("Windows.Graphics.Capture did not deliver initial frame within 3s")
         return self
+
+    def grab_with_timestamp(self, timeout_s: float = 0.0) -> Tuple[np.ndarray, int, int]:
+        """Waits up to `timeout_s` for a fresh WGC callback and returns (rgb, captured_ns, seq)."""
+        if self._thread is None:
+            self.open()
+        if timeout_s > 0.0:
+            self._new_frame_event.wait(timeout=timeout_s)
+            self._new_frame_event.clear()
+        with self._lock:
+            if self._latest is None:
+                raise RuntimeError("No WGC frame buffered")
+            return self._latest, self._latest_ns, self._frame_seq
 
     def grab(self) -> np.ndarray:
         if self._thread is None:
@@ -400,11 +419,14 @@ class PreActionFrameRingBuffer:
         rgb: np.ndarray,
         dpi_scale: float = 1.0,
         present_ns: Optional[int] = None,
+        *,
+        copy_rgb: bool = True,
+        cached_preview: Optional[np.ndarray] = None,
     ) -> CapturedFrame:
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError(f"Expected RGB (H, W, 3) frame, got shape {rgb.shape}")
-        preview = self._downscale_32x32(rgb)
-        raw_copy = rgb.copy()
+        preview = cached_preview if cached_preview is not None else self._downscale_32x32(rgb)
+        raw_ref = rgb.copy() if copy_rgb else rgb
         raw_ns = time.perf_counter_ns() if present_ns is None else int(present_ns)
         with self._lock:
             mono_ns = max(raw_ns, self._last_present_ns + 1)
@@ -417,7 +439,7 @@ class PreActionFrameRingBuffer:
                 height=int(rgb.shape[0]),
                 dpi_scale=float(dpi_scale),
                 preview_32x32=preview,
-                raw_rgb=raw_copy,
+                raw_rgb=raw_ref,
                 _encode_size=self._encode_size,
                 _jpeg_quality=self._jpeg_quality,
             )
@@ -792,12 +814,15 @@ class RawInputActionAssembler:
         geometry: DisplayGeometry,
         ring_buffer: PreActionFrameRingBuffer,
         config: RecorderConfig,
+        defer_jpeg_encode: bool = False,
     ) -> None:
         self.episode_id = episode_id
         self.geometry = geometry
         self.ring_buffer = ring_buffer
         self.config = config
+        self.defer_jpeg_encode = bool(defer_jpeg_encode)
         self._steps: List[LeRobotV3TrajectoryEpisode] = []
+        self._bound_frames: List[CapturedFrame] = []
         self._prev_bound_frame: Optional[CapturedFrame] = None
         self._last_cursor_norm: Tuple[float, float] = (0.5, 0.5)
         self._last_left_click_ns: int = -1
@@ -805,6 +830,12 @@ class RawInputActionAssembler:
         self._active_drag: Optional[Dict[str, Any]] = None
         self._last_action_event_ns: int = 0
         self.dropped_unsynced_events: int = 0
+
+    def materialize_frames(self) -> None:
+        """Encodes deferred step JPEG payloads cleanly after live recording stops."""
+        for step, frame in zip(self._steps, self._bound_frames):
+            if not step.image_bytes:
+                step.image_bytes = frame.ensure_jpeg_bytes()
 
     @property
     def steps(self) -> List[LeRobotV3TrajectoryEpisode]:
@@ -868,10 +899,11 @@ class RawInputActionAssembler:
             hotkey_ids=hotkey_ids or [],
             typed_text=typed_text,
             pixel_diff_ratio=diff_ratio,
-            image_bytes=frame.ensure_jpeg_bytes(),
+            image_bytes=b"" if self.defer_jpeg_encode else frame.ensure_jpeg_bytes(),
             task_success=True,
         )
         self._steps.append(step)
+        self._bound_frames.append(frame)
         return step
 
     def process_event(self, ev: RawInputEvent) -> Optional[LeRobotV3TrajectoryEpisode]:
@@ -925,6 +957,9 @@ class RawInputActionAssembler:
                 )
 
             start_xy = drag_info["start_xy"]
+            onset_ns = int(drag_info["start_ns"])
+            use_bound = drag_info["bound_frame"] if onset_ns > self._last_action_event_ns else None
+            emit_ns = onset_ns if use_bound is not None else ev.event_ns
             dist_px = self._px_dist(start_xy, norm_xy)
             self._last_cursor_norm = norm_xy
             if dist_px >= self.config.min_drag_px:
@@ -933,27 +968,27 @@ class RawInputActionAssembler:
                     pts.append(norm_xy)
                 return self._emit_step(
                     action_kind=ACTION_DRAG,
-                    action_event_ns=ev.event_ns,
+                    action_event_ns=emit_ns,
                     cursor_pre_xy=start_xy,
                     target_xy=norm_xy,
                     drag_trajectory_xy=pts,
-                    bound_frame=drag_info["bound_frame"],
+                    bound_frame=use_bound,
                 )
 
             is_double = (
                 self._last_left_click_ns > 0
-                and (ev.event_ns - self._last_left_click_ns) <= self.config.double_click_window_ns
+                and (onset_ns - self._last_left_click_ns) <= self.config.double_click_window_ns
                 and self._px_dist(self._last_left_click_norm, norm_xy) <= 4.0
             )
-            self._last_left_click_ns = ev.event_ns
+            self._last_left_click_ns = onset_ns
             self._last_left_click_norm = norm_xy
             act_kind = ACTION_DOUBLE_CLICK if is_double else ACTION_LEFT_CLICK
             return self._emit_step(
                 action_kind=act_kind,
-                action_event_ns=ev.event_ns,
+                action_event_ns=emit_ns,
                 cursor_pre_xy=drag_info["pre_xy"],
                 target_xy=norm_xy,
-                bound_frame=drag_info["bound_frame"],
+                bound_frame=use_bound,
             )
 
         if kind == "double_click":
@@ -1069,9 +1104,35 @@ class ZeroLagWindowsRecorder:
 
     def _capture_loop(self) -> None:
         interval_s = 1.0 / max(1.0, float(self.config.target_fps))
+        has_ts_grab = hasattr(self.capture, "grab_with_timestamp")
+        last_seq = -1
+        last_preview: Optional[np.ndarray] = None
         while not self._stop_event.is_set():
             t0 = time.perf_counter()
             try:
+                if has_ts_grab:
+                    rgb, cap_ns, frame_seq = self.capture.grab_with_timestamp(timeout_s=interval_s)
+                    if frame_seq != last_seq:
+                        pushed = self.ring_buffer.push_frame(
+                            rgb,
+                            dpi_scale=self.geometry.dpi_scale,
+                            present_ns=cap_ns,
+                            copy_rgb=False,
+                        )
+                        last_seq = frame_seq
+                        last_preview = pushed.preview_32x32
+                    else:
+                        # Static screen heartbeat: keep ring buffer fresh without full-frame copy
+                        pushed = self.ring_buffer.push_frame(
+                            rgb,
+                            dpi_scale=self.geometry.dpi_scale,
+                            present_ns=time.perf_counter_ns(),
+                            copy_rgb=False,
+                            cached_preview=last_preview,
+                        )
+                        last_preview = pushed.preview_32x32
+                    self._frames_captured += 1
+                    continue
                 rgb = self.capture.grab()
                 self.ring_buffer.push_frame(rgb, dpi_scale=self.geometry.dpi_scale)
                 self._frames_captured += 1
@@ -1099,6 +1160,7 @@ class ZeroLagWindowsRecorder:
             geometry=self.geometry,
             ring_buffer=self.ring_buffer,
             config=self.config,
+            defer_jpeg_encode=True,
         )
 
         winmm = None
@@ -1163,12 +1225,14 @@ class ZeroLagWindowsRecorder:
         elapsed_s = max(1e-6, (time.perf_counter_ns() - start_ns) / 1_000_000_000.0)
         capture_fps = self._frames_captured / elapsed_s
 
+        assembler.materialize_frames()
         raw_steps = assembler.steps
         if not raw_steps:
             # Ensure deterministic single WAIT/STOP terminal frame if zero input arrived
             now_ns = time.perf_counter_ns()
             s = assembler.emit_idle_wait(now_ns)
             if s is not None:
+                assembler.materialize_frames()
                 raw_steps = assembler.steps
 
         atomic_syncs = sorted(
@@ -1388,7 +1452,10 @@ def main() -> None:
             f"Recording saved -> {args.output} | format={res['shard_info'].get('format', 'unknown')} | "
             f"backend={res['capture_backend']} | capture_fps={res['capture_fps']:.1f} | "
             f"raw_events={res['raw_events_received']} | cleaned_steps={res['cleaned_step_count']} | "
-            f"pass_rate={qa['pass_rate']:.2f} | atomic_p95_sync={res['atomic_p95_sync_ms']:.2f}ms"
+            f"pass_rate={qa['pass_rate']:.2f} | qa_p95_sync={qa['p95_sync_error_ms']:.2f}ms | "
+            f"non_wait_p95={qa.get('non_wait_p95_sync_error_ms', 0.0):.2f}ms | "
+            f"atomic_p95_sync={res['atomic_p95_sync_ms']:.2f}ms | "
+            f"sync_under_5ms={qa.get('sync_within_5ms', False)}"
         )
         return
 
