@@ -1101,8 +1101,14 @@ class GroundingDataset(Dataset):
 
                 if p.is_dir() and "golden" in p_str:
                     self._ingest_golden_directory(p)
+                elif p.is_dir():
+                    self._ingest_lerobot_v3_root(p, max_samples)
                 elif p.is_file() and p.suffix == ".jsonl":
                     self._ingest_jsonl(p, max_samples)
+        elif dataset_source == "lerobot_v3":
+            rec_root = Path(repo_root) / "runs" / "recordings"
+            if rec_root.is_dir():
+                self._ingest_lerobot_v3_root(rec_root, max_samples)
         elif dataset_source == "synthetic":
             self._generate_synthetic_samples(min(max_samples, 1000))
         elif dataset_source == "local":
@@ -1346,6 +1352,75 @@ class GroundingDataset(Dataset):
                     })
                 except Exception:
                     continue
+
+    def _ingest_lerobot_v3_root(self, root_dir: Path, max_samples: int) -> None:
+        """Ingests recorded LeRobot v3.0 (.parquet + .mp4 / .jsonl) episodes into GroundingDataset."""
+        from avcs.data.lerobot_v3 import load_lerobot_v3_shards
+
+        if not root_dir.exists() or not root_dir.is_dir():
+            return
+
+        # Discover either `root_dir` itself (if it has `data/`) or subdirectories containing `data/`
+        candidate_roots: List[Path] = []
+        if (root_dir / "data").is_dir():
+            candidate_roots.append(root_dir)
+        for child in sorted(root_dir.iterdir()):
+            if child.is_dir() and (child / "data").is_dir():
+                candidate_roots.append(child)
+
+        for shard_root in candidate_roots:
+            if len(self.samples) >= max_samples:
+                break
+            if self._is_held_out_leakage(str(shard_root)):
+                self.leakage_filtered_count += 1
+                continue
+            try:
+                episodes = load_lerobot_v3_shards(shard_root, decode_video_frames=True)
+            except Exception as exc:
+                logger.warning(f"[LEROBOT-V3] Failed to load shards from {shard_root}: {exc}")
+                continue
+
+            for ep in episodes:
+                if len(self.samples) >= max_samples:
+                    break
+                if not ep:
+                    continue
+                # Keep meaningful actions (click, double/right click, drag, scroll, hotkey, type, stop)
+                # plus up to 1 active wait per episode; fall back to move if episode has only moves.
+                interactive = [s for s in ep if s.action_kind in (0, 1, 2, 4, 5, 6, 7, 9)]
+                chosen_steps = list(interactive) if interactive else [s for s in ep if s.action_kind == 3]
+                waits_added = 0
+                for s in ep:
+                    if s.action_kind == 8 and s.pixel_diff_ratio > 0.005 and waits_added < 1:
+                        chosen_steps.append(s)
+                        waits_added += 1
+
+                for s in chosen_steps:
+                    if len(self.samples) >= max_samples:
+                        break
+                    base_instr = (s.task_instruction or "Execute desktop step").strip()
+                    if self._is_held_out_leakage(base_instr) or self._is_held_out_leakage(s.episode_id):
+                        self.leakage_filtered_count += 1
+                        continue
+                    if s.action_kind == 7 and s.typed_text:
+                        instr = f"{base_instr} [type: {s.typed_text}]"
+                    elif s.action_kind == 6 and s.typed_text:
+                        instr = f"{base_instr} [hotkey: {s.typed_text}]"
+                    else:
+                        instr = base_instr
+
+                    tx = min(1.0, max(0.0, float(s.target_xy[0])))
+                    ty = min(1.0, max(0.0, float(s.target_xy[1])))
+                    bbox = [max(0.0, tx - 0.03), max(0.0, ty - 0.03), min(1.0, tx + 0.03), min(1.0, ty + 0.03)]
+                    self.samples.append({
+                        "instruction": instr,
+                        "action_idx": int(s.action_kind),
+                        "target_xy": [tx, ty],
+                        "target_bbox": bbox,
+                        "image_bytes": s.image_bytes if s.image_bytes else None,
+                        "image_path": None,
+                        "image_id": f"lerobot_v3:{s.episode_id}",
+                    })
 
     def _ingest_golden_directory(self, golden_dir: Path) -> None:
         if not golden_dir.exists() or not golden_dir.is_dir():
@@ -3180,8 +3255,8 @@ def main():
         "--dataset-source",
         type=str,
         default="hf_showui",
-        choices=["hf_showui", "hf_desktop_clean", "local", "mixed", "synthetic"],
-        help="Dataset source: 'hf_showui', 'hf_desktop_clean' (Apache-2.0 ShowUI + OS-Atlas desktop), 'local', 'mixed', or 'synthetic'",
+        choices=["hf_showui", "hf_desktop_clean", "lerobot_v3", "local", "mixed", "synthetic"],
+        help="Dataset source: 'hf_showui', 'hf_desktop_clean' (Apache-2.0 ShowUI + OS-Atlas desktop), 'lerobot_v3' (recorded .parquet+.mp4 demos), 'local', 'mixed', or 'synthetic'",
     )
     parser.add_argument(
         "--resume-checkpoint",
