@@ -186,4 +186,13 @@ def test_grounding_dataset_ingests_lerobot_v3_mp4_shards(tmp_path):
     assert "target_action" in sample0 and "target_coord" in sample0
 
 
+def test_enable_windows_dpi_awareness_linux_safe(monkeypatch):
+    """Ensures _enable_windows_dpi_awareness safely returns 1.0 on non-Windows without touching windll."""
+    from avcs.data.native_recorder import _enable_windows_dpi_awareness
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert _enable_windows_dpi_awareness() == 1.0
+
+
+
 

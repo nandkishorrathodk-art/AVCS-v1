@@ -143,10 +143,34 @@ class RecorderConfig:
     min_drag_px: float = 25.0
     min_move_px: float = 24.0
     double_click_window_ns: int = 350_000_000
-    idle_wait_interval_ns: int = 500_000_000
+    idle_wait_interval_ns: int = 1_000_000_000
     retain_recovery_fraction: float = 0.12
     redact_boxes_norm: Optional[Sequence[Tuple[float, float, float, float]]] = None
     os_platform: str = "windows"
+
+
+def _enable_windows_dpi_awareness() -> float:
+    """Enables Per-Monitor DPI Awareness v2 on Windows and returns the active display DPI scale."""
+    if sys.platform != "win32":
+        return 1.0
+    try:
+        user32 = ctypes.windll.user32
+        try:
+            user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            try:
+                user32.SetProcessDPIAware()
+            except Exception:
+                pass
+        try:
+            dpi = int(user32.GetDpiForSystem())
+            if dpi > 0:
+                return float(dpi) / 96.0
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return 1.0
 
 
 class _MSSCaptureAdapter(BaseCaptureAdapter):
@@ -247,6 +271,7 @@ class _WGCCaptureAdapter(BaseCaptureAdapter):
         self._geo: Optional[DisplayGeometry] = None
 
     def open(self) -> "_WGCCaptureAdapter":
+        dpi_scale = _enable_windows_dpi_awareness()
         from windows_capture import CaptureControl, Frame, InternalCaptureControl, WindowsCapture  # type: ignore[import-not-found]
 
         capture = WindowsCapture(cursor_capture=True, draw_border=False)
@@ -258,7 +283,7 @@ class _WGCCaptureAdapter(BaseCaptureAdapter):
             with self._lock:
                 self._latest = buf
                 if self._geo is None:
-                    self._geo = DisplayGeometry(0, 0, buf.shape[1], buf.shape[0], 1.0, True)
+                    self._geo = DisplayGeometry(0, 0, buf.shape[1], buf.shape[0], dpi_scale, True)
             self._event.set()
 
         @capture.event
@@ -313,6 +338,8 @@ def select_capture_backend(
 
     if sys.platform != "win32" and req == "auto":
         return "synthetic", InteractiveSyntheticCaptureAdapter(width=width, height=height)
+
+    _enable_windows_dpi_awareness()
 
     candidates: List[str]
     if req == "auto":
@@ -508,6 +535,7 @@ class Win32RawInputListener:
     def start(self) -> None:
         if self._thread is not None:
             return
+        _enable_windows_dpi_awareness()
         self._thread = threading.Thread(target=self._run_message_loop, name="AVCS-RawInput", daemon=True)
         self._thread.start()
         self._ready_event.wait(timeout=3.0)
