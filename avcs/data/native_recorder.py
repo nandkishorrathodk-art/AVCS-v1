@@ -650,6 +650,55 @@ class Win32RawInputListener:
         class RAWINPUT(ctypes.Structure):
             _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUT_UNION)]
 
+        class RAWHID_HDR(ctypes.Structure):
+            _fields_ = [("dwSizeHid", wintypes.DWORD), ("dwCount", wintypes.DWORD)]
+
+        class RID_DEVICE_INFO_HID(ctypes.Structure):
+            _fields_ = [
+                ("dwVendorId", wintypes.DWORD),
+                ("dwProductId", wintypes.DWORD),
+                ("dwVersionNumber", wintypes.DWORD),
+                ("usUsagePage", wintypes.USHORT),
+                ("usUsage", wintypes.USHORT),
+            ]
+
+        class RID_DEVICE_INFO_U(ctypes.Union):
+            _fields_ = [("hid", RID_DEVICE_INFO_HID), ("pad", ctypes.c_byte * 24)]
+
+        class RID_DEVICE_INFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("dwType", wintypes.DWORD), ("u", RID_DEVICE_INFO_U)]
+
+        class HIDP_CAPS(ctypes.Structure):
+            _fields_ = [
+                ("Usage", wintypes.USHORT), ("UsagePage", wintypes.USHORT),
+                ("InputReportByteLength", wintypes.USHORT), ("OutputReportByteLength", wintypes.USHORT),
+                ("FeatureReportByteLength", wintypes.USHORT), ("Reserved", wintypes.USHORT * 17),
+                ("NumberLinkCollectionNodes", wintypes.USHORT), ("NumberInputButtonCaps", wintypes.USHORT),
+                ("NumberInputValueCaps", wintypes.USHORT), ("NumberInputDataIndices", wintypes.USHORT),
+                ("NumberOutputButtonCaps", wintypes.USHORT), ("NumberOutputValueCaps", wintypes.USHORT),
+                ("NumberOutputDataIndices", wintypes.USHORT), ("NumberFeatureButtonCaps", wintypes.USHORT),
+                ("NumberFeatureValueCaps", wintypes.USHORT), ("NumberFeatureDataIndices", wintypes.USHORT),
+            ]
+
+        class HIDP_VALUE_CAPS(ctypes.Structure):
+            _fields_ = [
+                ("UsagePage", wintypes.USHORT), ("ReportID", ctypes.c_ubyte),
+                ("IsAlias", ctypes.c_ubyte), ("BitField", wintypes.USHORT),
+                ("LinkCollection", wintypes.USHORT), ("LinkUsage", wintypes.USHORT),
+                ("LinkUsagePage", wintypes.USHORT), ("IsRange", ctypes.c_ubyte),
+                ("IsStringRange", ctypes.c_ubyte), ("IsDesignatorRange", ctypes.c_ubyte),
+                ("IsAbsolute", ctypes.c_ubyte), ("HasNull", ctypes.c_ubyte),
+                ("Reserved", ctypes.c_ubyte), ("BitSize", wintypes.USHORT),
+                ("ReportCount", wintypes.USHORT), ("Reserved2", wintypes.USHORT * 5),
+                ("UnitsExp", wintypes.ULONG), ("Units", wintypes.ULONG),
+                ("LogicalMin", ctypes.c_long), ("LogicalMax", ctypes.c_long),
+                ("PhysicalMin", ctypes.c_long), ("PhysicalMax", ctypes.c_long),
+                ("UsageMin", wintypes.USHORT), ("UsageMax", wintypes.USHORT),
+                ("StringMin", wintypes.USHORT), ("StringMax", wintypes.USHORT),
+                ("DesignatorMin", wintypes.USHORT), ("DesignatorMax", wintypes.USHORT),
+                ("DataIndexMin", wintypes.USHORT), ("DataIndexMax", wintypes.USHORT),
+            ]
+
         class MSLLHOOKSTRUCT(ctypes.Structure):
             _fields_ = [
                 ("pt", wintypes.POINT),
@@ -659,10 +708,29 @@ class Win32RawInputListener:
                 ("dwExtraInfo", ctypes.c_size_t),
             ]
 
+        RIM_TYPEHID = 2
+        RIDI_PREPARSEDDATA = 0x20000005
+        RIDI_DEVICEINFO = 0x2000000B
+        HIDP_STATUS_SUCCESS = 0x00110000
         WH_MOUSE_LL = 14
         WM_MOUSEWHEEL = 0x020A
         WM_MOUSEHWHEEL = 0x020E
         HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        hid_dll = None
+        try:
+            hid_dll = ctypes.windll.hid
+            hid_dll.HidP_GetCaps.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            hid_dll.HidP_GetCaps.restype = ctypes.c_long
+            hid_dll.HidP_GetValueCaps.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(wintypes.USHORT), ctypes.c_void_p]
+            hid_dll.HidP_GetValueCaps.restype = ctypes.c_long
+            hid_dll.HidP_GetUsageValue.argtypes = [
+                ctypes.c_int, wintypes.USHORT, wintypes.USHORT, wintypes.USHORT,
+                ctypes.POINTER(wintypes.ULONG), ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG,
+            ]
+            hid_dll.HidP_GetUsageValue.restype = ctypes.c_long
+        except Exception:
+            hid_dll = None
 
         kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
@@ -691,6 +759,8 @@ class Win32RawInputListener:
         user32.DefWindowProcW.restype = LRESULT
         user32.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(wintypes.UINT), wintypes.UINT]
         user32.GetRawInputData.restype = wintypes.UINT
+        user32.GetRawInputDeviceInfoW.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(wintypes.UINT)]
+        user32.GetRawInputDeviceInfoW.restype = wintypes.UINT
         user32.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), wintypes.UINT, wintypes.UINT]
         user32.RegisterRawInputDevices.restype = wintypes.BOOL
         user32.GetPhysicalCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
@@ -703,6 +773,54 @@ class Win32RawInputListener:
         user32.CallNextHookEx.restype = LRESULT
 
         wheel_hook: List[Any] = [None]
+        last_wheel_ns: List[int] = [0]
+        last_wheel_src: List[str] = [""]
+        tp_cache: Dict[int, Optional[Tuple[Any, int, float, float]]] = {}
+        tp_state: Dict[str, Any] = {"prev_xy": None, "prev_ns": 0, "acc_x": 0.0, "acc_y": 0.0}
+
+        def _get_touchpad_meta(h_dev: int) -> Optional[Tuple[Any, int, float, float]]:
+            if h_dev in tp_cache:
+                return tp_cache[h_dev]
+            if hid_dll is None or not h_dev:
+                tp_cache[h_dev] = None
+                return None
+            info = RID_DEVICE_INFO()
+            info.cbSize = ctypes.sizeof(RID_DEVICE_INFO)
+            isz = wintypes.UINT(info.cbSize)
+            user32.GetRawInputDeviceInfoW(wintypes.HANDLE(h_dev), RIDI_DEVICEINFO, ctypes.byref(info), ctypes.byref(isz))
+            if info.dwType != RIM_TYPEHID or info.u.hid.usUsagePage != 0x0D or info.u.hid.usUsage != 0x05:
+                tp_cache[h_dev] = None
+                return None
+            psz = wintypes.UINT(0)
+            user32.GetRawInputDeviceInfoW(wintypes.HANDLE(h_dev), RIDI_PREPARSEDDATA, None, ctypes.byref(psz))
+            if psz.value <= 0:
+                tp_cache[h_dev] = None
+                return None
+            pp = (ctypes.c_ubyte * psz.value)()
+            user32.GetRawInputDeviceInfoW(wintypes.HANDLE(h_dev), RIDI_PREPARSEDDATA, pp, ctypes.byref(psz))
+            caps = HIDP_CAPS()
+            if (hid_dll.HidP_GetCaps(pp, ctypes.byref(caps)) & 0xFFFFFFFF) != HIDP_STATUS_SUCCESS:
+                tp_cache[h_dev] = None
+                return None
+            vc_len = wintypes.USHORT(caps.NumberInputValueCaps)
+            vcs = (HIDP_VALUE_CAPS * max(1, vc_len.value))()
+            hid_dll.HidP_GetValueCaps(0, vcs, ctypes.byref(vc_len), pp)
+            finger_link = 1
+            x_span, y_span = 1000.0, 1000.0
+            for idx_vc in range(int(vc_len.value)):
+                v = vcs[idx_vc]
+                if v.UsagePage == 0x01 and v.UsageMin == 0x30 and v.LinkCollection > 0:
+                    finger_link = int(v.LinkCollection)
+                    x_span = float(max(1, v.LogicalMax - v.LogicalMin))
+                    break
+            for idx_vc in range(int(vc_len.value)):
+                v = vcs[idx_vc]
+                if v.UsagePage == 0x01 and v.UsageMin == 0x31 and v.LinkCollection == finger_link:
+                    y_span = float(max(1, v.LogicalMax - v.LogicalMin))
+                    break
+            meta = (pp, finger_link, x_span, y_span)
+            tp_cache[h_dev] = meta
+            return meta
 
         def _cursor_xy() -> Tuple[int, int]:
             pt = wintypes.POINT()
@@ -713,13 +831,16 @@ class Win32RawInputListener:
         def _mouse_ll_proc(n_code: int, wparam: int, lparam: int) -> int:
             if n_code >= 0 and wparam in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL) and lparam:
                 now_ns = time.perf_counter_ns()
-                ms = ctypes.cast(ctypes.c_void_p(int(lparam) & 0xFFFFFFFFFFFFFFFF), ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                signed_delta = ctypes.c_short((int(ms.mouseData) >> 16) & 0xFFFF).value / 120.0
-                xy = _cursor_xy()
-                if wparam == WM_MOUSEWHEEL:
-                    self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(0.0, float(signed_delta))))
-                else:
-                    self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(float(signed_delta), 0.0)))
+                if not (last_wheel_src[0] == "raw" and (now_ns - last_wheel_ns[0]) < 3_000_000):
+                    ms = ctypes.cast(ctypes.c_void_p(int(lparam) & 0xFFFFFFFFFFFFFFFF), ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                    signed_delta = ctypes.c_short((int(ms.mouseData) >> 16) & 0xFFFF).value / 120.0
+                    xy = _cursor_xy()
+                    last_wheel_ns[0] = now_ns
+                    last_wheel_src[0] = "ll"
+                    if wparam == WM_MOUSEWHEEL:
+                        self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(0.0, float(signed_delta))))
+                    else:
+                        self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(float(signed_delta), 0.0)))
             return int(user32.CallNextHookEx(wheel_hook[0], n_code, wparam, lparam))
 
         def _wnd_proc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
@@ -746,14 +867,61 @@ class Win32RawInputListener:
                                 self._queue.put(RawInputEvent(now_ns, "right_down", screen_xy=xy))
                             if flags & RI_MOUSE_RIGHT_BUTTON_UP:
                                 self._queue.put(RawInputEvent(now_ns, "right_up", screen_xy=xy))
-                            if (flags & RI_MOUSE_WHEEL) and not wheel_hook[0]:
+                            if (flags & RI_MOUSE_WHEEL) and not (last_wheel_src[0] == "ll" and (now_ns - last_wheel_ns[0]) < 3_000_000):
                                 signed_delta = ctypes.c_short(rm.u.buttons.usButtonData).value / 120.0
+                                last_wheel_ns[0] = now_ns
+                                last_wheel_src[0] = "raw"
                                 self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(0.0, float(signed_delta))))
-                            if (flags & RI_MOUSE_HWHEEL) and not wheel_hook[0]:
+                            if (flags & RI_MOUSE_HWHEEL) and not (last_wheel_src[0] == "ll" and (now_ns - last_wheel_ns[0]) < 3_000_000):
                                 signed_delta = ctypes.c_short(rm.u.buttons.usButtonData).value / 120.0
+                                last_wheel_ns[0] = now_ns
+                                last_wheel_src[0] = "raw"
                                 self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(float(signed_delta), 0.0)))
                             if not (flags & 0x0FFF) and (rm.lLastX != 0 or rm.lLastY != 0):
                                 self._queue.put(RawInputEvent(now_ns, "mouse_move", screen_xy=xy))
+                        elif raw.header.dwType == RIM_TYPEHID and hid_dll is not None:
+                            h_dev = int(raw.header.hDevice or 0)
+                            tp_meta = _get_touchpad_meta(h_dev)
+                            if tp_meta is not None:
+                                pp, finger_link, x_span, y_span = tp_meta
+                                base_addr = ctypes.addressof(buf) + hdr_sz
+                                rh_hdr = ctypes.cast(ctypes.c_void_p(base_addr), ctypes.POINTER(RAWHID_HDR)).contents
+                                sz_hid = int(rh_hdr.dwSizeHid)
+                                cnt_hid = int(rh_hdr.dwCount)
+                                pkt_base = base_addr + ctypes.sizeof(RAWHID_HDR)
+                                if sz_hid > 0 and cnt_hid > 0:
+                                    for p_idx in range(cnt_hid):
+                                        pkt_ptr = ctypes.c_void_p(pkt_base + p_idx * sz_hid)
+                                        c_val = wintypes.ULONG(0)
+                                        st_c = hid_dll.HidP_GetUsageValue(0, 0x0D, 0, 0x54, ctypes.byref(c_val), pp, pkt_ptr, sz_hid)
+                                        if (st_c & 0xFFFFFFFF) != HIDP_STATUS_SUCCESS or int(c_val.value) != 2:
+                                            tp_state["prev_xy"] = None
+                                            tp_state["acc_x"] = 0.0
+                                            tp_state["acc_y"] = 0.0
+                                            continue
+                                        x_val = wintypes.ULONG(0)
+                                        y_val = wintypes.ULONG(0)
+                                        st_x = hid_dll.HidP_GetUsageValue(0, 0x01, finger_link, 0x30, ctypes.byref(x_val), pp, pkt_ptr, sz_hid)
+                                        st_y = hid_dll.HidP_GetUsageValue(0, 0x01, finger_link, 0x31, ctypes.byref(y_val), pp, pkt_ptr, sz_hid)
+                                        if (st_x & 0xFFFFFFFF) == HIDP_STATUS_SUCCESS and (st_y & 0xFFFFFFFF) == HIDP_STATUS_SUCCESS:
+                                            cur_xy = (int(x_val.value), int(y_val.value))
+                                            prev_xy = tp_state["prev_xy"]
+                                            if prev_xy is not None and (now_ns - tp_state["prev_ns"]) <= 150_000_000:
+                                                tp_state["acc_x"] += (cur_xy[0] - prev_xy[0]) / x_span
+                                                tp_state["acc_y"] += (cur_xy[1] - prev_xy[1]) / y_span
+                                                if (abs(tp_state["acc_y"]) >= 0.015 or abs(tp_state["acc_x"]) >= 0.015) and (now_ns - last_wheel_ns[0]) > 50_000_000:
+                                                    self._queue.put(
+                                                        RawInputEvent(
+                                                            now_ns,
+                                                            "wheel",
+                                                            screen_xy=_cursor_xy(),
+                                                            wheel_delta=(round(tp_state["acc_x"] * 25.0, 2), round(-tp_state["acc_y"] * 25.0, 2)),
+                                                        )
+                                                    )
+                                                    tp_state["acc_x"] = 0.0
+                                                    tp_state["acc_y"] = 0.0
+                                            tp_state["prev_xy"] = cur_xy
+                                            tp_state["prev_ns"] = now_ns
                         elif raw.header.dwType == RIM_TYPEKEYBOARD:
                             rk = raw.data.keyboard
                             vk = int(rk.VKey)
@@ -814,16 +982,21 @@ class Win32RawInputListener:
             return
 
         self._hwnd = int(hwnd)
-        devices = (RAWINPUTDEVICE * 2)()
+        devices = (RAWINPUTDEVICE * 3)()
         devices[0] = RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd)  # Mouse
         devices[1] = RAWINPUTDEVICE(0x01, 0x06, RIDEV_INPUTSINK, hwnd)  # Keyboard
-        if not user32.RegisterRawInputDevices(devices, 2, ctypes.sizeof(RAWINPUTDEVICE)):
-            err_code = ctypes.get_last_error()
-            user32.DestroyWindow(hwnd)
-            user32.UnregisterClassW(cls_name, h_inst)
-            self._error = OSError(f"RegisterRawInputDevices failed (err={err_code}).")
-            self._ready_event.set()
-            return
+        devices[2] = RAWINPUTDEVICE(0x0D, 0x05, RIDEV_INPUTSINK, hwnd)  # Precision Touchpad
+        if not user32.RegisterRawInputDevices(devices, 3, ctypes.sizeof(RAWINPUTDEVICE)):
+            devices2 = (RAWINPUTDEVICE * 2)()
+            devices2[0] = devices[0]
+            devices2[1] = devices[1]
+            if not user32.RegisterRawInputDevices(devices2, 2, ctypes.sizeof(RAWINPUTDEVICE)):
+                err_code = ctypes.get_last_error()
+                user32.DestroyWindow(hwnd)
+                user32.UnregisterClassW(cls_name, h_inst)
+                self._error = OSError(f"RegisterRawInputDevices failed (err={err_code}).")
+                self._ready_event.set()
+                return
 
         mouse_ll_cb = HOOKPROC(_mouse_ll_proc)
         wheel_hook[0] = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_ll_cb, None, 0)
