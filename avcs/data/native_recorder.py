@@ -650,6 +650,20 @@ class Win32RawInputListener:
         class RAWINPUT(ctypes.Structure):
             _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUT_UNION)]
 
+        class MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("pt", wintypes.POINT),
+                ("mouseData", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        WH_MOUSE_LL = 14
+        WM_MOUSEWHEEL = 0x020A
+        WM_MOUSEHWHEEL = 0x020E
+        HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
         kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
         user32.RegisterClassExW.argtypes = [ctypes.c_void_p]
@@ -681,12 +695,32 @@ class Win32RawInputListener:
         user32.RegisterRawInputDevices.restype = wintypes.BOOL
         user32.GetPhysicalCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
         user32.GetPhysicalCursorPos.restype = wintypes.BOOL
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+        user32.SetWindowsHookExW.restype = wintypes.HANDLE
+        user32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+        user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+        user32.CallNextHookEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        user32.CallNextHookEx.restype = LRESULT
+
+        wheel_hook: List[Any] = [None]
 
         def _cursor_xy() -> Tuple[int, int]:
             pt = wintypes.POINT()
             if user32.GetPhysicalCursorPos(ctypes.byref(pt)):
                 return int(pt.x), int(pt.y)
             return (0, 0)
+
+        def _mouse_ll_proc(n_code: int, wparam: int, lparam: int) -> int:
+            if n_code >= 0 and wparam in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL) and lparam:
+                now_ns = time.perf_counter_ns()
+                ms = ctypes.cast(ctypes.c_void_p(int(lparam) & 0xFFFFFFFFFFFFFFFF), ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                signed_delta = ctypes.c_short((int(ms.mouseData) >> 16) & 0xFFFF).value / 120.0
+                xy = _cursor_xy()
+                if wparam == WM_MOUSEWHEEL:
+                    self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(0.0, float(signed_delta))))
+                else:
+                    self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(float(signed_delta), 0.0)))
+            return int(user32.CallNextHookEx(wheel_hook[0], n_code, wparam, lparam))
 
         def _wnd_proc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
             if msg == WM_INPUT:
@@ -712,10 +746,10 @@ class Win32RawInputListener:
                                 self._queue.put(RawInputEvent(now_ns, "right_down", screen_xy=xy))
                             if flags & RI_MOUSE_RIGHT_BUTTON_UP:
                                 self._queue.put(RawInputEvent(now_ns, "right_up", screen_xy=xy))
-                            if flags & RI_MOUSE_WHEEL:
+                            if (flags & RI_MOUSE_WHEEL) and not wheel_hook[0]:
                                 signed_delta = ctypes.c_short(rm.u.buttons.usButtonData).value / 120.0
                                 self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(0.0, float(signed_delta))))
-                            if flags & RI_MOUSE_HWHEEL:
+                            if (flags & RI_MOUSE_HWHEEL) and not wheel_hook[0]:
                                 signed_delta = ctypes.c_short(rm.u.buttons.usButtonData).value / 120.0
                                 self._queue.put(RawInputEvent(now_ns, "wheel", screen_xy=xy, wheel_delta=(float(signed_delta), 0.0)))
                             if not (flags & 0x0FFF) and (rm.lLastX != 0 or rm.lLastY != 0):
@@ -791,11 +825,21 @@ class Win32RawInputListener:
             self._ready_event.set()
             return
 
+        mouse_ll_cb = HOOKPROC(_mouse_ll_proc)
+        wheel_hook[0] = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_ll_cb, None, 0)
+
         self._ready_event.set()
         msg_struct = wintypes.MSG()
         while not self._stop_event.is_set() and user32.GetMessageW(ctypes.byref(msg_struct), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg_struct))
             user32.DispatchMessageW(ctypes.byref(msg_struct))
+
+        if wheel_hook[0]:
+            try:
+                user32.UnhookWindowsHookEx(wheel_hook[0])
+            except Exception:
+                pass
+            wheel_hook[0] = None
 
         try:
             user32.UnregisterClassW(cls_name, h_inst)
